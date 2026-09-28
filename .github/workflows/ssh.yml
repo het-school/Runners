@@ -15,34 +15,55 @@ jobs:
     timeout-minutes: 360 # hard cap for GitHub-hosted runners (6 hours)
     permissions:
       contents: read
+      statuses: write
+    env:
+      PORT: 42022 # public port asked for on bore.pub; a random one is used if it's taken
     steps:
       - name: Start SSH server
         env:
           PASS: ${{ secrets.SSH_PASSWORD }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
         run: |
           echo "START=$(date +%s)" >> "$GITHUB_ENV"
           [ -n "$PASS" ] || { echo "::error::Add an SSH_PASSWORD repository secret first."; exit 1; }
+          [ -n "$HOST_KEY" ] || { echo "::error::Add an SSH_HOST_KEY repository secret first."; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server > /dev/null
           echo "root:$PASS" | sudo chpasswd
+          # Same host key every run, so an SSH client can tell it's really this runner behind the relay.
+          printf '%s\n' "$HOST_KEY" | sudo tee /etc/ssh/ssh_host_runner_key > /dev/null
+          sudo chmod 600 /etc/ssh/ssh_host_runner_key
           # 00- so it's read before the image's own sshd_config.d files; sshd keeps the first value it sees.
-          printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'AllowUsers root' 'MaxAuthTries 3' \
+          printf '%s\n' 'HostKey /etc/ssh/ssh_host_runner_key' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'AllowUsers root' 'MaxAuthTries 3' \
             | sudo tee /etc/ssh/sshd_config.d/00-runner.conf > /dev/null
           sudo systemctl restart ssh
 
-      - name: Connect Cloudflare tunnel
+      - name: Open tunnel
         env:
-          TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # The "runner" tunnel sends vm.billybishop4-workers.xyz to this machine's SSH server.
-          # Clients need cloudflared as their ssh ProxyCommand to reach it.
-          docker run -d --name tunnel --network host -e TUNNEL_TOKEN cloudflare/cloudflared:latest \
-            tunnel --no-autoupdate run
-          for i in $(seq 30); do
-            docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' && break
-            sleep 2
+          # bore.pub relays a public port to this machine's SSH server; clients need nothing but ssh.
+          up() { docker logs tunnel 2>&1 | grep -q 'listening at'; }
+          docker run -d --name tunnel --network host ekzhang/bore local 22 --to bore.pub --port "$PORT"
+          for i in $(seq 20); do
+            up && break
+            [ "$(docker inspect -f '{{.State.Running}}' tunnel)" = true ] || break
+            sleep 1
           done
-          docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' || { docker logs tunnel; exit 1; }
-          echo "Connect with: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' root@vm.billybishop4-workers.xyz"
+          if ! up; then
+            echo "::warning::bore.pub port $PORT not available ($(docker logs tunnel 2>&1 | tail -1)); using a random port"
+            docker rm -f tunnel > /dev/null
+            docker run -d --name tunnel --network host ekzhang/bore local 22 --to bore.pub
+            for i in $(seq 20); do up && break; sleep 1; done
+          fi
+          up || { docker logs tunnel; exit 1; }
+          docker update --restart always tunnel > /dev/null
+          addr=$(docker logs tunnel 2>&1 | grep -oE 'bore\.pub:[0-9]+' | head -1)
+          cmd="ssh -p ${addr#bore.pub:} root@bore.pub"
+          echo "$cmd"
+          # Logs aren't readable until the job ends, so also post the command as a commit
+          # status: it shows next to the latest commit on the repo page right away.
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context="Ubuntu SSH" \
+            -f description="$cmd" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
 
       - name: Keep alive
         run: |
