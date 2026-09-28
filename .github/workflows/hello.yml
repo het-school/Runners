@@ -1,0 +1,46 @@
+name: hello
+run-name: Hello world via Cloudflare tunnel
+
+on:
+  workflow_dispatch:
+
+# Starting a new run cancels the one already running.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # hard cap for GitHub-hosted runners (6 hours)
+    steps:
+      - name: Start hello world + Cloudflare tunnel
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+        run: |
+          echo "START=$(date +%s)" >> "$GITHUB_ENV"
+          # Both containers share one Docker network; the tunnel reaches the app as http://hello:8000.
+          docker network create web
+          docker run -d --name hello --network web crccheck/hello-world
+          docker run -d --name tunnel --network web -e TUNNEL_TOKEN cloudflare/cloudflared:latest \
+            tunnel --no-autoupdate run
+          for i in $(seq 30); do
+            docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' && break
+            sleep 2
+          done
+          docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' || { docker logs tunnel; exit 1; }
+          echo "Live at https://hello.billybishop4-workers.xyz"
+
+      - name: Keep alive
+        run: |
+          # Finish 5 minutes before the 6-hour cap so the job ends green instead of being killed.
+          end=$(( START + 355 * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            for c in hello tunnel; do
+              if [ "$(docker inspect -f '{{.State.Running}}' "$c")" != "true" ]; then
+                echo "::error::$c stopped"; docker logs --tail 50 "$c"; exit 1
+              fi
+            done
+            echo "alive at $(date -u +%H:%M:%S) UTC, $(( (end - $(date +%s)) / 60 )) min left"
+            sleep 60
+          done
