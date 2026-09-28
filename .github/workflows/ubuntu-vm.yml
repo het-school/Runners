@@ -43,6 +43,13 @@ jobs:
             sleep 2
           done
           [ -n "$url" ] || { docker logs tunnel; exit 1; }
+          # Wait until the name is in DNS before sharing it: a resolver asked too early caches
+          # "not found" for a while. Ask the authoritative server, which doesn't cache.
+          ns=$(dig +short NS trycloudflare.com | head -1)
+          for i in $(seq 30); do
+            [ -n "$(dig +short "@$ns" "${url#https://}" A)" ] && break
+            sleep 2
+          done
           echo "Ubuntu VM: $url"
           # Logs and annotations aren't readable until the job ends, so also post the link
           # as a commit status: it shows next to the latest commit on the repo page right away.
