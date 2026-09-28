@@ -38,8 +38,8 @@ jobs:
             sleep 2
           done
           [ -n "$url" ] || { docker logs tunnel; exit 1; }
-          echo "Ubuntu VM: $url"
-          echo "## Ubuntu VM: $url" >> "$GITHUB_STEP_SUMMARY"
+          # A notice shows at the top of the run page while the job is still running.
+          echo "::notice title=Ubuntu VM::$url"
 
       - name: Keep alive
         run: |
