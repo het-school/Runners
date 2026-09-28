@@ -13,6 +13,9 @@ jobs:
   vm:
     runs-on: ubuntu-latest
     timeout-minutes: 360 # hard cap for GitHub-hosted runners (6 hours)
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - name: Start Ubuntu VM
         env:
@@ -29,6 +32,8 @@ jobs:
             qemux/qemu
 
       - name: Open tunnel
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           docker run -d --name tunnel --network host cloudflare/cloudflared:latest \
             tunnel --no-autoupdate --url http://localhost:8006
@@ -38,8 +43,11 @@ jobs:
             sleep 2
           done
           [ -n "$url" ] || { docker logs tunnel; exit 1; }
-          # A notice shows at the top of the run page while the job is still running.
-          echo "::notice title=Ubuntu VM::$url"
+          echo "Ubuntu VM: $url"
+          # Logs and annotations aren't readable until the job ends, so also post the link
+          # as a commit status: it shows next to the latest commit on the repo page right away.
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context="Ubuntu VM" \
+            -f description="Open the VM (user: ubuntu)" -f target_url="$url" > /dev/null
 
       - name: Keep alive
         run: |
