@@ -23,9 +23,9 @@ jobs:
           echo "START=$(date +%s)" >> "$GITHUB_ENV"
           [ -n "$PASS" ] || { echo "::error::Add an SSH_PASSWORD repository secret first."; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server > /dev/null
-          echo "runner:$PASS" | sudo chpasswd
+          echo "root:$PASS" | sudo chpasswd
           # 00- so it's read before the image's own sshd_config.d files; sshd keeps the first value it sees.
-          printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'AllowUsers runner' 'MaxAuthTries 3' \
+          printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'AllowUsers root' 'MaxAuthTries 3' \
             | sudo tee /etc/ssh/sshd_config.d/00-runner.conf > /dev/null
           sudo systemctl restart ssh
 
@@ -42,7 +42,7 @@ jobs:
             sleep 2
           done
           docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' || { docker logs tunnel; exit 1; }
-          echo "Connect with: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' runner@vm.billybishop4-workers.xyz"
+          echo "Connect with: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' root@vm.billybishop4-workers.xyz"
 
       - name: Keep alive
         run: |
