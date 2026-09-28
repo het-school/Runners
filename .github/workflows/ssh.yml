@@ -34,7 +34,7 @@ jobs:
           TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
         run: |
           # The "runner" tunnel sends vm.billybishop4-workers.xyz to this machine's SSH server.
-          # The VPS relays port 2222 into it, so clients connect with plain ssh.
+          # Clients need cloudflared as their ssh ProxyCommand to reach it.
           docker run -d --name tunnel --network host -e TUNNEL_TOKEN cloudflare/cloudflared:latest \
             tunnel --no-autoupdate run
           for i in $(seq 30); do
@@ -42,7 +42,7 @@ jobs:
             sleep 2
           done
           docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' || { docker logs tunnel; exit 1; }
-          echo "Connect with: ssh -p 2222 runner@billybishop4-workers.xyz"
+          echo "Connect with: ssh -o ProxyCommand='cloudflared access ssh --hostname %h' runner@vm.billybishop4-workers.xyz"
 
       - name: Keep alive
         run: |
