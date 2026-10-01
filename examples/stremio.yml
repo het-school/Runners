@@ -1,0 +1,11 @@
+# Stremio streaming server (https://github.com/Stremio/server-docker),
+# online at https://stremio-<n>.billybishop4-workers.xyz on every machine.
+x-runner:
+  port: 11470
+services:
+  server:
+    image: stremio/server:latest
+    ports: ["11470:11470"]
+    environment:
+      NO_CORS: "1" # lets any Stremio client (web.stremio.com, apps) use it
+    restart: unless-stopped

@@ -1,0 +1,34 @@
+# Control plane: project specs, rolling updates, machine health, DNS.
+# Deploy from control/: wrangler deploy (secrets: ADMIN_TOKEN, NODE_TOKEN, CF_DNS_TOKEN).
+name = "runner-control"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = false
+routes = [{ pattern = "control.billybishop4-workers.xyz", custom_domain = true }]
+
+[vars]
+REPO = "hetp4401/runner"
+DOMAIN = "billybishop4-workers.xyz"
+ZONE = "44fb65648f475249f22e9d0cffdd393d"
+MACHINES = "10"
+
+# Machine n connects Cloudflare tunnel runner-n, so <project>-n points here.
+[vars.TUNNELS]
+1 = "01c5614e-3f28-4dea-93c4-ba393e89eed9"
+2 = "66fc9536-567f-47f2-9569-6b7a37b6871b"
+3 = "abc6513f-511d-4c6c-9a97-a58aaae4e176"
+4 = "508cdc25-c10b-4bdc-ad24-beeee99bb21a"
+5 = "038c61c8-c641-4a48-84b1-20ccf11ff1ae"
+6 = "82b0099d-1ecb-4c9e-a5b5-b8f623df39be"
+7 = "135cd528-39ec-4c09-80a6-d687075cad6c"
+8 = "491f6482-2104-496b-a405-799f77a2d46c"
+9 = "adc43095-182d-42ab-aeab-64f7edff9dbf"
+10 = "790ed9fb-448b-43a3-a4f4-862fa52a75de"
+
+[[durable_objects.bindings]]
+name = "CONTROL"
+class_name = "Control"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Control"]

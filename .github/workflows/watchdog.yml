@@ -1,0 +1,32 @@
+name: watchdog
+
+# Starts machines that should be running but aren't. Running machines already restart each other
+# within a couple of minutes; this covers the first start and the case where none are left.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+
+permissions:
+  actions: write # start machine runs
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start missing machines
+        env:
+          CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          start=$(curl -sSf -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
+            https://control.billybishop4-workers.xyz/api/claim | jq -r '.start[]')
+          for m in $start; do
+            gh workflow run machine.yml -R "$GITHUB_REPOSITORY" -f machine="$m" && echo "started machine $m"
+          done
+          [ -n "$start" ] || echo "every machine is running"

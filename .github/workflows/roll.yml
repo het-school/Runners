@@ -1,0 +1,19 @@
+name: roll
+
+# The agent changed: replace the machines one at a time so they all run the new code.
+on:
+  push:
+    branches: [main]
+    paths: ["agent/**", ".github/workflows/machine.yml"]
+  workflow_dispatch:
+
+jobs:
+  roll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask the control plane for a rolling restart
+        env:
+          CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
+        run: |
+          curl -sSf -X POST -H "Authorization: Bearer $CONTROL_TOKEN" https://control.billybishop4-workers.xyz/api/roll

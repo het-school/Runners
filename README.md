@@ -1,32 +1,59 @@
 # runner
 
-Runs projects on 10 GitHub Actions machines at once and puts each machine online through its own Cloudflare tunnel.
+A self-healing fleet on GitHub Actions: 10 machines each run every project, each machine is online through its own Cloudflare tunnel, and the project specs live in a control plane on Cloudflare (not in this repo).
+
+**Status page:** https://control.billybishop4-workers.xyz
+
+## How it works
+
+- **Control plane** ([`control/`](control)): a Cloudflare Worker with a Durable Object (its own SQLite database). It:
+  - holds every project's spec and version history
+  - rolls each change out one machine at a time, and stops and rolls back if a machine reports the new version unhealthy
+  - tracks which machines are up and hands out restarts
+  - keeps the DNS for `<project>-<n>` pointed at tunnel `runner-<n>`
+- **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), run by [`machine.yml`](.github/workflows/machine.yml) on every machine. It:
+  - checks in every 20 seconds
+  - starts, updates and removes compose projects to match its spec
+  - restarts projects that stop answering
+  - serves `https://<project>-<n>.billybishop4-workers.xyz` through a local router behind the tunnel
+- **Self-healing**:
+  - Before GitHub's 6-hour limit, each machine starts a fresh run of itself and leaves once the new one is healthy. This happens one machine at a time.
+  - If a machine dies, the others start a replacement within about 2 minutes.
+  - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left. It also does the first start.
 
 ## Projects
 
-A project is a top-level folder with a `run.sh`, the same idea as `deploy.sh` in my_apps. Every machine runs every project.
+A project is a docker compose file. `x-runner.port` is the port to put online:
+
+```yaml
+x-runner:
+  port: 11470
+services:
+  server:
+    image: stremio/server:latest
+    ports: ["11470:11470"]
+    environment:
+      NO_CORS: "1"
+    restart: unless-stopped
+```
+
+For a custom image, give the service a `build:` with `dockerfile_inline:` or a git repo URL as the context. Every machine builds it when the spec changes. Ports 2019 and 19080 are taken by the router.
+
+Manage projects with [`bin/runnerctl`](bin/runnerctl). It reads the admin token from `~/.config/runnerctl/token`.
 
 ```
-<project>/
-  run.sh       required: any bash, run from inside the folder (docker run -d ..., docker compose up -d, ...)
-  port         optional: local port to put online at https://<project>-<machine>.billybishop4-workers.xyz
-  Dockerfile   optional: built as <project>:latest before run.sh runs
+runnerctl apply examples/stremio.yml         # add or update; rolls out machine by machine
+runnerctl apply examples/stremio.yml --now   # update every machine at once
+runnerctl status
+runnerctl get stremio
+runnerctl rm stremio
+runnerctl roll [n]                           # replace machines one at a time (done automatically when agent/ changes)
+runnerctl machines 10
 ```
 
-- Machine `n` serves `<project>-n`, so `stremio/` is online at https://stremio-1.billybishop4-workers.xyz through https://stremio-10.billybishop4-workers.xyz.
-- `run.sh` can read `$MACHINE` (1–10) if a machine needs to do something differently.
-- The folder name becomes the hostname, so stick to `a-z`, `0-9` and `-`.
-- Publish the port on the runner (`-p 11470:11470`); the tunnel reaches it at `localhost:<port>`.
-- To give `run.sh` a repo secret, add it by name to the `env:` of the **Start projects** step in [`run.yml`](.github/workflows/run.yml) (`NAME: ${{ secrets.NAME }}`). Passing all secrets at once gets the workflow flagged as malicious by GitHub.
+## Setup notes
 
-## Running
-
-- Every push to `main` starts all projects on all 10 machines.
-- **Actions → run → Run workflow** does the same, or runs only the folders you list.
-- A run lasts just under 6 hours (GitHub's limit). Starting a new run replaces the current one.
-
-## Tunnels and DNS
-
-Machine `n` connects Cloudflare tunnel `runner-n` with the `CF_TUNNEL_TOKEN_n` secret. The tunnels are locally managed: the workflow writes each one's routes from the projects' `port` files. Each machine then creates (or removes) the DNS records for its hostnames with `CF_DNS_TOKEN`, a Cloudflare token that can only edit this domain's DNS. A new project needs no Cloudflare change.
-
-More machines: add the number to `matrix.machine` in `run.yml`, and create tunnel `runner-n` with its token in `CF_TUNNEL_TOKEN_n`. GitHub Free runs up to 20 jobs at once.
+- **Repo secrets:** `CONTROL_NODE_TOKEN`, plus `CF_TUNNEL_TOKEN_1` to `CF_TUNNEL_TOKEN_10`.
+- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_DNS_TOKEN`. To deploy, run `wrangler deploy` in `control/`.
+- **More machines:** create tunnel `runner-<n>`, add its `CF_TUNNEL_TOKEN_<n>` secret and its ID in `control/wrangler.toml`, deploy, then run `runnerctl machines <n>`. GitHub Free runs 20 jobs at once, and a replacement overlaps the run it replaces, so stay at about 18 or fewer.
+- **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

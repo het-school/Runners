@@ -1,0 +1,8 @@
+# Stock nginx serving its default welcome page, at https://nginx-<n>.billybishop4-workers.xyz.
+x-runner:
+  port: 8080
+services:
+  web:
+    image: nginx:latest
+    ports: ["8080:80"]
+    restart: unless-stopped
