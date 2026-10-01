@@ -17,6 +17,9 @@ CONTROL_HOST = "control.billybishop4-workers.xyz"
 ACCOUNT_ID = "8eaec409542ced2fc62e1b31228e8f85"
 SCRIPT_NAME = "runner-control"
 MAX_SLOTS = "50" # tunnels runner-1..runner-50 are made as slots are first used
+# Stateful projects keep their data in this R2 bucket (secrets FS_ACCESS_KEY_ID / FS_SECRET_ACCESS_KEY: a token limited to it).
+FS_BUCKET = "runner-fs"
+FS_ENDPOINT = "https://8eaec409542ced2fc62e1b31228e8f85.r2.cloudflarestorage.com"
 
 
 [[durable_objects.bindings]]

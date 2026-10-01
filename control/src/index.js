@@ -39,7 +39,14 @@ const ROOM_MEM = 80;
 const SPREAD_GAP = 2;
 const COOLDOWN_MS = 10 * 60_000;
 const PROJECT_COOLDOWN_MS = 30 * 60_000;
-const SETTLED_MS = 5 * 60_000; // a machine takes part once it's been up this long // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
+const SETTLED_MS = 5 * 60_000; // a machine takes part once it's been up this long
+// Stateful projects: each replica has its own directory in the fleet's R2 bucket, mounted on whichever machine runs
+// it (see the agent). Its size is a limit on what the replica may keep there.
+const STORAGE_DEFAULT_MB = 100;
+const STORAGE_MAX_MB = 500;
+const MOUNT_ROOT = "/var/lib/runner/mounts"; // on every machine: the replica's data is mounted here and bound into its containers
+const STOP_FIRST_WAIT_MS = 2 * 60_000; // a stateful copy told to stop gets this long before its replacement starts anyway
+const USAGE_EVERY_MS = 5 * 60_000; // how often R2 usage is measured // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
 // Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
 // and rolled up into 10-minute rows for the longer views.
 const MIN = 60_000;
@@ -118,7 +125,7 @@ function joinPath(...parts) {
 // one-service compose file. Rejects anything that would only fail later on a machine.
 function buildSpec(body) {
   if (!isMap(body)) throw new HttpError(400, "send a JSON object");
-  let { compose = "", dockerfile = null, files = {}, port = null, replicas = null } = body;
+  let { compose = "", dockerfile = null, files = {}, port = null, replicas = null, state = null, data = null, storage = null } = body;
   if (typeof compose !== "string") throw new HttpError(400, "compose must be the compose file as text");
   if (!isMap(files)) throw new HttpError(400, "files must be an object of path: content");
   files = { ...files };
@@ -146,13 +153,49 @@ function buildSpec(body) {
     return n;
   };
   replicas = parseReplicas(replicas, "replicas");
+  const parseState = (x, where) => {
+    if (x === null || x === undefined || x === "") return null;
+    if (x === "stateless" || x === false) return 0;
+    if (x === "stateful" || x === true) return 1;
+    throw new HttpError(400, `${where} must be "stateless" or "stateful"`);
+  };
+  const parseData = (x, where) => {
+    if (x === null || x === undefined || x === "") return null;
+    if (typeof x !== "string" || !x.startsWith("/") || x.split("/").includes("..") || x.length > 200) {
+      throw new HttpError(400, `${where} must be an absolute path inside the container, like /data`);
+    }
+    const path = x.replace(/\/+$/, "");
+    if (!path) throw new HttpError(400, `${where} can't be / itself`);
+    return path;
+  };
+  // "200M", "0.5G", "150MB" or a number of megabytes.
+  const parseStorage = (x, where) => {
+    if (x === null || x === undefined || x === "") return null;
+    let mb;
+    if (typeof x === "number") mb = x;
+    else {
+      const m = String(x).trim().match(/^(\d+(?:\.\d+)?)\s*([kmg]?)(?:i?b)?$/i);
+      if (!m) throw new HttpError(400, `${where} must be a size like 200M or a number of megabytes`);
+      const unit = m[2].toLowerCase();
+      mb = Number(m[1]) * (unit === "k" ? 1 / 1024 : unit === "g" ? 1024 : 1);
+    }
+    mb = Math.ceil(mb);
+    if (!(mb >= 1 && mb <= STORAGE_MAX_MB)) throw new HttpError(400, `${where} must be between 1M and ${STORAGE_MAX_MB}M`);
+    return mb;
+  };
+  state = parseState(state, "state");
+  data = parseData(data, "data");
+  storage = parseStorage(storage, "storage");
   if (!compose.trim()) {
     if (!files.Dockerfile) throw new HttpError(400, "send a compose file, a Dockerfile, or both");
     // A Dockerfile on its own: build it and publish the port (the app should listen on it inside the container).
     compose = [
-      ...(port || replicas !== null ? ["x-runner:"] : []),
+      ...(port || replicas !== null || state || data || storage ? ["x-runner:"] : []),
       ...(port ? [`  port: ${port}`] : []),
       ...(replicas !== null ? [`  replicas: ${replicas === REPLICAS_ALL ? "all" : replicas}`] : []),
+      ...(state ? ["  state: stateful"] : []),
+      ...(data ? [`  data: ${data}`] : []),
+      ...(storage ? [`  storage: ${storage}M`] : []),
       "services:",
       "  app:",
       "    build: .",
@@ -175,6 +218,23 @@ function buildSpec(body) {
     throw new HttpError(400, "x-runner.port must be a whole number from 1 to 65535");
   }
   replicas ??= parseReplicas(doc["x-runner"]?.replicas, "x-runner.replicas") ?? 1;
+  const xr = isMap(doc["x-runner"]) ? doc["x-runner"] : {};
+  state ??= parseState(xr.state, "x-runner.state") ?? 0;
+  data ??= parseData(xr.data, "x-runner.data");
+  storage ??= parseStorage(xr.storage, "x-runner.storage");
+  if (state) {
+    if (!data) throw new HttpError(400, "a stateful project needs data: the directory in the container where it keeps its state, like /data");
+    storage ??= STORAGE_DEFAULT_MB;
+    // The data directory is mounted into every service, so nothing else may be mounted there.
+    for (const [service, def] of Object.entries(doc.services)) {
+      for (const v of (isMap(def) && Array.isArray(def.volumes) ? def.volumes : [])) {
+        const target = typeof v === "string" ? (v.split(":")[1] ?? v.split(":")[0]) : isMap(v) ? v.target : null;
+        if (target && target.replace(/\/+$/, "") === data) throw new HttpError(400, `service ${service} already mounts something at ${data}, where the state directory goes`);
+      }
+    }
+  } else {
+    if (data || storage) throw new HttpError(400, "data and storage only apply to a stateful project (state: stateful)");
+  }
   // Every service that builds from a local folder needs its Dockerfile among the files.
   for (const [service, def] of Object.entries(doc.services)) {
     if (!isMap(def) || def.build == null) continue;
@@ -189,7 +249,18 @@ function buildSpec(body) {
     }
   }
   const sorted = Object.fromEntries(Object.keys(files).sort().map((k) => [k, files[k]]));
-  return { compose, port, replicas, files: sorted };
+  return { compose, port, replicas, files: sorted, stateful: state, data, storage };
+}
+
+// The compose file a machine runs for a stateful replica: the user's, with the replica's data directory (mounted
+// by the agent at mountPath) bound into every service at the project's data path.
+function renderStateful(spec, mountPath) {
+  const doc = YAML.parse(spec.compose);
+  for (const def of Object.values(doc.services)) {
+    if (!isMap(def)) continue;
+    def.volumes = [...(Array.isArray(def.volumes) ? def.volumes : []), { type: "bind", source: mountPath, target: spec.data }];
+  }
+  return YAML.stringify(doc);
 }
 
 // ---- shared URLs: <project>.DOMAIN goes to a machine where the project is healthy ----
@@ -269,7 +340,7 @@ DATA=\${RUNNER_DATA:-/var/lib/runner}
 command -v docker >/dev/null 2>&1 || { echo "Install Docker first: https://docs.docker.com/engine/install/" >&2; exit 1; }
 mkdir -p "$DATA"
 docker rm -f runner-agent >/dev/null 2>&1 || true
-docker run -d --name runner-agent --restart unless-stopped --network host --hostname "$(hostname)" \\
+docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --network host --hostname "$(hostname)" \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
   -e CONTROL_URL=${origin} -e CONTROL_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
   docker:cli sh -c '
@@ -323,6 +394,11 @@ export class Control extends DurableObject {
     if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
     if (!columns("versions").has("replicas")) this.sql.exec("ALTER TABLE versions ADD COLUMN replicas INTEGER");
     if (!columns("placements").has("leaving")) this.sql.exec("ALTER TABLE placements ADD COLUMN leaving TEXT");
+    if (!columns("placements").has("ordinal")) this.sql.exec("ALTER TABLE placements ADD COLUMN ordinal INTEGER");
+    const versionColumns = columns("versions");
+    if (!versionColumns.has("stateful")) this.sql.exec("ALTER TABLE versions ADD COLUMN stateful INTEGER");
+    if (!versionColumns.has("data")) this.sql.exec("ALTER TABLE versions ADD COLUMN data TEXT");
+    if (!versionColumns.has("storage")) this.sql.exec("ALTER TABLE versions ADD COLUMN storage INTEGER");
     const runColumns = columns("runs");
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'github'");
@@ -335,10 +411,21 @@ export class Control extends DurableObject {
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
     this.placements = new Map(); // project -> Map(machine -> { since, reason })
-    for (const x of this.all("SELECT * FROM placements")) {
+    for (const x of this.all("SELECT * FROM placements ORDER BY since")) {
       (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name))
-        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null });
+        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null, ordinal: x.ordinal });
     }
+    // Replicas have had ordinals (which say whose data is whose) since stateful projects; older placements get them now.
+    for (const [name, placed] of this.placements) {
+      for (const [machine, x] of placed) {
+        if (x.ordinal == null) {
+          x.ordinal = this.freeOrdinal(name);
+          this.savePlacement(name, machine, x);
+        }
+      }
+    }
+    this.usage = new Map(Object.entries(JSON.parse(this.settings.get("usage") ?? "{}"))); // project -> { at, total, replicas: { r0: bytes } }
+    this.renders = new Map(); // "name@v@mount" -> compose text
     this.bootAt = Date.now();
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
     this.lastRebalance = 0;
@@ -390,8 +477,11 @@ export class Control extends DurableObject {
   version(name, v) {
     const key = `${name}@${v}`;
     if (!this.versions.has(key)) {
-      const row = this.all("SELECT compose, port, files, replicas FROM versions WHERE name = ? AND version = ?", name, v)[0];
-      this.versions.set(key, row && { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}") });
+      const row = this.all("SELECT compose, port, files, replicas, stateful, data, storage FROM versions WHERE name = ? AND version = ?", name, v)[0];
+      this.versions.set(key, row && {
+        compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}"),
+        stateful: Boolean(row.stateful), data: row.data ?? null, storage: row.stateful ? row.storage ?? STORAGE_DEFAULT_MB : null,
+      });
     }
     return this.versions.get(key);
   }
@@ -475,11 +565,12 @@ export class Control extends DurableObject {
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const ev = route.match(/^\/machines\/(\d+)\/evict$/);
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
-    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move))?$/);
+    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|wipe))?$/);
     if (m) {
       need(admin);
       const [, name, action] = m;
       if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
+      if (action === "wipe" && method === "POST") return json(await this.wipe(name, url.searchParams.get("replica")));
       if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
       if (!action && method === "PUT") return json(this.putProject(name, await body()));
@@ -494,8 +585,9 @@ export class Control extends DurableObject {
   describe(p) {
     const latest = this.version(p.name, p.version);
     const replicas = latest?.replicas ?? 1;
-    const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x })).sort((a, b) => a.machine - b.machine);
+    const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x, replica: `r${x.ordinal}` })).sort((a, b) => a.machine - b.machine);
     const staying = placed.filter((x) => !x.leaving).length;
+    const usage = this.usage.get(p.name) ?? null;
     return {
       name: p.name,
       version: p.version,
@@ -504,6 +596,11 @@ export class Control extends DurableObject {
       replicas: replicas === REPLICAS_ALL ? "all" : replicas,
       placed, // the machines it's placed on (empty when replicas is "all": then it's every machine); leaving = being moved away
       staying,
+      state: latest?.stateful ? "stateful" : "stateless",
+      data: latest?.data ?? null,
+      storage: latest?.storage ?? null, // MB per replica
+      usage, // { at, total, replicas: { r0: bytes, ... } } from the last R2 scan, for stateful projects
+      over: latest?.stateful ? Object.entries(usage?.replicas ?? {}).filter(([, b]) => b > latest.storage * 1048576).map(([id]) => id) : [],
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
       state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
@@ -530,8 +627,11 @@ export class Control extends DurableObject {
       files: spec.files,
       port: spec.port,
       replicas: spec.replicas === REPLICAS_ALL ? "all" : spec.replicas,
-      versions: this.all("SELECT version, port, replicas, created FROM versions WHERE name = ? ORDER BY version", name)
-        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1 })),
+      state: spec.stateful ? "stateful" : "stateless",
+      data: spec.data,
+      storage: spec.storage,
+      versions: this.all("SELECT version, port, replicas, stateful, storage, created FROM versions WHERE name = ? ORDER BY version", name)
+        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1, state: v.stateful ? "stateful" : "stateless" })),
     };
   }
 
@@ -539,11 +639,13 @@ export class Control extends DurableObject {
   putProject(name, body) {
     if (!NAME.test(name)) throw new HttpError(400, "project names are lowercase letters, digits and dashes");
     const spec = buildSpec(body);
+    if (spec.stateful && !this.storageConfigured()) throw new HttpError(400, "the fleet's storage (R2) isn't set up yet, so projects can't be stateful");
     const t = Date.now();
     const machines = this.machines();
     const p = this.projects.get(name);
     const latest = p && this.version(name, p.version);
     const same = latest && latest.compose === spec.compose && latest.port === spec.port && latest.replicas === spec.replicas &&
+      latest.stateful === Boolean(spec.stateful) && latest.data === spec.data && latest.storage === spec.storage &&
       JSON.stringify(latest.files) === JSON.stringify(spec.files);
     let next;
     if (same) {
@@ -553,8 +655,8 @@ export class Control extends DurableObject {
     } else {
       const version = (p?.version ?? 0) + 1;
       this.sql.exec(
-        "INSERT INTO versions (name, version, compose, port, files, replicas, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        name, version, spec.compose, spec.port, JSON.stringify(spec.files), spec.replicas, t,
+        "INSERT INTO versions (name, version, compose, port, files, replicas, stateful, data, storage, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        name, version, spec.compose, spec.port, JSON.stringify(spec.files), spec.replicas, spec.stateful, spec.data, spec.storage, t,
       );
       next = {
         name, version, stable: version, rollout: machines, halted: null,
@@ -621,22 +723,81 @@ export class Control extends DurableObject {
 
   // What machine n should run: every enabled project placed on it (or placed everywhere), at its latest version,
   // or the last good one if the latest is halted. Disabled projects run nowhere.
-  desiredFor(machine) {
+  // What a run should have running: every enabled project placed on its machine (or placed everywhere), at its latest
+  // version, or the last good one if the latest is halted. Disabled projects run nowhere. A stateful project also
+  // waits until an older run on the same machine (the one it's taking over from) has stopped it, so its data is
+  // never mounted twice.
+  desiredFor(r, now = Date.now()) {
     const out = {};
     for (const p of this.projects.values()) {
-      if (!p.enabled || !this.runsOn(p.name, machine)) continue;
+      if (!p.enabled || !this.runsOn(p.name, r.machine)) continue;
       const v = p.halted ? p.stable : p.version;
       if (v == null) continue;
-      const { compose, port, files } = this.version(p.name, v);
-      out[p.name] = { v, compose, port, files };
+      const spec = this.version(p.name, v);
+      const { compose, port, files } = spec;
+      if (!spec.stateful) {
+        out[p.name] = { v, compose, port, files };
+        continue;
+      }
+      if (this.olderRunHas(r, p.name, now)) continue;
+      const replica = this.replicaId(p.name, r.machine);
+      const mount = `${MOUNT_ROOT}/${p.name}/${replica}`;
+      const key = `${p.name}@${v}@${mount}`;
+      if (!this.renders.has(key)) this.renders.set(key, renderStateful(spec, mount));
+      out[p.name] = {
+        v, compose: this.renders.get(key), port, files,
+        storage: { prefix: `${p.name}/${replica}`, mount, limitMb: spec.storage, readOnly: this.overLimit(p.name, replica, spec.storage) },
+      };
     }
     return out;
+  }
+
+  // An older run of the same machine that still reports the project: it's still running it (retired runs included,
+  // until they've stopped it or stopped checking in).
+  olderRunHas(r, name, now) {
+    return [...this.runs.values()].some((x) => x.machine === r.machine && x.id !== r.id && x.started < r.started && this.live(x, now) && x.status[name]);
+  }
+
+  // Which replica's data a machine runs for a project: the placement's ordinal, or the slot for "all" projects.
+  replicaId(name, machine) {
+    const x = this.placements.get(name)?.get(machine);
+    return x?.ordinal != null ? `r${x.ordinal}` : `m${machine}`;
+  }
+
+  freeOrdinal(name) {
+    const used = new Set([...(this.placements.get(name)?.values() ?? [])].map((x) => x.ordinal).filter((o) => o != null));
+    let n = 0;
+    while (used.has(n)) n++;
+    return n;
+  }
+
+  isStateful(name) {
+    const p = this.projects.get(name);
+    return Boolean(p && this.version(name, p.version)?.stateful);
   }
 
   runsOn(name, machine) {
     const p = this.projects.get(name);
     const replicas = this.version(name, p.version)?.replicas ?? 1;
-    return replicas === REPLICAS_ALL || Boolean(this.placements.get(name)?.has(machine));
+    if (replicas === REPLICAS_ALL) return true;
+    const x = this.placements.get(name)?.get(machine);
+    return Boolean(x) && !x.leaving?.stopFirst; // a copy told to stop first is already no longer wanted there
+  }
+
+  overLimit(name, replica, limitMb) {
+    return (this.usage.get(name)?.replicas?.[replica] ?? 0) > limitMb * 1048576;
+  }
+
+  storageConfigured() {
+    const e = this.env;
+    return Boolean(e.FS_BUCKET && e.FS_ENDPOINT && e.FS_ACCESS_KEY_ID && e.FS_SECRET_ACCESS_KEY);
+  }
+
+  // What an agent needs to mount replicas' data; sent at join and with every check-in, so it needs no restart
+  // when storage is set up or its key changes.
+  storageConfig() {
+    const e = this.env;
+    return this.storageConfigured() ? { endpoint: e.FS_ENDPOINT, bucket: e.FS_BUCKET, accessKeyId: e.FS_ACCESS_KEY_ID, secretAccessKey: e.FS_SECRET_ACCESS_KEY } : null;
   }
 
   // A version is good once every machine that should run it (and is up) reports it healthy, and halted as soon
@@ -666,8 +827,8 @@ export class Control extends DurableObject {
 
   savePlacement(name, machine, x) {
     (this.placements.get(name) ?? this.placements.set(name, new Map()).get(name)).set(machine, x);
-    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving) VALUES (?, ?, ?, ?, ?)",
-      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null);
+    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving, ordinal) VALUES (?, ?, ?, ?, ?, ?)",
+      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null, x.ordinal ?? null);
   }
 
   dropPlacement(name, machine) {
@@ -698,6 +859,16 @@ export class Control extends DurableObject {
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
       for (const [machine, x] of placed) {
+        // A stateful copy is moved stop-first: once the old machine has stopped it (or had long enough), the new
+        // copy is placed, with the same ordinal so it gets the same data.
+        if (x.leaving?.stopFirst && !x.leaving.started && p && up.has(machine)) {
+          if (!up.get(machine).status[name] || now - x.leaving.at > STOP_FIRST_WAIT_MS) {
+            x.leaving.started = now;
+            this.savePlacement(name, machine, x);
+            this.savePlacement(name, x.leaving.to, { since: now, reason: x.leaving.reason, leaving: null, ordinal: x.ordinal });
+            changed = true;
+          }
+        }
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
         const moved = x.leaving && (up.get(x.leaving.to)?.status[name]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
         if (!p || !p.enabled || replicas === REPLICAS_ALL || !up.has(machine) || moved) {
@@ -711,8 +882,10 @@ export class Control extends DurableObject {
       const want = this.version(p.name, p.version)?.replicas ?? 1;
       if (want === REPLICAS_ALL) continue;
       const placed = this.placements.get(p.name) ?? this.placements.set(p.name, new Map()).get(p.name);
-      // Copies being moved away don't count; the move's new copy does.
+      // Copies being moved away don't count; the move's new copy does. A stateful copy stopping before its
+      // replacement is placed still holds its replica's slot meanwhile.
       const staying = [...placed].filter(([, x]) => !x.leaving);
+      const pending = [...placed].filter(([, x]) => x.leaving?.stopFirst && !x.leaving.started).length;
       // Too many (replicas were lowered): keep the oldest placements, and healthy ones over failed ones.
       const extra = staying.map(([machine, x]) => ({ machine, x, healthy: up.get(machine)?.status[p.name]?.s === "healthy" }))
         .sort((a, b) => a.healthy - b.healthy || b.x.since - a.x.since).slice(0, Math.max(0, staying.length - want));
@@ -722,10 +895,10 @@ export class Control extends DurableObject {
         changed = true;
       }
       // Too few: the machines with the most room, ready ones first.
-      for (let n = staying.length - extra.length; n < want && arrived; n++) {
+      for (let n = staying.length - extra.length + pending; n < want && arrived; n++) {
         const best = this.bestMachine(p.name, up, counts, now);
         if (!best) break; // every machine already has one; the rest get placed when machines show up
-        this.savePlacement(p.name, best.machine, { since: now, reason: best.reason, leaving: null });
+        this.savePlacement(p.name, best.machine, { since: now, reason: best.reason, leaving: null, ordinal: this.freeOrdinal(p.name) });
         counts.set(best.machine, (counts.get(best.machine) ?? 0) + 1);
         changed = true;
       }
@@ -774,8 +947,13 @@ export class Control extends DurableObject {
       if (!best) throw new HttpError(409, `no other machine is up for ${name}`);
       dest = { machine: best.machine, reason: `moved here from machine ${from}: ${best.reason}` };
     }
-    this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null });
-    this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now } });
+    if (this.isStateful(name)) {
+      // Its data must never be mounted on two machines at once: the old copy stops first, then place() starts the new one.
+      this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now, stopFirst: true, started: null, reason: dest.reason } });
+    } else {
+      this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null, ordinal: x.ordinal });
+      this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now } });
+    }
     return this.describe(p);
   }
 
@@ -818,7 +996,9 @@ export class Control extends DurableObject {
     for (const [name, placed] of this.placements) {
       const x = placed.get(machine);
       if (!x || x.leaving) continue;
-      if ((this.version(name, this.projects.get(name)?.version)?.replicas ?? 1) === REPLICAS_ALL) continue;
+      const spec = this.version(name, this.projects.get(name)?.version);
+      if ((spec?.replicas ?? 1) === REPLICAS_ALL) continue;
+      if (spec?.stateful && spec.replicas < 2) continue; // moving it means downtime; left to a hand move
       if (now - (this.autoMoved.get(name) ?? 0) < PROJECT_COOLDOWN_MS) continue;
       const a = m?.a[name];
       const weight = a ? (a.cpu || 0) + (100 * (a.mem || 0)) / memTotal : 0;
@@ -901,6 +1081,7 @@ export class Control extends DurableObject {
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status);
       Object.assign(r, { status, ready, seen: now });
+      r.storageState = typeof body.storage === "string" ? body.storage.slice(0, 20) : undefined;
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
     }
@@ -918,7 +1099,8 @@ export class Control extends DurableObject {
     return {
       domain: this.env.DOMAIN,
       poll: POLL_S,
-      desired: r.retire ? {} : this.desiredFor(machine),
+      storage: this.storageConfig(),
+      desired: r.retire ? {} : this.desiredFor(r, now),
       retire: Boolean(r.retire),
       handover,
       start,
@@ -927,9 +1109,8 @@ export class Control extends DurableObject {
 
   // A run can go once a newer run of the same machine is online and healthy on everything it should run.
   superseded(r, now) {
-    const desired = Object.entries(this.desiredFor(r.machine));
     return this.liveRuns(now).some((x) => x.machine === r.machine && x.started > r.started && x.ready &&
-      desired.every(([name, d]) => x.status[name]?.v === d.v && x.status[name]?.s === "healthy"));
+      Object.entries(this.desiredFor(x, now)).every(([name, d]) => x.status[name]?.v === d.v && x.status[name]?.s === "healthy"));
   }
 
   // Ask a run to start its own replacement when it's near GitHub's 6-hour limit (or a roll was requested).
@@ -1016,7 +1197,7 @@ export class Control extends DurableObject {
     );
     this.holds.set(slot, { agent, at: now }); // holds the slot until its first check-in
     const tunnel = await this.tunnelFor(slot);
-    return { machine: slot, tunnelToken: tunnel.token, domain: this.env.DOMAIN };
+    return { machine: slot, tunnelToken: tunnel.token, domain: this.env.DOMAIN, storage: this.storageConfig() };
   }
 
   async cf(path, init = {}) {
@@ -1207,6 +1388,7 @@ export class Control extends DurableObject {
       machines: this.machines(),
       dnsError: this.dnsError,
       dnsNotes: this.dnsNotes ?? [],
+      storage: this.storageConfigured() ? { bucket: this.env.FS_BUCKET, defaultMb: STORAGE_DEFAULT_MB, maxMb: STORAGE_MAX_MB, scannedAt: this.usageAt ?? null } : null,
       rebalance: { on: this.rebalanceOn(), log: this.rebalanceLog.slice(0, 10), hot: [...this.liveMachines(now).keys()].filter((m) => this.isHot(m, now)) },
       // Slots to show: ones with a recent run, plus ones a GitHub machine is starting for.
       slots: [...new Set([
@@ -1228,6 +1410,7 @@ export class Control extends DurableObject {
           retiring: Boolean(r.retire),
           kind: r.kind,
           label: r.label,
+          storage: r.storageState,
           projects: r.status,
         })),
     };
@@ -1239,19 +1422,80 @@ export class Control extends DurableObject {
   // so turning one back on is instant. Names already used by records that aren't ours are left alone.
 
   scheduleDns() {
-    this.ctx.storage.setAlarm(Date.now() + 2_000);
+    this.dnsDue = Date.now() + 2_000;
+    this.ctx.storage.setAlarm(this.dnsDue);
   }
 
+  // One alarm for the periodic work: DNS (hourly, or 2s after a change) and R2 usage (every 5 minutes).
   async alarm() {
-    try {
-      await this.syncDns();
-      this.dnsError = null;
-      await this.ctx.storage.setAlarm(Date.now() + 3600_000); // re-check hourly in case something drifted
-    } catch (e) {
-      this.dnsError = e.message;
-      console.log(`DNS sync failed: ${e.message}`);
-      await this.ctx.storage.setAlarm(Date.now() + 60_000);
+    const now = Date.now();
+    if (now >= (this.dnsDue ?? 0)) {
+      try {
+        await this.syncDns();
+        this.dnsError = null;
+        this.dnsDue = now + 3600_000; // re-check hourly in case something drifted
+      } catch (e) {
+        this.dnsError = e.message;
+        console.log(`DNS sync failed: ${e.message}`);
+        this.dnsDue = now + 60_000;
+      }
     }
+    if (now >= (this.usageDue ?? 0)) {
+      try {
+        await this.scanUsage();
+        this.usageDue = now + USAGE_EVERY_MS;
+      } catch (e) {
+        console.log(`usage scan failed: ${e.message}`);
+        this.usageDue = now + 60_000;
+      }
+    }
+    await this.ctx.storage.setAlarm(Math.min(this.dnsDue, this.usageDue));
+  }
+
+  // ---- storage: usage and wipes, through the bucket binding ----
+
+  // How much each stateful project's replicas keep in R2: objects under <project>/<replica>/.
+  async scanUsage() {
+    if (!this.env.FS) return;
+    const usage = new Map();
+    const now = Date.now();
+    for (const p of this.projects.values()) {
+      if (!this.version(p.name, p.version)?.stateful) continue;
+      const replicas = {};
+      let total = 0;
+      let cursor;
+      do {
+        const page = await this.env.FS.list({ prefix: `${p.name}/`, cursor, limit: 1000 });
+        for (const o of page.objects) {
+          const replica = o.key.slice(p.name.length + 1).split("/")[0];
+          replicas[replica] = (replicas[replica] ?? 0) + o.size;
+          total += o.size;
+        }
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor);
+      usage.set(p.name, { at: now, total, replicas });
+    }
+    this.usage = usage;
+    this.usageAt = now;
+    this.setSetting("usage", JSON.stringify(Object.fromEntries(usage)));
+  }
+
+  // Delete one replica's data (or the whole project's). Only while the project is disabled, so nothing has it mounted.
+  async wipe(name, replica) {
+    const p = this.project(name);
+    if (!this.env.FS) throw new HttpError(400, "the fleet's storage isn't set up");
+    if (p.enabled) throw new HttpError(409, `disable ${name} first, so no machine has its data mounted`);
+    if (replica && !/^(r\d+|m\d+)$/.test(replica)) throw new HttpError(400, "replica must look like r0 or m3");
+    const prefix = replica ? `${name}/${replica}/` : `${name}/`;
+    let deleted = 0;
+    for (;;) {
+      const page = await this.env.FS.list({ prefix, limit: 1000 });
+      if (!page.objects.length) break;
+      await this.env.FS.delete(page.objects.map((o) => o.key));
+      deleted += page.objects.length;
+    }
+    await this.scanUsage();
+    return { name, replica: replica ?? "all", deleted, ...this.describe(p) };
   }
 
   async syncDns() {

@@ -1,8 +1,10 @@
 // Runner agent: keeps one machine's projects in line with the control plane.
 // It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
 // and the tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's
-// told, and restarts ones that stop answering. On GitHub Actions it also starts machines the control plane says are
-// missing and hands over to a fresh run before GitHub's 6-hour limit; on any other host it just keeps running.
+// told, and restarts ones that stop answering. A stateful project's replica gets its own directory in the fleet's
+// R2 bucket, mounted here with rclone and bound into its containers. On GitHub Actions it also starts machines the
+// control plane says are missing and hands over to a fresh run before GitHub's 6-hour limit; on any other host it
+// just keeps running.
 // No dependencies: Node's built-ins plus the docker CLI.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -24,6 +26,8 @@ const dir = `${base}/projects`;
 const routerDir = `${base}/router`;
 let machine = 0; // the slot, from the control plane
 let tunnelToken = "";
+let storage = null; // { endpoint, bucket, accessKeyId, secretAccessKey } for the fleet's R2 bucket, from the control plane
+const RCLONE = "rclone/rclone:1.75"; // mounts a replica's R2 directory (one container per stateful project)
 let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, so it gets its slot back after a restart
 let run = "";
 // Commands run without the agent's own secrets, so a compose file can't read them.
@@ -73,16 +77,17 @@ const projects = new Map(); // name -> { v, port, s: "applying" | "healthy" | "f
 let domain = "";
 
 async function apply(name, want) {
-  const p = { v: want.v, port: want.port, s: "applying", e: "", busy: true, at: Date.now(), misses: 0 };
+  const p = { v: want.v, port: want.port, s: "applying", e: "", busy: true, at: Date.now(), misses: 0, storage: want.storage ?? null };
   projects.set(name, p);
   updateRouter();
-  log(`${name}: starting v${want.v}`);
+  log(`${name}: starting v${want.v}${want.storage ? ` with its data (${want.storage.prefix}${want.storage.readOnly ? ", read-only" : ""})` : ""}`);
   let s = "healthy";
   let e = "";
   try {
     const projectDir = `${dir}/${name}`;
     const file = `${projectDir}/compose.yaml`;
     await mkdir(projectDir, { recursive: true });
+    if (want.storage) await ensureMount(name, want.storage); // before compose up: its containers bind the mount
     // Dockerfiles and anything else the build needs sit next to the compose file, so `build: .` finds them.
     // The folder isn't cleared first: relative bind mounts (./data) may live in it.
     for (const [path, content] of Object.entries(want.files ?? {})) {
@@ -93,8 +98,9 @@ async function apply(name, want) {
     }
     await writeFile(file, want.compose);
     // compose only recreates the containers whose config changed, and --wait fails if one won't stay up.
+    // A stateful project's containers are always recreated, so they bind the mount that's there now.
     const up = await sh("docker", ["compose", "-p", name, "-f", file, "up", "-d", "--build", "--remove-orphans",
-      "--wait", "--wait-timeout", "300"]);
+      "--wait", "--wait-timeout", "300", ...(want.storage ? ["--force-recreate"] : [])]);
     if (!up.ok) [s, e] = ["failed", up.out.split("\n").slice(-6).join("\n").slice(-600)];
     else if (want.port && !(await answers(name, 60))) [s, e] = ["failed", `nothing answers on port ${want.port} through the router`];
   } catch (err) {
@@ -108,6 +114,7 @@ async function remove(name) {
   const p = projects.get(name);
   p.busy = true;
   log(`${name}: removing`);
+  if (p.storage) await stopStateful(name); // stop, let the last writes reach R2, unmount
   await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
   projects.delete(name);
   await rm(`${dir}/${name}`, { recursive: true, force: true });
@@ -120,7 +127,8 @@ function reconcile(desired) {
     const p = projects.get(name);
     if (p?.busy) continue;
     const retry = p?.s === "failed" && Date.now() - p.at > 3 * 60_000;
-    if (!p || p.v !== want.v || p.port !== want.port || retry) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
+    const storageChanged = Boolean(p?.storage) !== Boolean(want.storage) || (want.storage && p.storage.readOnly !== want.storage.readOnly);
+    if (!p || p.v !== want.v || p.port !== want.port || storageChanged || retry) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
   }
   for (const [name, p] of projects) {
     if (!(name in desired) && !p.busy) remove(name).catch((e) => log(`${name}: ${e.message}`));
@@ -135,7 +143,13 @@ const settled = (desired) => Object.entries(desired).every(([name, want]) => {
 // A project that stops answering three checks in a row is marked failed, which makes reconcile start it again.
 async function checkHealth() {
   for (const [name, p] of projects) {
-    if (p.busy || p.s !== "healthy" || !p.port) continue;
+    if (p.busy || p.s !== "healthy") continue;
+    if (p.storage && !(await mounted(name))) {
+      log(`${name}: its data mount died; remounting`);
+      Object.assign(p, { s: "failed", e: "the data mount died; remounting", at: 0, misses: 0 });
+      continue;
+    }
+    if (!p.port) continue;
     if (await answers(name, 0)) {
       p.misses = 0;
     } else if (++p.misses >= 3) {
@@ -144,6 +158,97 @@ async function checkHealth() {
     }
   }
 }
+
+// ---- stateful projects: a replica's data directory, mounted from the fleet's R2 bucket ----
+// One rclone container per project ("mnt-<name>"), FUSE-mounting r2:<bucket>/<project>/<replica> at the host path
+// the compose file binds. Reads and writes go through a local cache; a file is in R2 once the app closes it.
+
+const mounts = new Map(); // name -> the storage config it was mounted with
+
+async function mounted(name) {
+  return (await sh("docker", ["exec", "mnt-" + name, "mountpoint", "-q", "/mnt"], { timeout: 10_000 })).ok;
+}
+
+async function ensureMount(name, st) {
+  if (!storage) throw new Error("the fleet's storage isn't set up, so this project can't have data");
+  const have = mounts.get(name);
+  if (have && have.prefix === st.prefix && have.readOnly === st.readOnly && (await mounted(name))) return;
+  await sh("docker", ["rm", "-f", "mnt-" + name]);
+  mounts.delete(name);
+  const cache = `${base}/cache/${name}`;
+  await mkdir(cache, { recursive: true }).catch(() => {});
+  const args = ["run", "-d", "--name", "mnt-" + name, "--restart", "unless-stopped",
+    "--cap-add", "SYS_ADMIN", "--device", "/dev/fuse", "--security-opt", "apparmor:unconfined",
+    "-e", "RCLONE_CONFIG_R2_TYPE=s3", "-e", "RCLONE_CONFIG_R2_PROVIDER=Cloudflare", "-e", `RCLONE_CONFIG_R2_ENDPOINT=${storage.endpoint}`,
+    "-e", "RCLONE_CONFIG_R2_ACCESS_KEY_ID", "-e", "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY",
+    "-e", "RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true", "-e", "RCLONE_CONFIG_R2_DIRECTORY_MARKERS=true",
+    "-v", `${st.mount}:/mnt:rshared`, "-v", `${cache}:/cache`,
+    RCLONE, "mount", `r2:${storage.bucket}/${st.prefix}`, "/mnt",
+    "--allow-other", "--umask", "000", "--vfs-cache-mode", "full", "--cache-dir", "/cache",
+    "--vfs-cache-max-size", `${st.limitMb}M`, "--vfs-cache-max-age", "48h", "--vfs-write-back", "1s",
+    "--dir-cache-time", "30s", "--poll-interval", "0", "--rc", "--rc-addr", "127.0.0.1:5572", "--rc-no-auth",
+    "--log-level", "NOTICE", ...(st.readOnly ? ["--read-only"] : [])];
+  const creds = { RCLONE_CONFIG_R2_ACCESS_KEY_ID: storage.accessKeyId, RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: storage.secretAccessKey };
+  let r = await sh("docker", args, { extraEnv: creds });
+  if (!r.ok && github && /shared mount/.test(r.out)) {
+    // The mount has to be visible to other containers; that needs shared propagation from the root filesystem.
+    await sh("sudo", ["mount", "--make-rshared", "/"]);
+    r = await sh("docker", args, { extraEnv: creds });
+  }
+  if (!r.ok) throw new Error(`couldn't start the data mount: ${r.out.split("\n").pop()}`);
+  for (let i = 0; i < 30; i++) {
+    if (await mounted(name)) break;
+    if (i === 29) throw new Error(`the data mount didn't come up: ${(await sh("docker", ["logs", "--tail", "5", "mnt-" + name])).out}`);
+    await sleep(1000);
+  }
+  // Seen from another container too (that's how the project's containers get it).
+  const seen = await sh("docker", ["run", "--rm", "-v", `${st.mount}:/m:ro`, "alpine:3.20", "mountpoint", "-q", "/m"], { timeout: 60_000 });
+  if (!seen.ok) throw new Error("the data mount isn't visible to other containers (mount propagation)");
+  mounts.set(name, { prefix: st.prefix, readOnly: st.readOnly });
+}
+
+// Writes still on their way to R2, per rclone's own stats.
+async function pendingUploads(name) {
+  const r = await sh("docker", ["exec", "mnt-" + name, "rclone", "rc", "vfs/stats"], { timeout: 10_000 });
+  if (!r.ok) return 0;
+  try {
+    const c = JSON.parse(r.out).diskCache ?? {};
+    return (c.uploadsInProgress ?? 0) + (c.uploadsQueued ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+// Stop a stateful project the safe way: its containers first (so files get closed), then wait for the last
+// uploads, then unmount. After this its data can be mounted somewhere else.
+async function stopStateful(name) {
+  await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "stop", "-t", "20"]);
+  for (let i = 0; i < 90 && (await pendingUploads(name)) > 0; i++) await sleep(1000);
+  await sleep(1500); // the write-back delay
+  await sh("docker", ["stop", "-t", "30", "mnt-" + name]);
+  await sh("docker", ["rm", "-f", "mnt-" + name]);
+  mounts.delete(name);
+}
+
+// On the way out: hand every stateful project's data back, and tell the control plane they're stopped, so the
+// run taking over can mount it straight away.
+async function releaseStateful() {
+  const stateful = [...projects].filter(([, p]) => p.storage);
+  if (!stateful.length) return;
+  log(`stopping ${stateful.map(([name]) => name).join(", ")} so their data can move on`);
+  for (const [name, p] of stateful) {
+    p.busy = true;
+    await stopStateful(name);
+    await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down"]);
+    projects.delete(name);
+  }
+  await sync().catch(() => {});
+}
+
+const storageState = () => {
+  const stateful = [...projects.values()].filter((p) => p.storage);
+  return !storage ? "none" : stateful.some((p) => p.s === "failed" && /mount/.test(p.e)) ? "down" : "ok";
+};
 
 // ---- router (Caddy) and tunnel (cloudflared) ----
 
@@ -241,6 +346,7 @@ async function join() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       ({ machine, tunnelToken, domain } = data);
+      storage = data.storage ?? null;
       return log(`joined as machine ${machine} (${agent})`);
     } catch (e) {
       log(`couldn't join (${e.message}); trying again in ${wait}s`);
@@ -255,6 +361,7 @@ async function removeLeftovers(desired) {
     if (name in desired || projects.has(name)) continue;
     log(`${name}: left over from before; removing`);
     await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
+    await sh("docker", ["rm", "-f", "mnt-" + name]);
     await rm(`${dir}/${name}`, { recursive: true, force: true });
   }
 }
@@ -265,7 +372,7 @@ async function sync() {
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, metrics: sent }),
+    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, storage: storageState(), metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -297,8 +404,13 @@ async function shutdown(reason, code = 0) {
   await sh("docker", ["stop", "-t", "10", "tunnel"]);
   process.exit(code);
 }
-process.on("SIGINT", () => shutdown("cancelled"));
-process.on("SIGTERM", () => shutdown("cancelled"));
+// Stopped from outside: hand stateful projects' data back first if there's time (a host gives the agent 3 minutes).
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    if (stopping) return;
+    Promise.race([releaseStateful(), sleep(150_000)]).finally(() => shutdown("cancelled"));
+  });
+}
 
 async function main() {
   await mkdir(dir, { recursive: true });
@@ -317,11 +429,18 @@ async function main() {
     } catch (e) {
       log(`control plane unreachable (${e.message}); keeping what's running`);
     }
-    if (plan?.retire) return shutdown("a newer run of this machine is healthy, so this one is leaving");
+    if (plan?.retire) {
+      await releaseStateful();
+      return shutdown("a newer run of this machine is healthy, so this one is leaving");
+    }
     if (plan) {
       if (plan.domain !== domain) {
         domain = plan.domain;
         updateRouter();
+      }
+      if (JSON.stringify(plan.storage ?? null) !== JSON.stringify(storage)) {
+        storage = plan.storage ?? null;
+        log(storage ? "fleet storage is available" : "fleet storage isn't set up");
       }
       reconcile(plan.desired);
       if (!cleaned) {
@@ -329,7 +448,10 @@ async function main() {
         await removeLeftovers(plan.desired);
       }
       for (const m of plan.start ?? []) await startMachine(m);
-      if (plan.handover && !github) return shutdown("restarting to update the agent");
+      if (plan.handover && !github) {
+        await releaseStateful();
+        return shutdown("restarting to update the agent");
+      }
       if (plan.handover && Date.now() - successorAt > 10 * 60_000) {
         successorAt = Date.now();
         log("handing over to a fresh run of this machine");
@@ -355,6 +477,7 @@ async function main() {
     }
     await sleep((plan?.poll ?? 20) * 1000);
   }
+  await releaseStateful();
   await shutdown("reached the time limit");
 }
 

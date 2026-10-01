@@ -33,6 +33,24 @@ A project is a docker compose file, optionally with Dockerfiles and other files 
 
 The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, and file paths must stay inside the project. Ports 2019 and 19080 are taken by the router.
 
+### Stateful projects
+
+A project is stateless unless it says otherwise. A stateful one names the directory where it keeps its state and how much it may keep there:
+
+```yaml
+x-runner:
+  port: 8080
+  state: stateful
+  data: /data        # mounted into every service
+  storage: 200M      # per replica; default 100M, max 500M
+```
+
+Each replica gets its own directory in the fleet's storage, a Cloudflare R2 bucket, mounted (with rclone) on whichever machine runs it and bound into its containers at `data`. The app just uses the directory. When the replica moves, its machine goes, or the machine hands over to a fresh run, the next machine mounts the same directory and finds everything there. Replicas don't share data, so a stateful app should usually run one replica. Over the storage limit, the replica's data turns read-only until the limit is raised or data is cleared (the portal shows usage, measured every 5 minutes, and can wipe a disabled project's data).
+
+What the mount is and isn't: a file is in R2 once the app closes it, reads and writes go through a local cache at disk speed, and files the app still had open when a machine died unexpectedly are lost. That suits files (uploads, content, configs, caches). It doesn't suit databases that keep one file open the whole time (SQLite, Postgres); those need their own replication.
+
+Moving a stateful replica (by hand, by eviction, or a handover) stops it first, waits for its last writes to reach R2, then starts it on the next machine: about a minute of downtime for that project. Automatic rebalancing leaves single-replica stateful projects alone for that reason.
+
 ### Placement
 
 Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
@@ -51,7 +69,9 @@ The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with 
 GET    /api/status                              projects and machines (no token needed)
 GET    /api/metrics?range=1h|6h|24h|7d|30d      metrics columns per machine and app, plus live samples (no token needed)
 PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...", "files": {"path": "text"},
-                                                "port": 8080, "replicas": 3 | "all"}  (compose or dockerfile required)
+                                                "port": 8080, "replicas": 3 | "all", "state": "stateful", "data": "/data",
+                                                "storage": 200}  (compose or dockerfile required)
+POST   /api/projects/<name>/wipe[?replica=r0]   delete a disabled stateful project's data (one replica's, or all)
 GET    /api/projects/<name>[?version=N]         a version's compose file, files and port, plus the version list
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
@@ -112,7 +132,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 ## Setup notes
 
 - **Repo secrets:** `CONTROL_NODE_TOKEN` (the same value as the Worker's `NODE_TOKEN`). Tunnel tokens come from the control plane.
-- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
+- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone. For stateful projects: `FS_ACCESS_KEY_ID` and `FS_SECRET_ACCESS_KEY` (an R2 token limited to the bucket in `FS_BUCKET`), with `FS_ENDPOINT` and the `FS` bucket binding in `wrangler.toml`.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Portal:** `/admin` and `/admin/api/*` are open, with no sign-in. Changes sent from other sites are refused.
 - **More machines:** raise the GitHub machine count in the portal (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account.

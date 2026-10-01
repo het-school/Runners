@@ -156,6 +156,9 @@
       <tr><td><code>files</code></td><td><code>{"path": "text", …}</code>: other files, next to the compose file (e.g. <code>src/main.py</code>, <code>web/Dockerfile</code>).</td></tr>
       <tr><td><code>port</code></td><td>The port the app listens on (or set <code>x-runner.port</code> in the compose file).</td></tr>
       <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number, or <code>"all"</code>. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away.</td></tr>
+      <tr><td><code>state</code></td><td><code>"stateless"</code> (default) or <code>"stateful"</code> (or <code>x-runner.state</code>). A stateful replica keeps a directory in the fleet's storage that follows it wherever it runs.</td></tr>
+      <tr><td><code>data</code></td><td>Stateful only: the directory inside the container where the app keeps its state, like <code>"/data"</code>. It's mounted there in every service.</td></tr>
+      <tr><td><code>storage</code></td><td>Stateful only: how much a replica may keep, in MB (or <code>"200M"</code>). Default 100, max 500. Over it, the data turns read-only until you raise the limit or clear it.</td></tr>
     </table></div>
     <p class="hint">Limits: 30 files, 250 KB in all, text files only. Ports 2019 and 19080 are taken. Every <code>build:</code> needs its Dockerfile among the files.</p>
 
@@ -169,7 +172,13 @@
   -H 'Content-Type: application/json' \
   -d '{"port": 9000, "dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]"}'</pre>
 
-    <div class="sec">3. Your own code from files on disk</div>
+    <div class="sec">3. A stateful app (keeps data)</div>
+<pre class="code">curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"port": 8080, "state": "stateful", "data": "/data", "storage": 200, "compose": "services:\n  app:\n    image: ghcr.io/you/notes\n    ports: [\"8080:8080\"]\n    restart: unless-stopped\n"}'</pre>
+    <p class="hint" style="margin-top:0">Or in the compose file itself: <code>x-runner: { state: stateful, data: /data, storage: 200M }</code>. The app just reads and writes <code>/data</code>; a file is safe in the fleet's storage (Cloudflare R2) once the app closes it. When the replica moves or its machine goes, the next machine mounts the same data. Databases that keep a file open all the time (SQLite, Postgres) aren't a fit for this; files are.</p>
+
+    <div class="sec">4. Your own code from files on disk</div>
     <p class="hint" style="margin-top:0">Escaping files into JSON by hand is painful; let <code>jq</code> build the body:</p>
 <pre class="code"># my-app/Dockerfile, my-app/app.py
 jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py \
@@ -227,6 +236,17 @@ curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
       <label for="ed-replicas">Replicas</label>
       <input id="ed-replicas" placeholder="1" pattern="all|[0-9]{1,3}" autocomplete="off" style="width:90px">
       <p class="hint">How many machines run it: a number, or <code>all</code> for every machine. Each replica goes to the machine with the most room; the shared URL spreads visitors across them.</p>
+      <label for="ed-state">State</label>
+      <select id="ed-state" style="width:auto"><option value="stateless">stateless (default)</option><option value="stateful">stateful: keeps data</option></select>
+      <p class="hint">A stateful project's replica gets its own directory in the fleet's storage (Cloudflare R2), mounted wherever it runs and kept when it moves or its machine goes. A stateful app should usually run 1 replica: replicas don't share data.</p>
+      <div id="ed-stateful" hidden>
+        <label for="ed-data">Data directory</label>
+        <input id="ed-data" placeholder="/data" autocapitalize="off" autocomplete="off" spellcheck="false" style="width:240px">
+        <p class="hint">Where the app keeps its state inside the container. It's mounted there in every service.</p>
+        <label for="ed-storage">Storage</label>
+        <div class="inline"><input id="ed-storage" type="number" min="1" max="500" placeholder="100"> MB per replica, up to 500</div>
+        <p class="hint">Over the limit, the replica's data turns read-only until you raise the limit or clear data.</p>
+      </div>
       <label for="ed-compose">Docker Compose</label>
       <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
       <p class="hint">Optional when there's a Dockerfile: one service is made that builds it and publishes the port.</p>
@@ -256,6 +276,7 @@ curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const ago = (ms) => { const s = Math.round(ms / 1000); return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; };
+const mb = (bytes) => bytes == null ? "?" : bytes < 1048576 ? `${(bytes / 1048576).toFixed(1)}` : `${Math.round(bytes / 1048576)}`;
 let status = null;
 let editing = null; // name of the project open in the editor, or null for a new one
 
@@ -321,7 +342,7 @@ function render() {
         <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
-      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.state === "stateful" ? ` · <b>stateful</b> ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB${p.over.length ? ` <span class="bad">over the limit (${p.over.map(esc).join(", ")}), read-only</span>` : ""}` : ""}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
@@ -337,7 +358,7 @@ function render() {
   const machines = [];
   for (const n of status.slots) {
     const r = runs.get(n);
-    const hot = status.rebalance.hot.includes(n) ? ` <span class="badge bad">hot</span>` : "";
+    const hot = (status.rebalance.hot.includes(n) ? ` <span class="badge bad">hot</span>` : "") + (r?.storage === "down" ? ` <span class="badge bad">data mount down</span>` : "");
     const state = (!r ? `<span class="badge bad">down</span>`
       : r.handover ? `<span class="badge warn">starting its replacement</span>`
       : r.ready ? `<span class="badge ok">online · ${ago(status.now - r.started)}</span>`
@@ -385,6 +406,10 @@ function fill(spec) {
   const files = { ...(spec.files || {}) };
   $("ed-port").value = spec.port ?? "";
   $("ed-replicas").value = spec.replicas ?? "";
+  $("ed-state").value = spec.state ?? "stateless";
+  $("ed-data").value = spec.data ?? "";
+  $("ed-storage").value = spec.storage ?? "";
+  $("ed-stateful").hidden = $("ed-state").value !== "stateful";
   $("ed-compose").value = spec.compose || "";
   $("ed-dockerfile").value = files.Dockerfile || "";
   delete files.Dockerfile;
@@ -425,7 +450,8 @@ function renderDetails() {
     return `<tr><td>${n}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
       <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
-      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}</td>
+      <td>${p.state === "stateful" ? `<span class="meta">${esc(why?.replica ?? `m${n}`)}: ${mb(p.usage?.replicas?.[why?.replica ?? `m${n}`] ?? 0)} MB${p.over.includes(why?.replica ?? `m${n}`) ? ' <span class="bad">over, read-only</span>' : ""}</span>` : ""}</td>
+      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}${p.state === "stateful" && !p.enabled && why ? ` <button type="button" class="small danger" data-wipe="${esc(why.replica)}">Wipe data</button>` : ""}</td>
       <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
   }).join("");
 
@@ -447,6 +473,7 @@ function renderDetails() {
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
       <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} placed`}</dd></div>
+      <div><dt>State</dt><dd>${p.state === "stateful" ? `stateful · ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB per replica${p.usage ? ` <span class="meta">(measured ${esc(ago(status.now - p.usage.at))} ago)</span>` : ""}` : "stateless"}</dd></div>
       <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
@@ -464,7 +491,7 @@ function renderDetails() {
     </div>
     ${files.length ? `<div class="tabs" role="tablist">${tabs}</div><pre class="code" id="dt-code"></pre>` : `<div class="card empty">No files</div>`}
     <div class="sec">Machines</div>
-    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th><th></th></tr>${machines}</table></div>
+    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th><th>Data</th><th></th></tr>${machines}</table></div>
     <div class="sec">Versions</div>
     <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Replicas</th><th>Created</th></tr>${versions}</table></div>`;
   if (current) $("dt-code").textContent = current[1];
@@ -492,6 +519,17 @@ async function openDetails(name) {
 $("dt-body").addEventListener("click", async (ev) => {
   const tab = ev.target.closest("[data-tab]");
   if (tab) { details.tab = tab.dataset.tab; return renderDetails(); }
+  const wp = ev.target.closest("[data-wipe]");
+  if (wp) {
+    const replica = wp.dataset.wipe;
+    if (!confirm(`Delete all of ${details.name}'s data for replica ${replica} from the fleet's storage? This can't be undone.`)) return;
+    try {
+      const r = await api("POST", `/projects/${encodeURIComponent(details.name)}/wipe?replica=${encodeURIComponent(replica)}`);
+      toast(`Deleted ${r.deleted} objects of ${details.name} ${replica}`);
+      refresh();
+    } catch (e) { toast(e.message); }
+    return;
+  }
   const mv = ev.target.closest("[data-move]");
   if (mv) {
     const from = mv.dataset.move;
@@ -573,6 +611,11 @@ $("form").onsubmit = async (ev) => {
   if ($("ed-port").value) body.port = Number($("ed-port").value);
   const rep = $("ed-replicas").value.trim();
   if (rep) body.replicas = rep === "all" ? "all" : Number(rep);
+  body.state = $("ed-state").value;
+  if (body.state === "stateful") {
+    body.data = $("ed-data").value.trim();
+    if ($("ed-storage").value) body.storage = Number($("ed-storage").value);
+  }
   $("ed-save").disabled = true;
   try {
     const p = await api("PUT", `/projects/${encodeURIComponent(name)}`, body);
@@ -598,7 +641,7 @@ document.addEventListener("click", async (ev) => {
     if (act === "edit") return openEditor(name);
     if (act === "retry") {
       const p = await api("GET", `/projects/${name}`);
-      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port, replicas: p.replicas });
+      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port, replicas: p.replicas, state: p.state, data: p.data, storage: p.storage });
       toast(`Retrying ${name} v${p.version} on every machine`);
     }
     if (act === "disable") {
@@ -631,6 +674,7 @@ document.addEventListener("click", async (ev) => {
   }
 });
 
+$("ed-state").onchange = () => { $("ed-stateful").hidden = $("ed-state").value !== "stateful"; };
 $("rebalance").onchange = async () => {
   try {
     const r = await api("PUT", "/settings", { rebalance: $("rebalance").checked });

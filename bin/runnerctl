@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # runnerctl: manage projects on the runner control plane (same API as the admin portal).
-#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--replicas N|all]
+#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--replicas N|all] [--stateful <dir> [--storage MB]]
 #       add or update a project. A folder sends its compose file (if any) plus every other file in it,
 #       e.g. a Dockerfile and what it COPYs. A Dockerfile on its own becomes a one-service project.
 #       The name defaults to the folder or file name. Every machine updates at once.
@@ -14,12 +14,13 @@
 #   runnerctl move <name> <from> [to]  move one copy of a project off a machine (new copy first, old one removed once healthy)
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
+#   runnerctl wipe <name> [replica]  delete a (disabled) stateful project's data from the fleet's storage
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,19p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,20p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -27,12 +28,14 @@ case "$cmd" in
   apply)
     [ $# -ge 1 ] || usage
     src=$1; shift
-    name="" port="" replicas=""
+    name="" port="" replicas="" data="" storage=""
     while [ $# -gt 0 ]; do
       case $1 in
         --now) ;; # every deploy goes to every machine at once now; kept so old commands still work
         --port) port=${2:?--port needs a number}; shift ;;
         --replicas) replicas=${2:?--replicas needs a number or all}; shift ;;
+        --stateful) data=${2:?--stateful needs the data directory, like /data}; shift ;;
+        --storage) storage=${2:?--storage needs a number of MB}; shift ;;
         *) name=$1 ;;
       esac
       shift
@@ -42,9 +45,9 @@ case "$cmd" in
       elif [[ $(basename "$src") == *[Dd]ockerfile ]]; then name=$(basename "$(dirname "$(realpath "$src")")")
       else name=$(basename "${src%.*}"); fi
     fi
-    body=$(python3 - "$src" "$port" "$replicas" <<'PY'
+    body=$(python3 - "$src" "$port" "$replicas" "$data" "$storage" <<'PY'
 import json, os, sys
-src, port, replicas = sys.argv[1], sys.argv[2], sys.argv[3]
+src, port, replicas, data, storage = sys.argv[1:6]
 COMPOSE = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 body = {}
 if os.path.isdir(src):
@@ -72,6 +75,11 @@ if port:
     body["port"] = int(port)
 if replicas:
     body["replicas"] = "all" if replicas == "all" else int(replicas)
+if data:
+    body["state"] = "stateful"
+    body["data"] = data
+    if storage:
+        body["storage"] = int(storage)
 print(json.dumps(body))
 PY
 )
@@ -101,5 +109,6 @@ PY
   move) [ $# -ge 2 ] || usage; api "/projects/$1/move?from=$2${3:+&to=$3}" -X POST | jq -c '.placed' ;;
   evict) [ $# -eq 1 ] || usage; api "/machines/$1/evict" -X POST | jq . ;;
   rebalance) case ${1:-} in on) v=true ;; off) v=false ;; *) usage ;; esac; api /settings -X PUT -d "{\"rebalance\": $v}" | jq . ;;
+  wipe) [ $# -ge 1 ] || usage; api "/projects/$1/wipe${2:+?replica=$2}" -X POST | jq '{name, replica, deleted, usage}' ;;
   *) usage ;;
 esac
