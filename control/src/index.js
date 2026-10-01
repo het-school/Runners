@@ -4,9 +4,11 @@
 // tunnel runner-<n>. The agent on every GitHub Actions machine checks in at /api/sync and gets back what it should run.
 //   /            public status page          /api/*        API, Bearer token (admin, or node for sync/claim/roll)
 //   /admin       admin portal                /admin/api/*  the same API, signed in with Cloudflare Access
+//   /metrics     metrics dashboard           /api/metrics  machine and app metrics (no token needed)
 import { DurableObject } from "cloudflare:workers";
 import YAML from "yaml";
 import ADMIN_PAGE from "./admin.html";
+import METRICS_PAGE from "./metrics.html";
 import { STATUS_PAGE } from "./status-page.js";
 
 const POLL_S = 20; // how often agents check in
@@ -18,6 +20,54 @@ const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
+// Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
+// and rolled up into 10-minute rows for the longer views.
+const MIN = 60_000;
+const KEEP_1M_MS = 48 * 3600_000;
+const KEEP_10M_MS = 30 * 24 * 3600_000;
+const FLUSH_AFTER_MS = 150_000; // a minute is written once its summaries have had time to arrive
+const RANGES = { // range -> [span, step, table]
+  "1h": [3600_000, MIN, "metrics_1m"],
+  "6h": [6 * 3600_000, 2 * MIN, "metrics_1m"],
+  "24h": [24 * 3600_000, 10 * MIN, "metrics_10m"],
+  "7d": [7 * 24 * 3600_000, 60 * MIN, "metrics_10m"],
+  "30d": [30 * 24 * 3600_000, 240 * MIN, "metrics_10m"],
+};
+
+// Combines summaries of the same machine or app: averages, except <field>Max (peaks), which take the largest.
+function mergeSummaries(list) {
+  const sum = {};
+  const cnt = {};
+  for (const x of list) {
+    for (const [k, v] of Object.entries(x ?? {})) {
+      if (typeof v !== "number") continue;
+      if (k.endsWith("Max")) sum[k] = Math.max(sum[k] ?? -Infinity, v);
+      else {
+        sum[k] = (sum[k] ?? 0) + v;
+        cnt[k] = (cnt[k] ?? 0) + 1;
+      }
+    }
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(sum)) {
+    const x = cnt[k] ? v / cnt[k] : v;
+    out[k] = Math.abs(x) >= 100 ? Math.round(x) : Math.round(x * 100) / 100;
+  }
+  return out;
+}
+
+// { machine: { h, a: { app } } } rows of one bucket -> one { machine: { h, a } }.
+function mergeFleet(rows) {
+  const byMachine = {};
+  for (const row of rows) for (const [m, x] of Object.entries(row)) (byMachine[m] ??= []).push(x);
+  const out = {};
+  for (const [m, list] of Object.entries(byMachine)) {
+    const apps = {};
+    for (const x of list) for (const [app, a] of Object.entries(x.a ?? {})) (apps[app] ??= []).push(a);
+    out[m] = { h: mergeSummaries(list.map((x) => x.h)), a: Object.fromEntries(Object.entries(apps).map(([k, v]) => [k, mergeSummaries(v)])) };
+  }
+  return out;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -131,6 +181,8 @@ export class Control extends DurableObject {
          seen INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS starts (machine INTEGER PRIMARY KEY, at INTEGER NOT NULL, by TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS metrics_1m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS metrics_10m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
     ]) {
       this.sql.exec(query);
     }
@@ -146,6 +198,10 @@ export class Control extends DurableObject {
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
     this.lastCleanup = 0;
+    this.liveMetrics = new Map(); // machine -> { run, t, h, a }, the newest sample from the run that speaks for it
+    this.pendingMetrics = new Map(); // minute -> { machine: { h, a } }, not yet written
+    this.lastRollup = 0;
+    this.metricsCache = new Map(); // range -> { at, body }
     this.dnsError = null;
   }
 
@@ -225,6 +281,7 @@ export class Control extends DurableObject {
     try {
       if (request.method === "GET" && path === "/") return html(STATUS_PAGE);
       if (request.method === "GET" && path === "/admin") return html(ADMIN_PAGE);
+      if (request.method === "GET" && path === "/metrics") return html(METRICS_PAGE);
       if (path.startsWith("/admin/api/")) {
         // The portal is open to anyone with the URL (no sign-in); only refuse changes sent from other sites.
         const origin = request.headers.get("origin");
@@ -252,6 +309,7 @@ export class Control extends DurableObject {
       if (!ok) throw new HttpError(401, "bad token");
     };
     if (method === "GET" && route === "/status") return json(this.status());
+    if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
     if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
     if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts("watchdog", Date.now()) });
     if (method === "POST" && route === "/roll") return need(node), json(this.roll(url.searchParams.get("machine")));
@@ -451,6 +509,7 @@ export class Control extends DurableObject {
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
     }
     this.advanceRollouts(now);
+    this.takeMetrics(r, body.metrics, now);
     if (!r.retire && (machine > this.machines() || this.superseded(r, now))) {
       r.retire = 1;
       this.saveRun(r);
@@ -507,14 +566,126 @@ export class Control extends DurableObject {
   }
 
   cleanup(now) {
+    this.flushMetrics(now);
+    if (now - this.lastRollup > MIN) {
+      this.lastRollup = now;
+      this.rollupMetrics(now);
+    }
     if (now - this.lastCleanup < 10 * 60_000) return;
     this.lastCleanup = now;
+    this.sql.exec("DELETE FROM metrics_1m WHERE t < ?", now - KEEP_1M_MS);
+    this.sql.exec("DELETE FROM metrics_10m WHERE t < ?", now - KEEP_10M_MS);
     for (const r of this.runs.values()) {
       if (now - r.seen > 2 * 3600_000) {
         this.runs.delete(r.id);
         this.sql.exec("DELETE FROM runs WHERE id = ?", r.id);
       }
     }
+  }
+
+  // ---- metrics ----
+
+  // The run that speaks for a machine: its newest ready run, or its newest run if none is ready yet.
+  // During a handover two runs (two different VMs) report; only one of them is the machine on the charts.
+  speaksFor(r, now) {
+    const runs = this.liveRuns(now).filter((x) => x.machine === r.machine);
+    const pick = (list) => list.sort((a, b) => b.started - a.started)[0];
+    return (pick(runs.filter((x) => x.ready)) ?? pick(runs))?.id === r.id;
+  }
+
+  takeMetrics(r, metrics, now) {
+    if (!isMap(metrics) || r.machine > this.machines() || !this.speaksFor(r, now)) return;
+    if (isMap(metrics.live) && isMap(metrics.live.h)) {
+      this.liveMetrics.set(r.machine, { run: r.id, started: r.started, t: Number(metrics.live.t) || now, h: metrics.live.h, a: isMap(metrics.live.a) ? metrics.live.a : {} });
+    }
+    for (const m of Array.isArray(metrics.minutes) ? metrics.minutes.slice(-60) : []) {
+      const t = Number(m?.t);
+      if (!Number.isInteger(t) || t % MIN || t > now || now - t > KEEP_1M_MS || !isMap(m.h)) continue;
+      const slot = this.pendingMetrics.get(t) ?? {};
+      slot[r.machine] = { h: m.h, a: isMap(m.a) ? m.a : {} };
+      this.pendingMetrics.set(t, slot);
+    }
+  }
+
+  // Writes each finished minute as one row; a minute that already has a row (a late summary) is merged into it.
+  flushMetrics(now) {
+    for (const [t, slot] of this.pendingMetrics) {
+      if (now - t < FLUSH_AFTER_MS) continue;
+      const old = this.all("SELECT data FROM metrics_1m WHERE t = ?", t)[0];
+      const data = old ? { ...JSON.parse(old.data), ...slot } : slot;
+      this.sql.exec("INSERT INTO metrics_1m (t, data) VALUES (?, ?) ON CONFLICT (t) DO UPDATE SET data = excluded.data", t, JSON.stringify(data));
+      this.pendingMetrics.delete(t);
+      // A late minute in an already rolled-up 10-minute bucket: roll that bucket up again.
+      const bucket = t - (t % (10 * MIN));
+      if (bucket <= Number(this.settings.get("rolled10") ?? 0)) this.rollupBucket(bucket);
+    }
+  }
+
+  rollupBucket(b) {
+    const rows = this.all("SELECT data FROM metrics_1m WHERE t >= ? AND t < ?", b, b + 10 * MIN).map((r) => JSON.parse(r.data));
+    if (!rows.length) return;
+    this.sql.exec("INSERT INTO metrics_10m (t, data) VALUES (?, ?) ON CONFLICT (t) DO UPDATE SET data = excluded.data", b, JSON.stringify(mergeFleet(rows)));
+  }
+
+  // 10-minute rows for every bucket whose minutes are all written.
+  rollupMetrics(now) {
+    const step = 10 * MIN;
+    let last = Number(this.settings.get("rolled10") ?? 0);
+    if (!last) last = now - (now % step) - 2 * step;
+    for (let b = last + step, n = 0; b + step + FLUSH_AFTER_MS <= now && n < 300; b += step, n++) {
+      this.rollupBucket(b);
+      last = b;
+    }
+    if (String(last) !== this.settings.get("rolled10")) this.setSetting("rolled10", last);
+  }
+
+  // Columns for charts: t[i], and for each machine its host fields and each app's fields as arrays aligned to t.
+  metrics(rangeName) {
+    const range = RANGES[rangeName];
+    if (!range) throw new HttpError(400, `range is one of ${Object.keys(RANGES).join(", ")}`);
+    const [span, step, table] = range;
+    const now = Date.now();
+    const end = now - (now % step);
+    const from = end - span;
+    const buckets = new Map();
+    for (const row of this.all(`SELECT t, data FROM ${table} WHERE t >= ? ORDER BY t`, from)) {
+      const b = row.t - (row.t % step);
+      (buckets.get(b) ?? buckets.set(b, []).get(b)).push(JSON.parse(row.data));
+    }
+    const t = [];
+    for (let b = from; b <= end; b += step) t.push(b);
+    const machines = {};
+    const col = (obj, k) => (obj[k] ??= new Array(t.length).fill(null));
+    t.forEach((b, i) => {
+      const rows = buckets.get(b);
+      if (!rows) return;
+      for (const [m, x] of Object.entries(rows.length > 1 ? mergeFleet(rows) : rows[0])) {
+        const mm = (machines[m] ??= { h: {}, a: {} });
+        for (const [k, v] of Object.entries(x.h ?? {})) col(mm.h, k)[i] = v;
+        for (const [app, a] of Object.entries(x.a ?? {})) {
+          const aa = (mm.a[app] ??= {});
+          for (const [k, v] of Object.entries(a)) col(aa, k)[i] = v;
+        }
+      }
+    });
+    const live = {};
+    for (const [m, x] of this.liveMetrics) {
+      const r = this.runs.get(x.run);
+      if (now - x.t > LIVE_MS || !r) continue;
+      live[m] = { ...x, ready: Boolean(r.ready), status: r.status };
+    }
+    return {
+      now, range: rangeName, step, repo: this.env.REPO, machines: this.machines(),
+      projects: [...this.projects.values()].map((p) => this.describe(p)).sort((a, b) => a.name.localeCompare(b.name)),
+      t, m: machines, live,
+    };
+  }
+
+  metricsResponse(rangeName) {
+    const now = Date.now();
+    const c = this.metricsCache.get(rangeName);
+    if (!c || now - c.at > 15_000) this.metricsCache.set(rangeName, { at: now, body: JSON.stringify(this.metrics(rangeName)) });
+    return new Response(this.metricsCache.get(rangeName).body, { headers: { "content-type": "application/json", "cache-control": "no-store" } });
   }
 
   status() {

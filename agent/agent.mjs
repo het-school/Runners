@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
+import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
 const machine = Number(env.MACHINE);
@@ -206,15 +207,29 @@ async function startTunnel() {
 
 let ready = false;
 
+// Response time of each project through the router, for the metrics: { app: { lat (ms), err (0 or 1) } }.
+async function probeApps() {
+  const out = {};
+  await Promise.all([...projects].filter(([, p]) => p.port && !p.busy && domain).map(async ([name]) => {
+    const t = performance.now();
+    const { code, routed } = await probe(`${name}-${machine}.${domain}`);
+    out[name] = { lat: performance.now() - t, err: code && routed && code < 500 ? 0 : 1 };
+  }));
+  return out;
+}
+const metrics = startMetrics({ probe: probeApps });
+
 async function sync() {
   const status = Object.fromEntries([...projects].map(([name, p]) => [name, { v: p.v, s: p.s, e: p.e || undefined }]));
+  const sent = metrics.payload();
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ machine, run, started, ready, status }),
+    body: JSON.stringify({ machine, run, started, ready, status, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  metrics.confirm(sent);
   return res.json();
 }
 

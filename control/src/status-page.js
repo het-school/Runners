@@ -30,7 +30,7 @@ export const STATUS_PAGE = `<!doctype html>
 </head>
 <body>
 <main>
-  <h1>Runner</h1>
+  <h1>Runner <a href="/metrics" style="font-size:14px;font-weight:500;margin-left:8px">Metrics →</a></h1>
   <div class="sub" id="sub">Loading…</div>
   <h2>Projects</h2>
   <div class="card"><table id="projects"></table></div>
