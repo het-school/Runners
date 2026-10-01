@@ -342,7 +342,7 @@ function render() {
         <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
-      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.state === "stateful" ? ` · <b>stateful</b> ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB${p.over.length ? ` <span class="bad">over the limit (${p.over.map(esc).join(", ")}), read-only</span>` : ""}` : ""}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.stateful ? ` · <b>stateful</b> ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB${p.over.length ? ` <span class="bad">over the limit (${p.over.map(esc).join(", ")}), read-only</span>` : ""}` : ""}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
@@ -406,7 +406,7 @@ function fill(spec) {
   const files = { ...(spec.files || {}) };
   $("ed-port").value = spec.port ?? "";
   $("ed-replicas").value = spec.replicas ?? "";
-  $("ed-state").value = spec.state ?? "stateless";
+  $("ed-state").value = spec.stateful ? "stateful" : "stateless";
   $("ed-data").value = spec.data ?? "";
   $("ed-storage").value = spec.storage ?? "";
   $("ed-stateful").hidden = $("ed-state").value !== "stateful";
@@ -450,8 +450,8 @@ function renderDetails() {
     return `<tr><td>${n}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
       <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
-      <td>${p.state === "stateful" ? `<span class="meta">${esc(why?.replica ?? `m${n}`)}: ${mb(p.usage?.replicas?.[why?.replica ?? `m${n}`] ?? 0)} MB${p.over.includes(why?.replica ?? `m${n}`) ? ' <span class="bad">over, read-only</span>' : ""}</span>` : ""}</td>
-      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}${p.state === "stateful" && !p.enabled && why ? ` <button type="button" class="small danger" data-wipe="${esc(why.replica)}">Wipe data</button>` : ""}</td>
+      <td>${p.stateful ? `<span class="meta">${esc(why?.replica ?? `m${n}`)}: ${mb(p.usage?.replicas?.[why?.replica ?? `m${n}`] ?? 0)} MB${p.over.includes(why?.replica ?? `m${n}`) ? ' <span class="bad">over, read-only</span>' : ""}</span>` : ""}</td>
+      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}${p.stateful && !p.enabled && why ? ` <button type="button" class="small danger" data-wipe="${esc(why.replica)}">Wipe data</button>` : ""}</td>
       <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
   }).join("");
 
@@ -473,7 +473,7 @@ function renderDetails() {
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
       <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} placed`}</dd></div>
-      <div><dt>State</dt><dd>${p.state === "stateful" ? `stateful · ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB per replica${p.usage ? ` <span class="meta">(measured ${esc(ago(status.now - p.usage.at))} ago)</span>` : ""}` : "stateless"}</dd></div>
+      <div><dt>State</dt><dd>${p.stateful ? `stateful · ${esc(p.data)} · ${mb(p.usage?.total)} of ${p.storage} MB per replica${p.usage ? ` <span class="meta">(measured ${esc(ago(status.now - p.usage.at))} ago)</span>` : ""}` : "stateless"}</dd></div>
       <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
@@ -641,7 +641,7 @@ document.addEventListener("click", async (ev) => {
     if (act === "edit") return openEditor(name);
     if (act === "retry") {
       const p = await api("GET", `/projects/${name}`);
-      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port, replicas: p.replicas, state: p.state, data: p.data, storage: p.storage });
+      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port, replicas: p.replicas, state: p.stateful ? "stateful" : "stateless", data: p.data, storage: p.storage });
       toast(`Retrying ${name} v${p.version} on every machine`);
     }
     if (act === "disable") {

@@ -596,7 +596,7 @@ export class Control extends DurableObject {
       replicas: replicas === REPLICAS_ALL ? "all" : replicas,
       placed, // the machines it's placed on (empty when replicas is "all": then it's every machine); leaving = being moved away
       staying,
-      state: latest?.stateful ? "stateful" : "stateless",
+      stateful: Boolean(latest?.stateful),
       data: latest?.data ?? null,
       storage: latest?.storage ?? null, // MB per replica
       usage, // { at, total, replicas: { r0: bytes, ... } } from the last R2 scan, for stateful projects
@@ -627,11 +627,11 @@ export class Control extends DurableObject {
       files: spec.files,
       port: spec.port,
       replicas: spec.replicas === REPLICAS_ALL ? "all" : spec.replicas,
-      state: spec.stateful ? "stateful" : "stateless",
+      stateful: Boolean(spec.stateful),
       data: spec.data,
       storage: spec.storage,
       versions: this.all("SELECT version, port, replicas, stateful, storage, created FROM versions WHERE name = ? ORDER BY version", name)
-        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1, state: v.stateful ? "stateful" : "stateless" })),
+        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1, stateful: Boolean(v.stateful) })),
     };
   }
 

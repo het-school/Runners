@@ -129,6 +129,10 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left.
   - [`roll.yml`](.github/workflows/roll.yml) restarts the fleet one machine at a time when the agent changes.
 
+## Tests
+
+`control/test/*.sh` run the control plane locally with `wrangler dev` against a fake Cloudflare API and drive it the way the agents and the portal do; see [`control/test/README.md`](control/test/README.md).
+
 ## Setup notes
 
 - **Repo secrets:** `CONTROL_NODE_TOKEN` (the same value as the Worker's `NODE_TOKEN`). Tunnel tokens come from the control plane.
