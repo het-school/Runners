@@ -207,17 +207,7 @@ async function startTunnel() {
 
 let ready = false;
 
-// Response time of each project through the router, for the metrics: { app: { lat (ms), err (0 or 1) } }.
-async function probeApps() {
-  const out = {};
-  await Promise.all([...projects].filter(([, p]) => p.port && !p.busy && domain).map(async ([name]) => {
-    const t = performance.now();
-    const { code, routed } = await probe(`${name}-${machine}.${domain}`);
-    out[name] = { lat: performance.now() - t, err: code && routed && code < 500 ? 0 : 1 };
-  }));
-  return out;
-}
-const metrics = startMetrics({ probe: probeApps });
+const metrics = startMetrics();
 
 async function sync() {
   const status = Object.fromEntries([...projects].map(([name, p]) => [name, { v: p.v, s: p.s, e: p.e || undefined }]));

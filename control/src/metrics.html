@@ -541,79 +541,52 @@ function appStack(cols, unitTotal) {
 }
 const liveRuns = () => Object.entries(state.data.live).map(([m, x]) => ({ m: Number(m), ...x })).sort((a, b) => a.m - b.m);
 const sumLive = (f) => liveRuns().reduce((s, r) => s + (isNum(f(r)) ? f(r) : 0), 0);
-const appStatus = (r, app) => r.status?.[app]?.s;
-const statusDot = (s) => `<span class="st ${s === "healthy" ? "good" : s === "failed" ? "critical" : s ? "warning" : ""}">${esc(s ?? "n/a")}</span>`;
 
 // ---------- views ----------
+// Four things everywhere: CPU, memory, disk I/O, network I/O.
+const pctOf = (a, b) => (isNum(a) && b > 0 ? (100 * a) / b : null);
+const io = (read, write) => `${F.rate(read)} <span class="s">${F.rate(write)}</span>`;
+
 function renderFleet(main) {
   const d = state.data;
   const live = liveRuns();
-  const cores = sumLive((r) => r.h.cores);
   const memTotal = sumLive((r) => r.h.memTotal);
   const memUsed = sumLive((r) => r.h.memUsed);
-  let healthy = 0, instances = 0;
-  for (const r of live) for (const p of d.projects.filter((p) => p.enabled)) { instances++; if (appStatus(r, p.name) === "healthy") healthy++; }
   tiles(main, [
-    { label: "Machines reporting", value: `${live.length} / ${d.machines}`, sub: `${cores} cores in all` },
-    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: `busiest machine ${F.pct(Math.max(0, ...live.map((r) => r.h.cpu)))}` },
-    { label: "Load, per core", value: cores ? (sumLive((r) => r.h.load1) / cores).toFixed(2) : "–", sub: `1m load ${F.load(sumLive((r) => r.h.load1))} in all` },
+    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: `${live.length} of ${d.machines} machines reporting` },
     { label: "Memory used", value: memTotal ? F.pct((100 * memUsed) / memTotal) : "–", sub: `${bytes(memUsed)} of ${bytes(memTotal)}` },
-    { label: "Network in / out", value: F.rate(sumLive((r) => r.h.netRx)), sub: `out ${F.rate(sumLive((r) => r.h.netTx))}` },
     { label: "Disk read / write", value: F.rate(sumLive((r) => r.h.diskRead)), sub: `write ${F.rate(sumLive((r) => r.h.diskWrite))}` },
-    { label: "TCP connections", value: F.num(sumLive((r) => r.h.tcpEstab)), sub: `retransmits ${F.pct(live.length ? sumLive((r) => r.h.tcpRetrans) / live.length : null)}` },
-    { label: "App instances healthy", value: `${healthy} / ${instances}`, sub: `${d.projects.filter((p) => p.enabled).length} apps × ${live.length} machines` },
+    { label: "Network in / out", value: F.rate(sumLive((r) => r.h.netRx)), sub: `out ${F.rate(sumLive((r) => r.h.netTx))}` },
   ]);
   const h = document.createElement("h2");
   h.textContent = "Machines now";
   main.append(h);
-  table(main, ["Machine", "Run age", "CPU", "Load 1 / 5 / 15", "Memory", "Swap", "Disk busy", "Disk space", "Net in / out", "Disk r / w", "TCP", "Apps"],
-    live.map((r) => {
-      const x = r.h;
-      const apps = Object.keys(r.status ?? {});
-      const ok = apps.filter((a) => r.status[a].s === "healthy").length;
-      return {
-        m: r.m,
-        cells: [
-          `<b>${r.m}</b>${r.ready ? "" : ' <span class="s">starting</span>'}`,
-          ago(d.now - r.started),
-          F.pct(x.cpu) + meter(x.cpu),
-          `${F.load(x.load1)} <span class="s">${F.load(x.load5)} ${F.load(x.load15)}</span>`,
-          F.pct((100 * x.memUsed) / x.memTotal) + meter((100 * x.memUsed) / x.memTotal),
-          x.swapTotal ? bytes(x.swapUsed) : '<span class="s">none</span>',
-          F.pct(x.diskUtil) + meter(x.diskUtil),
-          F.pct((100 * x.fsUsed) / x.fsTotal) + meter((100 * x.fsUsed) / x.fsTotal),
-          `${F.rate(x.netRx)} <span class="s">${F.rate(x.netTx)}</span>`,
-          `${F.rate(x.diskRead)} <span class="s">${F.rate(x.diskWrite)}</span>`,
-          F.num(x.tcpEstab),
-          statusDot(ok === apps.length ? "healthy" : apps.some((a) => r.status[a].s === "failed") ? "failed" : "applying").replace(/>[^<]*<\/span>$/, `>${ok}/${apps.length}</span>`),
-        ],
-      };
-    }), (row) => go("machine", row.m));
+  table(main, ["Machine", "CPU", "Memory", "Disk read / write", "Network in / out"],
+    live.map((r) => ({
+      m: r.m,
+      cells: [`<b>${r.m}</b>${r.ready ? "" : ' <span class="s">starting</span>'}`, F.pct(r.h.cpu) + meter(r.h.cpu),
+        F.pct(pctOf(r.h.memUsed, r.h.memTotal)) + meter(pctOf(r.h.memUsed, r.h.memTotal)) + ` <span class="s">${bytes(r.h.memUsed)}</span>`,
+        io(r.h.diskRead, r.h.diskWrite), io(r.h.netRx, r.h.netTx)],
+    })), (row) => go("machine", row.m));
 
   const ms = machineNums();
   const rowsOf = (f) => ms.map((m) => ({ name: `machine ${m}`, values: f(m), onClick: () => go("machine", m) }));
   const heat = section(main, "Per machine", "darker = higher · click a row for that machine");
-  heatmap(card(heat, "CPU busy", "% of all cores", true), d.t, rowsOf((m) => hcol(m, "cpu")), { unit: "pct", max: 100 });
-  heatmap(card(heat, "Memory used", "% of RAM (excluding reclaimable cache)", true), d.t, rowsOf((m) => map2(hcol(m, "memUsed"), hcol(m, "memTotal"), (u, t) => (100 * u) / t)), { unit: "pct", max: 100 });
-  heatmap(card(heat, "Load per core", "1-minute load average ÷ cores", true), d.t, rowsOf((m) => map2(hcol(m, "load1"), hcol(m, "cores"), (l, c) => l / c)), { unit: "load" });
-  heatmap(card(heat, "Disk busy", "% of time the disk had I/O in flight", true), d.t, rowsOf((m) => hcol(m, "diskUtil")), { unit: "pct", max: 100 });
-  heatmap(card(heat, "Network throughput", "in + out", true), d.t, rowsOf((m) => map2(hcol(m, "netRx"), hcol(m, "netTx"), (a, b) => a + b)), { unit: "rate" });
-  heatmap(card(heat, "Pressure stall: CPU", "% of time some task waited for CPU (PSI)", true), d.t, rowsOf((m) => hcol(m, "psiCpu")), { unit: "pct" });
+  heatmap(card(heat, "CPU", "% of all cores", true), d.t, rowsOf((m) => hcol(m, "cpu")), { unit: "pct", max: 100 });
+  heatmap(card(heat, "Memory", "% used", true), d.t, rowsOf((m) => map2(hcol(m, "memUsed"), hcol(m, "memTotal"), (u, t) => (100 * u) / t)), { unit: "pct", max: 100 });
+  heatmap(card(heat, "Disk I/O", "read + write", true), d.t, rowsOf((m) => map2(hcol(m, "diskRead"), hcol(m, "diskWrite"), (a, b) => a + b)), { unit: "rate" });
+  heatmap(card(heat, "Network I/O", "in + out", true), d.t, rowsOf((m) => map2(hcol(m, "netRx"), hcol(m, "netTx"), (a, b) => a + b)), { unit: "rate" });
 
-  const g = section(main, "Fleet totals");
+  const g = section(main, "Whole fleet");
   lineChart(card(g, "CPU", "average across machines, and the busiest machine"), d.t, [
-    { name: "average", values: fleetH("cpu", "avg") },
-    { name: "busiest machine", values: fleetH("cpu", "max") },
-  ], { unit: "pct", max: 100 });
-  lineChart(card(g, "Memory used", "all machines"), d.t, [{ name: "used", values: fleetH("memUsed") }, { name: "cache", values: fleetH("memCached") }],
+    { name: "average", values: fleetH("cpu", "avg") }, { name: "busiest machine", values: fleetH("cpu", "max") },
+  ], { unit: "pct" });
+  lineChart(card(g, "Memory used", "all machines"), d.t, [{ name: "used", values: fleetH("memUsed") }],
     { unit: "bytes", ref: { name: "installed", value: Math.max(0, ...fleetH("memTotal").filter(isNum)) } });
-  lineChart(card(g, "CPU by app", "cores in use, summed over machines"), d.t, appStack((a) => combine(machineNums().map((m) => acol(m, a, "cpu")), "sum")), { unit: "cores", stacked: true });
-  lineChart(card(g, "Memory by app", "working set, summed over machines"), d.t, appStack((a) => combine(machineNums().map((m) => acol(m, a, "mem")), "sum")), { unit: "bytes", stacked: true });
-  lineChart(card(g, "Network", "all machines"), d.t, [{ name: "in", values: fleetH("netRx") }, { name: "out", values: fleetH("netTx") }], { unit: "rate" });
-  lineChart(card(g, "Disk throughput", "all machines"), d.t, [{ name: "read", values: fleetH("diskRead") }, { name: "write", values: fleetH("diskWrite") }], { unit: "rate" });
-  lineChart(card(g, "Load average", "1 minute, summed"), d.t, [{ name: "load", values: fleetH("load1") }], { unit: "load", ref: { name: "cores", value: Math.max(0, ...fleetH("cores").filter(isNum)) } });
-  lineChart(card(g, "TCP connections", "established, all machines"), d.t, [{ name: "established", values: fleetH("tcpEstab") }], { unit: "num" });
-  lineChart(card(g, "Machines reporting", "per sample"), d.t, [{ name: "machines", values: combine(machineNums().map((m) => (hcol(m, "cpu") ?? []).map((v) => (isNum(v) ? 1 : null))), "sum") }], { unit: "num", ref: { name: "wanted", value: d.machines } });
+  lineChart(card(g, "Disk I/O", "all machines"), d.t, [{ name: "read", values: fleetH("diskRead") }, { name: "write", values: fleetH("diskWrite") }], { unit: "rate" });
+  lineChart(card(g, "Network I/O", "all machines"), d.t, [{ name: "in", values: fleetH("netRx") }, { name: "out", values: fleetH("netTx") }], { unit: "rate" });
+  lineChart(card(g, "CPU by app", "summed over machines"), d.t, appStack((a) => combine(ms.map((m) => acol(m, a, "cpu")), "sum")), { unit: "cores", stacked: true });
+  lineChart(card(g, "Memory by app", "summed over machines"), d.t, appStack((a) => combine(ms.map((m) => acol(m, a, "mem")), "sum")), { unit: "bytes", stacked: true });
 }
 
 function renderMachine(main, m) {
@@ -623,18 +596,14 @@ function renderMachine(main, m) {
   const H = (k) => hcol(m, k);
   if (r) {
     tiles(main, [
-      { label: "CPU", value: F.pct(x.cpu), sub: `${x.cores} cores · busiest core ${F.pct(x.cpuCoreMax)}` },
-      { label: "Load 1 / 5 / 15", value: F.load(x.load1), sub: `${F.load(x.load5)} · ${F.load(x.load15)}` },
-      { label: "Memory used", value: F.pct((100 * x.memUsed) / x.memTotal), sub: `${bytes(x.memUsed)} of ${bytes(x.memTotal)}` },
-      { label: "Swap used", value: x.swapTotal ? bytes(x.swapUsed) : "none", sub: x.swapTotal ? `of ${bytes(x.swapTotal)}` : "" },
-      { label: "Disk busy", value: F.pct(x.diskUtil), sub: `await ${F.ms(x.diskAwait)}` },
-      { label: "Disk space", value: F.pct((100 * x.fsUsed) / x.fsTotal), sub: `${bytes(x.fsUsed)} of ${bytes(x.fsTotal)}` },
+      { label: "CPU", value: F.pct(x.cpu) },
+      { label: "Memory used", value: F.pct(pctOf(x.memUsed, x.memTotal)), sub: `${bytes(x.memUsed)} of ${bytes(x.memTotal)}` },
+      { label: "Disk read / write", value: F.rate(x.diskRead), sub: `write ${F.rate(x.diskWrite)}` },
       { label: "Network in / out", value: F.rate(x.netRx), sub: `out ${F.rate(x.netTx)}` },
-      { label: "Run", value: ago(d.now - r.started), sub: `run ${r.run}${r.ready ? "" : " · starting"}` },
     ]);
     const link = document.createElement("div");
     link.className = "note";
-    link.innerHTML = `Sampled ${ago(d.now - r.t)} ago · <a href="https://github.com/${esc(d.repo)}/actions/runs/${esc(r.run)}" target="_blank" rel="noopener">GitHub Actions run ${esc(r.run)}</a>`;
+    link.innerHTML = `Run ${ago(d.now - r.started)} old · <a href="https://github.com/${esc(d.repo)}/actions/runs/${esc(r.run)}" target="_blank" rel="noopener">GitHub Actions run ${esc(r.run)}</a>`;
     main.append(link);
   } else {
     const n = document.createElement("div");
@@ -642,116 +611,64 @@ function renderMachine(main, m) {
     n.textContent = `Machine ${m} isn't reporting right now; the charts show what it sent earlier.`;
     main.append(n);
   }
-
-  const cpu = section(main, "CPU");
-  lineChart(card(cpu, "CPU time by kind", "% of all cores"), d.t, [
-    { name: "user", values: H("cpuUser") }, { name: "system", values: H("cpuSys") }, { name: "I/O wait", values: H("cpuIowait") },
-    { name: "steal", values: H("cpuSteal") }, { name: "irq", values: H("cpuIrq") }, { name: "nice", values: H("cpuNice") },
-  ], { unit: "pct", stacked: true });
-  lineChart(card(cpu, "CPU busy", "average of the interval, its peak, and the busiest core"), d.t, [
-    { name: "average", values: H("cpu") }, { name: "peak", values: H("cpuMax") }, { name: "busiest core", values: H("cpuCoreMax") },
-  ], { unit: "pct" });
-  lineChart(card(cpu, "Load average"), d.t, [{ name: "1 min", values: H("load1") }, { name: "5 min", values: H("load5") }, { name: "15 min", values: H("load15") }],
-    { unit: "load", ref: { name: "cores", value: x.cores ?? Math.max(0, ...(H("cores") ?? []).filter(isNum)) } });
-  lineChart(card(cpu, "Pressure stall (PSI)", "% of time some task was waiting on the resource"), d.t, [
-    { name: "CPU", values: H("psiCpu") }, { name: "memory", values: H("psiMem") }, { name: "I/O", values: H("psiIo") },
-  ], { unit: "pct" });
-  lineChart(card(cpu, "Context switches"), d.t, [{ name: "switches", values: H("ctxt") }], { unit: "persec" });
-  lineChart(card(cpu, "Interrupts"), d.t, [{ name: "interrupts", values: H("intr") }], { unit: "persec" });
-  lineChart(card(cpu, "Processes", "runnable and blocked on I/O"), d.t, [{ name: "running", values: H("procsRunning") }, { name: "blocked", values: H("procsBlocked") }], { unit: "num" });
-  lineChart(card(cpu, "Process starts"), d.t, [{ name: "forks", values: H("forks") }], { unit: "persec" });
-
-  const mem = section(main, "Memory");
-  lineChart(card(mem, "Memory"), d.t, [{ name: "used", values: H("memUsed") }, { name: "cache", values: H("memCached") }, { name: "free", values: H("memFree") }],
+  const g = section(main, "Machine");
+  lineChart(card(g, "CPU", "average and peak, % of all cores"), d.t, [{ name: "average", values: H("cpu") }, { name: "peak", values: H("cpuMax") }], { unit: "pct" });
+  lineChart(card(g, "Memory used"), d.t, [{ name: "used", values: H("memUsed") }],
     { unit: "bytes", ref: { name: "installed", value: x.memTotal ?? Math.max(0, ...(H("memTotal") ?? []).filter(isNum)) } });
-  lineChart(card(mem, "Swap used"), d.t, [{ name: "swap", values: H("swapUsed") }], { unit: "bytes", ref: x.swapTotal ? { name: "swap size", value: x.swapTotal } : undefined });
-  lineChart(card(mem, "Dirty and writeback", "waiting to be written to disk"), d.t, [{ name: "dirty", values: H("memDirty") }], { unit: "bytes" });
-  lineChart(card(mem, "Memory pressure (PSI)", "some = a task waited; full = every task waited"), d.t, [{ name: "some", values: H("psiMem") }, { name: "full", values: H("psiMemFull") }], { unit: "pct" });
-
-  const disk = section(main, "Disk");
-  lineChart(card(disk, "Throughput"), d.t, [{ name: "read", values: H("diskRead") }, { name: "write", values: H("diskWrite") }], { unit: "rate" });
-  lineChart(card(disk, "Operations"), d.t, [{ name: "reads", values: H("diskReadOps") }, { name: "writes", values: H("diskWriteOps") }], { unit: "persec" });
-  lineChart(card(disk, "Busy", "% of time with I/O in flight, average and peak"), d.t, [{ name: "average", values: H("diskUtil") }, { name: "peak", values: H("diskUtilMax") }], { unit: "pct", max: 100 });
-  lineChart(card(disk, "Latency", "average time per I/O"), d.t, [{ name: "await", values: H("diskAwait") }, { name: "peak", values: H("diskAwaitMax") }], { unit: "ms" });
-  lineChart(card(disk, "I/O pressure (PSI)"), d.t, [{ name: "some", values: H("psiIo") }, { name: "full", values: H("psiIoFull") }], { unit: "pct" });
-  lineChart(card(disk, "Space used", "root filesystem"), d.t, [{ name: "used", values: H("fsUsed") }], { unit: "bytes", ref: { name: "size", value: x.fsTotal ?? Math.max(0, ...(H("fsTotal") ?? []).filter(isNum)) } });
-
-  const net = section(main, "Network");
-  lineChart(card(net, "Throughput"), d.t, [{ name: "in", values: H("netRx") }, { name: "out", values: H("netTx") }], { unit: "rate" });
-  lineChart(card(net, "Packets"), d.t, [{ name: "in", values: H("netRxPkts") }, { name: "out", values: H("netTxPkts") }], { unit: "persec" });
-  lineChart(card(net, "TCP connections", "established"), d.t, [{ name: "established", values: H("tcpEstab") }], { unit: "num" });
-  lineChart(card(net, "TCP retransmits", "% of segments sent"), d.t, [{ name: "retransmits", values: H("tcpRetrans") }], { unit: "pct" });
-  lineChart(card(net, "Errors and drops"), d.t, [{ name: "errors", values: H("netErrs") }, { name: "drops", values: H("netDrops") }], { unit: "persec" });
-  lineChart(card(net, "Open files", "file handles in use"), d.t, [{ name: "open files", values: H("fds") }], { unit: "num" });
+  lineChart(card(g, "Disk I/O"), d.t, [{ name: "read", values: H("diskRead") }, { name: "write", values: H("diskWrite") }], { unit: "rate" });
+  lineChart(card(g, "Network I/O"), d.t, [{ name: "in", values: H("netRx") }, { name: "out", values: H("netTx") }], { unit: "rate" });
 
   const apps = section(main, "Apps on this machine");
   const A = (k) => (a) => acol(m, a, k);
-  lineChart(card(apps, "CPU by app", "cores"), d.t, appStack(A("cpu")), { unit: "cores", stacked: true });
-  lineChart(card(apps, "Memory by app", "working set"), d.t, appStack(A("mem")), { unit: "bytes", stacked: true });
-  lineChart(card(apps, "Network by app", "in + out; apps using host networking aren't counted"), d.t, appStack((a) => map2(acol(m, a, "netRx"), acol(m, a, "netTx"), (p, q) => p + q)), { unit: "rate", stacked: true });
-  lineChart(card(apps, "Disk by app", "read + write"), d.t, appStack((a) => map2(acol(m, a, "blkRead"), acol(m, a, "blkWrite"), (p, q) => p + q)), { unit: "rate", stacked: true });
+  const sum2 = (k1, k2) => (a) => map2(acol(m, a, k1), acol(m, a, k2), (p, q) => p + q);
+  lineChart(card(apps, "CPU by app"), d.t, appStack(A("cpu")), { unit: "cores", stacked: true });
+  lineChart(card(apps, "Memory by app"), d.t, appStack(A("mem")), { unit: "bytes", stacked: true });
+  lineChart(card(apps, "Disk I/O by app", "read + write"), d.t, appStack(sum2("diskRead", "diskWrite")), { unit: "rate", stacked: true });
+  lineChart(card(apps, "Network I/O by app", "in + out; apps on host networking aren't counted"), d.t, appStack(sum2("netRx", "netTx")), { unit: "rate", stacked: true });
   if (r) {
     const h = document.createElement("h2");
     h.textContent = "Apps now";
     main.append(h);
-    table(main, ["App", "State", "CPU", "Memory", "Net in / out", "Disk r / w", "Processes", "Containers", "Restarts", "Response"],
+    table(main, ["App", "CPU", "Memory", "Disk read / write", "Network in / out"],
       Object.entries(r.a).sort(([a], [b]) => (a === "_system") - (b === "_system") || a.localeCompare(b)).map(([a, v]) => ({
         app: a,
-        cells: [`<b>${esc(appLabel(a))}</b>`, a === "_system" ? "" : statusDot(appStatus(r, a)), F.cores(v.cpu), bytes(v.mem),
-          `${F.rate(v.netRx)} <span class="s">${F.rate(v.netTx)}</span>`, `${F.rate(v.blkRead)} <span class="s">${F.rate(v.blkWrite)}</span>`,
-          F.num(v.pids), `${v.running ?? 0}/${v.containers ?? 0}`, F.num(v.restarts), isNum(v.lat) ? F.ms(v.lat) + (v.err ? ' <span class="s">error</span>' : "") : "–"],
-      })), (row) => row.app !== "_system" && go("app", row.app));
+        cells: [`<b>${esc(appLabel(a))}</b>`, F.cores(v.cpu), bytes(v.mem), io(v.diskRead, v.diskWrite), io(v.netRx, v.netTx)],
+      })), (row) => go("app", row.app));
   }
 }
 
 function renderApp(main, app) {
   const d = state.data;
-  const live = liveRuns();
   const ms = machineNums();
-  const p = d.projects.find((x) => x.name === app);
-  const inst = live.map((r) => ({ r, v: r.a?.[app] })).filter((x) => x.v || x.r.status?.[app]);
-  const healthy = inst.filter((x) => appStatus(x.r, app) === "healthy").length;
-  const lats = inst.map((x) => x.v?.lat).filter(isNum);
+  const inst = liveRuns().filter((r) => r.a?.[app]).map((r) => ({ r, v: r.a[app] }));
+  const total = (k) => inst.reduce((s, x) => s + (x.v[k] ?? 0), 0);
   tiles(main, [
-    { label: "Instances healthy", value: app === "_system" ? `${inst.length}` : `${healthy} / ${inst.length}`, sub: p ? `v${p.version} · ${p.state}${p.port ? ` · port ${p.port}` : ""}` : app === "_system" ? "router and tunnel on every machine" : "not a project any more" },
-    { label: "CPU", value: F.cores(inst.reduce((s, x) => s + (x.v?.cpu ?? 0), 0)), sub: "all machines" },
-    { label: "Memory", value: bytes(inst.reduce((s, x) => s + (x.v?.mem ?? 0), 0)), sub: "working set, all machines" },
-    { label: "Response time", value: lats.length ? F.ms(lats.reduce((a, b) => a + b, 0) / lats.length) : "–", sub: lats.length ? `slowest ${F.ms(Math.max(...lats))} · via the router` : "no port to check" },
-    { label: "Network in / out", value: F.rate(inst.reduce((s, x) => s + (x.v?.netRx ?? 0), 0)), sub: `out ${F.rate(inst.reduce((s, x) => s + (x.v?.netTx ?? 0), 0))}` },
-    { label: "Disk read / write", value: F.rate(inst.reduce((s, x) => s + (x.v?.blkRead ?? 0), 0)), sub: `write ${F.rate(inst.reduce((s, x) => s + (x.v?.blkWrite ?? 0), 0))}` },
-    { label: "Container restarts", value: F.num(inst.reduce((s, x) => s + (x.v?.restarts ?? 0), 0)), sub: "since each run started" },
+    { label: "CPU", value: F.cores(total("cpu")), sub: `${inst.length} machines running it` },
+    { label: "Memory", value: bytes(total("mem")), sub: "all machines" },
+    { label: "Disk read / write", value: F.rate(total("diskRead")), sub: `write ${F.rate(total("diskWrite"))}` },
+    { label: "Network in / out", value: F.rate(total("netRx")), sub: `out ${F.rate(total("netTx"))}` },
   ]);
   const h = document.createElement("h2");
   h.textContent = "Per machine now";
   main.append(h);
-  table(main, ["Machine", "State", "Version", "CPU", "Memory", "Net in / out", "Disk r / w", "Processes", "Containers", "Restarts", "Response"],
-    inst.map(({ r, v = {} }) => ({
-      m: r.m,
-      cells: [`<b>${r.m}</b>`, app === "_system" ? "" : statusDot(appStatus(r, app)) + (r.status?.[app]?.e ? ` <span class="s" title="${esc(r.status[app].e)}">why?</span>` : ""),
-        r.status?.[app] ? "v" + esc(r.status[app].v) : "", F.cores(v.cpu), bytes(v.mem), `${F.rate(v.netRx)} <span class="s">${F.rate(v.netTx)}</span>`,
-        `${F.rate(v.blkRead)} <span class="s">${F.rate(v.blkWrite)}</span>`, F.num(v.pids), `${v.running ?? 0}/${v.containers ?? 0}`, F.num(v.restarts),
-        isNum(v.lat) ? F.ms(v.lat) + (v.err ? ' <span class="s">error</span>' : "") : "–"],
-    })), (row) => go("machine", row.m));
+  table(main, ["Machine", "CPU", "Memory", "Disk read / write", "Network in / out"],
+    inst.map(({ r, v }) => ({ m: r.m, cells: [`<b>${r.m}</b>`, F.cores(v.cpu), bytes(v.mem), io(v.diskRead, v.diskWrite), io(v.netRx, v.netTx)] })),
+    (row) => go("machine", row.m));
 
   const rowsOf = (f) => ms.map((m) => ({ name: `machine ${m}`, values: f(m), onClick: () => go("machine", m) }));
+  const sum2 = (m, k1, k2) => map2(acol(m, app, k1), acol(m, app, k2), (p, q) => p + q);
   const heat = section(main, "Per machine");
   heatmap(card(heat, "CPU", "% of one core", true), d.t, rowsOf((m) => acol(m, app, "cpu")), { unit: "pct" });
-  heatmap(card(heat, "Memory", "working set", true), d.t, rowsOf((m) => acol(m, app, "mem")), { unit: "bytes" });
-  if (ms.some((m) => acol(m, app, "lat"))) heatmap(card(heat, "Response time", "GET / through the machine's router", true), d.t, rowsOf((m) => acol(m, app, "lat")), { unit: "ms" });
+  heatmap(card(heat, "Memory", "", true), d.t, rowsOf((m) => acol(m, app, "mem")), { unit: "bytes" });
+  heatmap(card(heat, "Disk I/O", "read + write", true), d.t, rowsOf((m) => sum2(m, "diskRead", "diskWrite")), { unit: "rate" });
+  heatmap(card(heat, "Network I/O", "in + out", true), d.t, rowsOf((m) => sum2(m, "netRx", "netTx")), { unit: "rate" });
 
-  const A = (k, how = "sum") => combine(ms.map((m) => acol(m, app, k)), how);
-  const g = section(main, "All machines");
-  lineChart(card(g, "CPU", "cores, summed over machines"), d.t, [{ name: "CPU", values: A("cpu") }], { unit: "cores" });
-  lineChart(card(g, "CPU per instance", "average and busiest instance, % of one core"), d.t, [{ name: "average", values: A("cpu", "avg") }, { name: "busiest", values: A("cpuMax", "max") }], { unit: "pct" });
-  lineChart(card(g, "Memory", "working set, summed"), d.t, [{ name: "memory", values: A("mem") }], { unit: "bytes" });
-  lineChart(card(g, "Memory per instance"), d.t, [{ name: "average", values: A("mem", "avg") }, { name: "largest", values: A("memMax", "max") }], { unit: "bytes" });
-  lineChart(card(g, "Response time", "average and slowest instance"), d.t, [{ name: "average", values: A("lat", "avg") }, { name: "slowest", values: A("latMax", "max") }], { unit: "ms" });
-  lineChart(card(g, "Failed checks", "% of response checks that failed or returned 5xx"), d.t, [{ name: "failed", values: A("err", "avg").map((v) => (isNum(v) ? 100 * v : null)) }], { unit: "pct" });
-  lineChart(card(g, "Network", "summed; apps on host networking aren't counted"), d.t, [{ name: "in", values: A("netRx") }, { name: "out", values: A("netTx") }], { unit: "rate" });
-  lineChart(card(g, "Disk", "summed"), d.t, [{ name: "read", values: A("blkRead") }, { name: "write", values: A("blkWrite") }], { unit: "rate" });
-  lineChart(card(g, "Processes", "summed"), d.t, [{ name: "processes", values: A("pids") }], { unit: "num" });
-  lineChart(card(g, "Containers running", "summed"), d.t, [{ name: "running", values: A("running") }, { name: "unhealthy", values: A("unhealthy") }], { unit: "num" });
-  lineChart(card(g, "Container restarts", "summed; resets when a machine hands over"), d.t, [{ name: "restarts", values: A("restarts") }], { unit: "num" });
+  const A = (k) => combine(ms.map((m) => acol(m, app, k)), "sum");
+  const g = section(main, "All machines together");
+  lineChart(card(g, "CPU"), d.t, [{ name: "CPU", values: A("cpu") }], { unit: "cores" });
+  lineChart(card(g, "Memory"), d.t, [{ name: "memory", values: A("mem") }], { unit: "bytes" });
+  lineChart(card(g, "Disk I/O"), d.t, [{ name: "read", values: A("diskRead") }, { name: "write", values: A("diskWrite") }], { unit: "rate" });
+  lineChart(card(g, "Network I/O", "apps on host networking aren't counted"), d.t, [{ name: "in", values: A("netRx") }, { name: "out", values: A("netTx") }], { unit: "rate" });
 }
 
 // ---------- shell ----------

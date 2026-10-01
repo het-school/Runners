@@ -3,7 +3,7 @@
 A self-healing fleet on GitHub Actions: 10 machines each run every project, each machine is online through its own Cloudflare tunnel, and the project specs live in a control plane on Cloudflare (not in this repo).
 
 - **Status page:** https://control.billybishop4-workers.xyz
-- **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, load, memory, pressure stalls, disk, network and TCP for the whole fleet, for each machine and for each app (container CPU, memory, I/O, processes, restarts, response time). History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
+- **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 - **Admin portal:** https://control.billybishop4-workers.xyz/admin. It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
   - add projects and edit them
   - roll back to an earlier version
