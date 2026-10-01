@@ -17,10 +17,18 @@ concurrency:
 
 jobs:
   run:
+    name: machine ${{ matrix.machine }}
     runs-on: ubuntu-latest
     timeout-minutes: 360 # hard cap for GitHub-hosted runners (6 hours)
+    strategy:
+      fail-fast: false # one machine failing shouldn't stop the others
+      matrix:
+        # Machine <n> uses Cloudflare tunnel runner-<n>, whose token is the CF_TUNNEL_TOKEN_<n> secret.
+        machine: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
       DOMAIN: billybishop4-workers.xyz
+      ZONE: 44fb65648f475249f22e9d0cffdd393d # Cloudflare zone ID of DOMAIN
+      MACHINE: ${{ matrix.machine }}
     steps:
       - uses: actions/checkout@v7
 
@@ -51,10 +59,10 @@ jobs:
 
       - name: Open Cloudflare tunnel
         env:
-          TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+          TUNNEL_TOKEN: ${{ secrets[format('CF_TUNNEL_TOKEN_{0}', matrix.machine)] }}
+          CF_DNS_TOKEN: ${{ secrets.CF_DNS_TOKEN }}
         run: |
-          # The "runner" tunnel takes its routes from this file: <project>.$DOMAIN goes to the port in <project>/port.
-          # DNS has *.$DOMAIN pointing at the tunnel, so a new project needs no DNS change.
+          # This machine's tunnel takes its routes from this file: <project>-<machine>.$DOMAIN goes to the port in <project>/port.
           exposed=""
           for p in $STARTED; do
             [ -f "$p/port" ] || continue
@@ -65,7 +73,7 @@ jobs:
           {
             echo "ingress:"
             for p in $exposed; do
-              echo "  - hostname: $p.$DOMAIN"
+              echo "  - hostname: $p-$MACHINE.$DOMAIN"
               echo "    service: http://localhost:$(tr -dc 0-9 < "$p/port")"
             done
             echo "  - service: http_status:404"
@@ -79,6 +87,31 @@ jobs:
             sleep 2
           done
           docker logs tunnel 2>&1 | grep -q 'Registered tunnel connection' || { docker logs tunnel; exit 1; }
+
+          # DNS: point each hostname at this machine's tunnel, and remove ones for projects that are gone.
+          # Best effort: the tunnel is already up, so a DNS hiccup only warns.
+          dns() {
+            curl -s -H "Authorization: Bearer $CF_DNS_TOKEN" -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records$1" "${@:2}"
+          }
+          sync_dns() {
+            target="$(jq -rn --arg t "$TUNNEL_TOKEN" '$t | @base64d | fromjson | .t').cfargotunnel.com"
+            want=$(for p in $exposed; do echo "$p-$MACHINE.$DOMAIN"; done)
+            have=$(dns "?type=CNAME&content=$target&per_page=100" | jq -r '.result[] | "\(.id) \(.name)"')
+            while read -r id name; do
+              [ -n "$id" ] && ! grep -qxF "$name" <<< "$want" && dns "/$id" -X DELETE > /dev/null
+            done <<< "$have"
+            have_names=$(awk '{print $2}' <<< "$have")
+            for h in $want; do
+              grep -qxF "$h" <<< "$have_names" && continue
+              body=$(jq -nc --arg n "$h" --arg c "$target" '{type: "CNAME", name: $n, content: $c, proxied: true, comment: "hetp4401/runner"}')
+              id=$(dns "?name=$h" | jq -r '.result[0].id // empty')
+              if [ -n "$id" ]; then res=$(dns "/$id" -X PUT -d "$body"); else res=$(dns "" -X POST -d "$body"); fi
+              jq -e .success <<< "$res" > /dev/null || echo "::warning::couldn't point $h at this machine: $res"
+            done
+          }
+          sync_dns || echo "::warning::DNS update failed"
+
           for p in $exposed; do
             port=$(tr -dc 0-9 < "$p/port")
             for i in $(seq 30); do
@@ -86,9 +119,9 @@ jobs:
               sleep 2
             done
             if curl -s -o /dev/null -m 5 "http://localhost:$port"; then
-              echo "::notice::$p is live at https://$p.$DOMAIN"
+              echo "::notice::$p is live at https://$p-$MACHINE.$DOMAIN"
             else
-              echo "::warning::$p isn't answering on port $port; https://$p.$DOMAIN will fail until it does"
+              echo "::warning::$p isn't answering on port $port; https://$p-$MACHINE.$DOMAIN will fail until it does"
             fi
           done
 
