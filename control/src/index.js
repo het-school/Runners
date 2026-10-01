@@ -1254,6 +1254,9 @@ export class Control extends DurableObject {
     if (this.liveRuns(now).some((r) => r.machine === n)) throw new HttpError(409, `machine ${n} is still up; stop it first`);
     const slot = this.slots.get(n);
     if (slot) {
+      // Its <project>-n names first: the regular DNS sync only touches records of tunnels it still knows.
+      const records = (await this.cf(`/zones/${this.env.ZONE}/dns_records?type=CNAME&content=${slot.tunnel}.cfargotunnel.com&per_page=1000`)).result;
+      if (records.length) await this.cf(`/zones/${this.env.ZONE}/dns_records/batch`, { method: "POST", body: JSON.stringify({ deletes: records.map((r) => ({ id: r.id })) }) });
       await this.cf(`/accounts/${this.env.ACCOUNT_ID}/cfd_tunnel/${slot.tunnel}?cascade=true`, { method: "DELETE" });
       this.slots.delete(n);
       this.sql.exec("DELETE FROM slots WHERE n = ?", n);
