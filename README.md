@@ -49,7 +49,7 @@ Each replica gets its own directory in the fleet's storage, a Cloudflare R2 buck
 
 What the mount is and isn't: a file is in R2 once the app closes it, reads and writes go through a local cache at disk speed, and files the app still had open when a machine died unexpectedly are lost. That suits files (uploads, content, configs, caches). It doesn't suit databases that keep one file open the whole time (SQLite, Postgres); those need their own replication.
 
-Moving a stateful replica (by hand, by eviction, or a handover) stops it first, waits for its last writes to reach R2, then starts it on the next machine: about a minute of downtime for that project. Automatic rebalancing leaves single-replica stateful projects alone for that reason.
+Moving a stateful replica (by hand, by eviction, or a handover) stops it first, waits for its last writes to reach R2, then starts it on the next machine. The machine taking over gets the spec early, marked *prepare*: it pulls and builds, reports "prepared" and polls every 3 seconds, so once the old copy has stopped it only mounts and starts. Measured gap on a handover: about 25 seconds. Automatic rebalancing still leaves single-replica stateful projects alone.
 
 When a machine goes away, its replicas are placed elsewhere and start there with their data. Measured: a cancelled GitHub run (the agent gets a signal, stops its apps and says it's leaving) had its stateful replica healthy on another machine in 34 s; a machine that vanishes without any signal takes the 75-second liveness timeout plus ~35 s. An agent that can't reach the control plane for 70 s stops its stateful apps itself, so data is never written from two machines.
 
@@ -127,7 +127,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - restarts projects that stop answering
   - routes `<project>-<n>` hostnames through a local Caddy router behind the tunnel
 - **Self-healing**:
-  - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime.
+  - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime. Each run hands over up to an hour early (an offset fixed by its ID), so machines that were replaced together drift apart instead of all cycling in the same window.
   - If a machine dies, the others start a replacement within about 2 minutes.
   - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left.
   - [`roll.yml`](.github/workflows/roll.yml) restarts the fleet one machine at a time when the agent changes.
