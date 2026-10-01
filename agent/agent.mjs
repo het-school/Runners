@@ -83,13 +83,30 @@ async function apply(name, want) {
   const p = { v: want.v, port: want.port, s: "applying", e: "", busy: true, at: Date.now(), misses: 0, storage: want.storage ?? null };
   projects.set(name, p);
   updateRouter();
-  log(`${name}: starting v${want.v}${want.storage ? ` with its data (${want.storage.prefix}${want.storage.readOnly ? ", read-only" : ""})` : ""}`);
-  let s = "healthy";
+  log(`${name}: ${want.prepare ? "preparing" : "starting"} v${want.v}${want.storage ? ` with its data (${want.storage.prefix}${want.storage.readOnly ? ", read-only" : ""})` : ""}`);
+  let s = want.prepare ? "prepared" : "healthy";
   let e = "";
   try {
     const projectDir = `${dir}/${name}`;
     const file = `${projectDir}/compose.yaml`;
     await mkdir(projectDir, { recursive: true });
+    if (want.prepare) {
+      // Its data is still held elsewhere: get everything but the mount and the start out of the way.
+      for (const [path, content] of Object.entries(want.files ?? {})) {
+        const target = resolve(projectDir, path);
+        if (!target.startsWith(`${projectDir}/`)) throw new Error(`file path ${path} points outside the project`);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, content);
+      }
+      await writeFile(file, want.compose);
+      const pull = await sh("docker", ["compose", "-p", name, "-f", file, "pull", "-q", "--ignore-buildable"]);
+      if (!pull.ok) log(`${name}: pull while preparing: ${pull.out.split("\n").pop()}`);
+      const build = await sh("docker", ["compose", "-p", name, "-f", file, "build", "-q"]);
+      if (!build.ok) [s, e] = ["failed", build.out.split("\n").slice(-6).join("\n").slice(-600)];
+      Object.assign(p, { s, e, busy: false, at: Date.now() });
+      log(`${name}: v${want.v} ${s}${e ? ` (${e.split("\n").pop()})` : ""}`);
+      return;
+    }
     if (want.storage) await ensureMount(name, want.storage); // before compose up: its containers bind the mount
     // Dockerfiles and anything else the build needs sit next to the compose file, so `build: .` finds them.
     // The folder isn't cleared first: relative bind mounts (./data) may live in it.
@@ -131,7 +148,8 @@ function reconcile(desired) {
     if (p?.busy) continue;
     const retry = (p?.s === "failed" && Date.now() - p.at > 3 * 60_000) || p?.s === "fenced";
     const storageChanged = Boolean(p?.storage) !== Boolean(want.storage) || (want.storage && p.storage.readOnly !== want.storage.readOnly);
-    if (!p || p.v !== want.v || p.port !== want.port || storageChanged || retry) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
+    const activate = !want.prepare && p?.s === "prepared"; // its data is free now
+    if (!p || p.v !== want.v || p.port !== want.port || storageChanged || retry || activate) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
   }
   for (const [name, p] of projects) {
     if (!(name in desired) && !p.busy) remove(name).catch((e) => log(`${name}: ${e.message}`));
@@ -273,7 +291,7 @@ async function unmountStateful(name) {
 // the last writes reach R2 and unmount. A cancelled GitHub run has only seconds before it's killed, so the
 // check-in comes before the slow part.
 async function releaseStateful({ quick = false } = {}) {
-  const stateful = [...projects].filter(([, p]) => p.storage);
+  const stateful = [...projects].filter(([, p]) => p.storage && p.s !== "prepared");
   if (stateful.length) log(`stopping ${stateful.map(([name]) => name).join(", ")} so their data can move on`);
   for (const [, p] of stateful) p.busy = true;
   await Promise.all(stateful.map(([name]) => stopApp(name, quick ? 5 : 20)));
@@ -312,7 +330,7 @@ const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRoute
 
 function routerJson() {
   const routes = [...projects]
-    .filter(([, p]) => p.port && domain)
+    .filter(([, p]) => p.port && domain && p.s !== "prepared")
     .map(([name, p]) => ({
       match: [{ host: [`${name}-${machine}.${domain}`] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1 }],
@@ -508,6 +526,7 @@ async function main() {
       if (JSON.stringify(plan.storage ?? null) !== JSON.stringify(storage)) {
         storage = plan.storage ?? null;
         log(storage ? "fleet storage is available" : "fleet storage isn't set up");
+        if (storage) sh("docker", ["pull", "-q", RCLONE]).then(() => sh("docker", ["pull", "-q", "alpine:3.20"])); // in the background
       }
       reconcile(plan.desired);
       if (!cleaned) {

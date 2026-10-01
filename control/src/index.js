@@ -19,6 +19,7 @@ const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
 const HANDOVER_AFTER_MS = 315 * 60_000; // replace each machine after 5h15m; GitHub stops jobs at 6h
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
+const HANDOVER_JITTER_MS = 60 * 60_000; // each run hands over up to this much earlier (fixed by its ID), so machines drift apart
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
@@ -395,6 +396,7 @@ export class Control extends DurableObject {
     if (!columns("versions").has("replicas")) this.sql.exec("ALTER TABLE versions ADD COLUMN replicas INTEGER");
     if (!columns("placements").has("leaving")) this.sql.exec("ALTER TABLE placements ADD COLUMN leaving TEXT");
     if (!columns("placements").has("ordinal")) this.sql.exec("ALTER TABLE placements ADD COLUMN ordinal INTEGER");
+    if (!columns("placements").has("preparing")) this.sql.exec("ALTER TABLE placements ADD COLUMN preparing INTEGER");
     const versionColumns = columns("versions");
     if (!versionColumns.has("stateful")) this.sql.exec("ALTER TABLE versions ADD COLUMN stateful INTEGER");
     if (!versionColumns.has("data")) this.sql.exec("ALTER TABLE versions ADD COLUMN data TEXT");
@@ -413,7 +415,7 @@ export class Control extends DurableObject {
     this.placements = new Map(); // project -> Map(machine -> { since, reason })
     for (const x of this.all("SELECT * FROM placements ORDER BY since")) {
       (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name))
-        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null, ordinal: x.ordinal });
+        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null, ordinal: x.ordinal, preparing: Boolean(x.preparing) });
     }
     // Replicas have had ordinals (which say whose data is whose) since stateful projects; older placements get them now.
     for (const [name, placed] of this.placements) {
@@ -741,7 +743,9 @@ export class Control extends DurableObject {
         out[p.name] = { v, compose, port, files };
         continue;
       }
-      if (this.olderRunHas(r, p.name, now)) continue;
+      // While its data is still held elsewhere (an older run of this machine, or the machine it's moving from), the
+      // run gets the spec marked prepare: it pulls and builds, and mounts and starts the moment the data is free.
+      const prepare = this.olderRunHas(r, p.name, now) || Boolean(this.placements.get(p.name)?.get(r.machine)?.preparing);
       const replica = this.replicaId(p.name, r.machine);
       const mount = `${MOUNT_ROOT}/${p.name}/${replica}`;
       const key = `${p.name}@${v}@${mount}`;
@@ -749,6 +753,7 @@ export class Control extends DurableObject {
       out[p.name] = {
         v, compose: this.renders.get(key), port, files,
         storage: { prefix: `${p.name}/${replica}`, mount, limitMb: spec.storage, readOnly: this.overLimit(p.name, replica, spec.storage) },
+        ...(prepare ? { prepare: true } : {}),
       };
     }
     return out;
@@ -811,7 +816,7 @@ export class Control extends DurableObject {
     }
     for (const p of this.projects.values()) {
       if (!p.enabled || p.halted || p.stable === p.version) continue;
-      const group = [...newest.values()].filter((r) => this.runsOn(p.name, r.machine));
+      const group = [...newest.values()].filter((r) => this.runsOn(p.name, r.machine) && r.status[p.name]?.s !== "prepared");
       if (!group.length) continue;
       const failed = group.find((r) => r.status[p.name]?.v === p.version && r.status[p.name]?.s === "failed");
       if (failed) p.halted = `machine ${failed.machine}: ${failed.status[p.name].e || "failed"}`.slice(0, 600);
@@ -829,8 +834,8 @@ export class Control extends DurableObject {
 
   savePlacement(name, machine, x) {
     (this.placements.get(name) ?? this.placements.set(name, new Map()).get(name)).set(machine, x);
-    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving, ordinal) VALUES (?, ?, ?, ?, ?, ?)",
-      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null, x.ordinal ?? null);
+    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving, ordinal, preparing) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null, x.ordinal ?? null, x.preparing ? 1 : 0);
   }
 
   dropPlacement(name, machine) {
@@ -867,7 +872,9 @@ export class Control extends DurableObject {
           if (!up.get(machine).status[name] || now - x.leaving.at > STOP_FIRST_WAIT_MS) {
             x.leaving.started = now;
             this.savePlacement(name, machine, x);
-            this.savePlacement(name, x.leaving.to, { since: now, reason: x.leaving.reason, leaving: null, ordinal: x.ordinal });
+            const dest = placed.get(x.leaving.to);
+            if (dest?.preparing) this.savePlacement(name, x.leaving.to, { ...dest, preparing: false });
+            else if (!dest) this.savePlacement(name, x.leaving.to, { since: now, reason: x.leaving.reason, leaving: null, ordinal: x.ordinal, preparing: false });
             changed = true;
           }
         }
@@ -952,8 +959,10 @@ export class Control extends DurableObject {
       dest = { machine: best.machine, reason: `moved here from machine ${from}: ${best.reason}` };
     }
     if (this.isStateful(name)) {
-      // Its data must never be mounted on two machines at once: the old copy stops first, then place() starts the new one.
+      // Its data must never be mounted on two machines at once: the new copy prepares (pulls, builds) right away but
+      // only mounts and starts once the old one has stopped (see place()).
       this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now, stopFirst: true, started: null, reason: dest.reason } });
+      this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null, ordinal: x.ordinal, preparing: true });
     } else {
       this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null, ordinal: x.ordinal });
       this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now } });
@@ -1104,11 +1113,12 @@ export class Control extends DurableObject {
     const handover = !r.retire && this.wantsHandover(r, now);
     const start = !r.retire && r.ready && r.kind === "github" ? this.claimStarts(run, now) : [];
     this.cleanup(now);
+    const desired = r.retire ? {} : this.desiredFor(r, now);
     return {
       domain: this.env.DOMAIN,
-      poll: POLL_S,
+      poll: Object.values(desired).some((d) => d.prepare) ? 3 : POLL_S, // a prepared copy should start within seconds of the data being free
       storage: this.storageConfig(),
-      desired: r.retire ? {} : this.desiredFor(r, now),
+      desired,
       retire: Boolean(r.retire),
       handover,
       start,
@@ -1118,14 +1128,14 @@ export class Control extends DurableObject {
   // A run can go once a newer run of the same machine is online and healthy on everything it should run.
   superseded(r, now) {
     return this.liveRuns(now).some((x) => x.machine === r.machine && x.started > r.started && x.ready &&
-      Object.entries(this.desiredFor(x, now)).every(([name, d]) => x.status[name]?.v === d.v && x.status[name]?.s === "healthy"));
+      Object.entries(this.desiredFor(x, now)).every(([name, d]) => x.status[name]?.v === d.v && (x.status[name]?.s === "healthy" || (d.prepare && x.status[name]?.s === "prepared"))));
   }
 
   // Ask a run to start its own replacement when it's near GitHub's 6-hour limit (or a roll was requested).
   // One machine at a time, oldest first, so at most one machine is ever changing over.
   wantsHandover(r, now) {
     const rollAll = Number(this.settings.get("roll") ?? 0);
-    const due = (x) => (x.kind === "github" && now - x.started > HANDOVER_AFTER_MS) || x.started < rollAll ||
+    const due = (x) => (x.kind === "github" && now - x.started > HANDOVER_AFTER_MS - (hash(String(x.id)) % HANDOVER_JITTER_MS)) || x.started < rollAll ||
       x.started < Number(this.settings.get(`roll_${x.machine}`) ?? 0);
     if (!due(r)) return false;
     const live = this.liveRuns(now);

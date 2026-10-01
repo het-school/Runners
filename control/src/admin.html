@@ -364,7 +364,7 @@ function render() {
       : r.ready ? `<span class="badge ok">online · ${ago(status.now - r.started)}</span>`
       : `<span class="badge warn">starting up</span>`) + hot;
     const projects = r ? Object.entries(r.projects).map(([name, s]) =>
-      `<span class="dot ${s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn"}" title="${esc(s.e || s.s)}">${esc(name)} v${esc(s.v)}</span>`).join("") : "";
+      `<span class="dot ${s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : s.s === "prepared" ? "" : "warn"}" title="${esc(s.e || s.s)}">${esc(name)} v${esc(s.v)}${s.s === "prepared" ? " (prepared)" : ""}</span>`).join("") : "";
     machines.push(`<div class="card">
       <div class="row">
         <div class="grow"><span class="name">Machine ${n}</span>
@@ -449,7 +449,7 @@ function renderDetails() {
     const url = `https://${p.name}-${n}.${status.domain}/`;
     return `<tr><td>${n}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
-      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : why.preparing ? "preparing: starts once the old copy has stopped" : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
       <td>${p.stateful ? `<span class="meta">${esc(why?.replica ?? `m${n}`)}: ${mb(p.usage?.replicas?.[why?.replica ?? `m${n}`] ?? 0)} MB${p.over.includes(why?.replica ?? `m${n}`) ? ' <span class="bad">over, read-only</span>' : ""}</span>` : ""}</td>
       <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}${p.stateful && !p.enabled && why ? ` <button type="button" class="small danger" data-wipe="${esc(why.replica)}">Wipe data</button>` : ""}</td>
       <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
