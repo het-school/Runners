@@ -22,6 +22,11 @@ FS_BUCKET = "runner-fs"
 FS_ENDPOINT = "https://8eaec409542ced2fc62e1b31228e8f85.r2.cloudflarestorage.com"
 
 
+# The same bucket, bound for measuring usage and wiping a project's data.
+[[r2_buckets]]
+binding = "FS"
+bucket_name = "runner-fs"
+
 [[durable_objects.bindings]]
 name = "CONTROL"
 class_name = "Control"
