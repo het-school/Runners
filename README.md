@@ -1,6 +1,6 @@
 # runner
 
-A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each running every project and online through its own Cloudflare tunnel. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
+A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
 - **Status page:** https://control.billybishop4-workers.xyz
 - **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
@@ -13,13 +13,14 @@ A self-healing fleet: GitHub Actions machines (10 by default) plus any of your o
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine), and machine *n* also serves it at `https://<project>-<n>.billybishop4-workers.xyz`. That port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (default 1), or `all`. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine), and machine *n* also serves it at `https://<project>-<n>.billybishop4-workers.xyz`. That port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
   ```yaml
   x-runner:
     port: 11470
+    replicas: 3
   services:
     server:
       image: stremio/server:latest
@@ -32,6 +33,10 @@ A project is a docker compose file, optionally with Dockerfiles and other files 
 
 The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, and file paths must stay inside the project. Ports 2019 and 19080 are taken by the router.
 
+### Placement
+
+Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
+
 ### Rollouts
 
 Each change is a new version, and every machine switches to it at once. There's no automatic rollback: if the new version fails, the machines show it as failed until you deploy a fix or load an earlier version in the portal and deploy it. A disabled project keeps its spec and versions but runs nowhere.
@@ -43,8 +48,8 @@ The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with 
 ```
 GET    /api/status                              projects and machines (no token needed)
 GET    /api/metrics?range=1h|6h|24h|7d|30d      metrics columns per machine and app, plus live samples (no token needed)
-PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...",
-                                                "files": {"path": "text"}, "port": 8080}  (compose or dockerfile required)
+PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...", "files": {"path": "text"},
+                                                "port": 8080, "replicas": 3 | "all"}  (compose or dockerfile required)
 GET    /api/projects/<name>[?version=N]         a version's compose file, files and port, plus the version list
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
@@ -63,7 +68,7 @@ curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello \
 [`bin/runnerctl`](bin/runnerctl) wraps the API. It reads the token from `~/.config/runnerctl/token`.
 
 ```
-runnerctl apply examples/hello --port 9000   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
+runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
 runnerctl apply examples/stremio.yml         # a compose file
 runnerctl apply path/to/Dockerfile myapp --port 8000
 runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>
@@ -84,6 +89,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 
 - **Control plane** ([`control/`](control)): a Cloudflare Worker with a Durable Object (its own SQLite database). It:
   - holds every project's versions
+  - places each project's replicas on the machines with the most room, and moves them when a machine goes
   - runs the rollouts
   - tracks machines and hands out restarts
   - keeps the DNS for `<project>-<n>` pointed at tunnel `runner-<n>`

@@ -24,7 +24,10 @@ const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
 const HOST_HOLD_MS = 30 * 60_000; // a host that drops out keeps its slot this long, so a restart gets the same one
-const SHARED_DNS = "100::"; // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
+const SHARED_DNS = "100::";
+const REPLICAS_ALL = 0; // stored value of replicas: "all"
+const MAX_REPLICAS = 100;
+const ARRIVAL_MS = 3 * 60_000; // on a cold start, wait this long for the fleet to show up before placing anything // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
 // Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
 // and rolled up into 10-minute rows for the longer views.
 const MIN = 60_000;
@@ -103,7 +106,7 @@ function joinPath(...parts) {
 // one-service compose file. Rejects anything that would only fail later on a machine.
 function buildSpec(body) {
   if (!isMap(body)) throw new HttpError(400, "send a JSON object");
-  let { compose = "", dockerfile = null, files = {}, port = null } = body;
+  let { compose = "", dockerfile = null, files = {}, port = null, replicas = null } = body;
   if (typeof compose !== "string") throw new HttpError(400, "compose must be the compose file as text");
   if (!isMap(files)) throw new HttpError(400, "files must be an object of path: content");
   files = { ...files };
@@ -123,11 +126,21 @@ function buildSpec(body) {
   if (port !== null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
     throw new HttpError(400, "port must be a whole number from 1 to 65535");
   }
+  const parseReplicas = (x, where) => {
+    if (x === null || x === undefined || x === "") return null;
+    if (x === "all") return REPLICAS_ALL;
+    const n = Number(x);
+    if (!(Number.isInteger(n) && n >= 1 && n <= MAX_REPLICAS)) throw new HttpError(400, `${where} must be "all" or a whole number from 1 to ${MAX_REPLICAS}`);
+    return n;
+  };
+  replicas = parseReplicas(replicas, "replicas");
   if (!compose.trim()) {
     if (!files.Dockerfile) throw new HttpError(400, "send a compose file, a Dockerfile, or both");
     // A Dockerfile on its own: build it and publish the port (the app should listen on it inside the container).
     compose = [
-      ...(port ? ["x-runner:", `  port: ${port}`] : []),
+      ...(port || replicas !== null ? ["x-runner:"] : []),
+      ...(port ? [`  port: ${port}`] : []),
+      ...(replicas !== null ? [`  replicas: ${replicas === REPLICAS_ALL ? "all" : replicas}`] : []),
       "services:",
       "  app:",
       "    build: .",
@@ -149,6 +162,7 @@ function buildSpec(body) {
   if (port !== null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
     throw new HttpError(400, "x-runner.port must be a whole number from 1 to 65535");
   }
+  replicas ??= parseReplicas(doc["x-runner"]?.replicas, "x-runner.replicas") ?? 1;
   // Every service that builds from a local folder needs its Dockerfile among the files.
   for (const [service, def] of Object.entries(doc.services)) {
     if (!isMap(def) || def.build == null) continue;
@@ -163,7 +177,7 @@ function buildSpec(body) {
     }
   }
   const sorted = Object.fromEntries(Object.keys(files).sort().map((k) => [k, files[k]]));
-  return { compose, port, files: sorted };
+  return { compose, port, replicas, files: sorted };
 }
 
 // ---- shared URLs: <project>.DOMAIN goes to a machine where the project is healthy ----
@@ -279,6 +293,8 @@ export class Control extends DurableObject {
          seen INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS starts (machine INTEGER PRIMARY KEY, at INTEGER NOT NULL, by TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS placements (name TEXT NOT NULL, machine INTEGER NOT NULL, since INTEGER NOT NULL,
+         reason TEXT NOT NULL, PRIMARY KEY (name, machine))`,
       `CREATE TABLE IF NOT EXISTS slots (n INTEGER PRIMARY KEY, tunnel TEXT NOT NULL, token TEXT NOT NULL, created INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, slot INTEGER NOT NULL, kind TEXT NOT NULL, label TEXT, joined INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_1m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
@@ -290,6 +306,7 @@ export class Control extends DurableObject {
     const columns = (table) => new Set(this.all(`PRAGMA table_info(${table})`).map((c) => c.name));
     if (!columns("projects").has("enabled")) this.sql.exec("ALTER TABLE projects ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
     if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
+    if (!columns("versions").has("replicas")) this.sql.exec("ALTER TABLE versions ADD COLUMN replicas INTEGER");
     const runColumns = columns("runs");
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'github'");
@@ -301,6 +318,10 @@ export class Control extends DurableObject {
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
+    this.placements = new Map(); // project -> Map(machine -> { since, reason })
+    for (const x of this.all("SELECT * FROM placements")) {
+      (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name)).set(x.machine, { since: x.since, reason: x.reason });
+    }
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
     this.agents = new Map(this.all("SELECT * FROM agents").map((a) => [a.id, a])); // agent -> the slot it last had
     this.holds = new Map(); // slot -> { agent, at }: just given out at /join, not checked in yet
@@ -347,8 +368,8 @@ export class Control extends DurableObject {
   version(name, v) {
     const key = `${name}@${v}`;
     if (!this.versions.has(key)) {
-      const row = this.all("SELECT compose, port, files FROM versions WHERE name = ? AND version = ?", name, v)[0];
-      this.versions.set(key, row && { compose: row.compose, port: row.port, files: JSON.parse(row.files ?? "{}") });
+      const row = this.all("SELECT compose, port, files, replicas FROM versions WHERE name = ? AND version = ?", name, v)[0];
+      this.versions.set(key, row && { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}") });
     }
     return this.versions.get(key);
   }
@@ -446,18 +467,19 @@ export class Control extends DurableObject {
   // ---- projects ----
 
   describe(p) {
-    const machines = this.machines();
     const latest = this.version(p.name, p.version);
+    const replicas = latest?.replicas ?? 1;
+    const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x })).sort((a, b) => a.machine - b.machine);
     return {
       name: p.name,
       version: p.version,
       stable: p.stable,
       port: latest?.port ?? null,
+      replicas: replicas === REPLICAS_ALL ? "all" : replicas,
+      placed, // the machines it's placed on (empty when replicas is "all": then it's every machine)
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
-      state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "rolling out",
-      rollout: Math.min(p.rollout, machines),
-      machines,
+      state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
       halted: p.halted,
       updated: p.updated,
     };
@@ -480,7 +502,9 @@ export class Control extends DurableObject {
       compose: spec.compose,
       files: spec.files,
       port: spec.port,
-      versions: this.all("SELECT version, port, created FROM versions WHERE name = ? ORDER BY version", name),
+      replicas: spec.replicas === REPLICAS_ALL ? "all" : spec.replicas,
+      versions: this.all("SELECT version, port, replicas, created FROM versions WHERE name = ? ORDER BY version", name)
+        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1 })),
     };
   }
 
@@ -492,18 +516,18 @@ export class Control extends DurableObject {
     const machines = this.machines();
     const p = this.projects.get(name);
     const latest = p && this.version(name, p.version);
-    const same = latest && latest.compose === spec.compose && latest.port === spec.port &&
+    const same = latest && latest.compose === spec.compose && latest.port === spec.port && latest.replicas === spec.replicas &&
       JSON.stringify(latest.files) === JSON.stringify(spec.files);
     let next;
     if (same) {
       // Same spec again: a no-op, unless the version hasn't reached every machine yet (then push it there).
-      if (!p.halted && p.stable === p.version && p.rollout >= machines) return { ...this.describe(p), unchanged: true };
+      if (!p.halted && p.stable === p.version) return { ...this.describe(p), unchanged: true };
       next = { ...p, halted: null, rollout: machines, stable: p.version, updated: t };
     } else {
       const version = (p?.version ?? 0) + 1;
       this.sql.exec(
-        "INSERT INTO versions (name, version, compose, port, files, created) VALUES (?, ?, ?, ?, ?, ?)",
-        name, version, spec.compose, spec.port, JSON.stringify(spec.files), t,
+        "INSERT INTO versions (name, version, compose, port, files, replicas, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        name, version, spec.compose, spec.port, JSON.stringify(spec.files), spec.replicas, t,
       );
       next = {
         name, version, stable: version, rollout: machines, halted: null,
@@ -511,6 +535,7 @@ export class Control extends DurableObject {
       };
     }
     this.saveProject(next);
+    this.place(t);
     this.scheduleDns();
     return this.describe(next);
   }
@@ -519,6 +544,7 @@ export class Control extends DurableObject {
   setEnabled(name, enabled) {
     const p = this.project(name);
     this.saveProject({ ...p, enabled: enabled ? 1 : 0, updated: Date.now() });
+    this.place(Date.now());
     return this.describe(this.projects.get(name));
   }
 
@@ -527,6 +553,8 @@ export class Control extends DurableObject {
     this.projects.delete(name);
     this.sql.exec("DELETE FROM projects WHERE name = ?", name);
     this.sql.exec("DELETE FROM versions WHERE name = ?", name);
+    this.sql.exec("DELETE FROM placements WHERE name = ?", name);
+    this.placements.delete(name);
     for (const key of this.versions.keys()) if (key.startsWith(`${name}@`)) this.versions.delete(key);
     this.scheduleDns();
     return { deleted: name };
@@ -552,12 +580,12 @@ export class Control extends DurableObject {
     return { rolling: machine ? [Number(machine)] : "all", since: now };
   }
 
-  // What machine n should run: the new version on machines 1..rollout, the last good one everywhere else.
-  // A halted rollout sends every machine back to the last good version; disabled projects run nowhere.
-  desiredFor() {
+  // What machine n should run: every enabled project placed on it (or placed everywhere), at its latest version,
+  // or the last good one if the latest is halted. Disabled projects run nowhere.
+  desiredFor(machine) {
     const out = {};
     for (const p of this.projects.values()) {
-      if (!p.enabled) continue;
+      if (!p.enabled || !this.runsOn(p.name, machine)) continue;
       const v = p.halted ? p.stable : p.version;
       if (v == null) continue;
       const { compose, port, files } = this.version(p.name, v);
@@ -566,42 +594,103 @@ export class Control extends DurableObject {
     return out;
   }
 
-  // Move each rollout on to the next machine once every machine so far runs the new version healthily;
-  // stop it as soon as one of them reports the new version failed.
-  advanceRollouts(now) {
-    const machines = this.machines();
+  runsOn(name, machine) {
+    const p = this.projects.get(name);
+    const replicas = this.version(name, p.version)?.replicas ?? 1;
+    return replicas === REPLICAS_ALL || Boolean(this.placements.get(name)?.has(machine));
+  }
+
+  // A version is good once every machine that should run it (and is up) reports it healthy, and halted as soon
+  // as one reports it failed; then every machine goes back to the last good version.
+  settle(now) {
     const newest = new Map(); // machine -> its newest run that's up; that's the one that speaks for the machine
     for (const r of this.liveRuns(now)) {
       if ((newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
     }
-    if (!newest.size) return; // nothing is up to try a new version on
     for (const p of this.projects.values()) {
       if (!p.enabled || p.halted || p.stable === p.version) continue;
-      let k = p.rollout;
-      let changed = false;
-      for (;;) {
-        const group = [...newest.values()].filter((r) => r.machine <= k);
-        const failed = group.find((r) => r.status[p.name]?.v === p.version && r.status[p.name]?.s === "failed");
-        if (failed) {
-          p.halted = `machine ${failed.machine}: ${failed.status[p.name].e || "failed"}`.slice(0, 600);
-          changed = true;
-          break;
-        }
-        if (!group.every((r) => r.status[p.name]?.v === p.version && r.status[p.name]?.s === "healthy")) break;
-        if (k >= machines) {
-          p.stable = p.version;
-          changed = true;
-          break;
-        }
-        k++;
-      }
-      if (k !== p.rollout || changed) {
-        Object.assign(p, { rollout: k, updated: now });
-        this.saveProject(p);
-      }
+      const group = [...newest.values()].filter((r) => this.runsOn(p.name, r.machine));
+      if (!group.length) continue;
+      const failed = group.find((r) => r.status[p.name]?.v === p.version && r.status[p.name]?.s === "failed");
+      if (failed) p.halted = `machine ${failed.machine}: ${failed.status[p.name].e || "failed"}`.slice(0, 600);
+      else if (group.every((r) => r.status[p.name]?.v === p.version && r.status[p.name]?.s === "healthy")) p.stable = p.version;
+      else continue;
+      p.updated = now;
+      this.saveProject(p);
     }
   }
 
+  // ---- placement ----
+  // A project with N replicas runs on N machines. New replicas go to the machine with the most room: the least CPU
+  // and memory in use (from its latest metrics) and the fewest projects already placed on it. A placement stays
+  // where it is until that machine is gone; then the replica moves to the best machine left.
+
+  savePlacement(name, machine, x) {
+    (this.placements.get(name) ?? this.placements.set(name, new Map()).get(name)).set(machine, x);
+    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason) VALUES (?, ?, ?, ?)", name, machine, x.since, x.reason);
+  }
+
+  dropPlacement(name, machine) {
+    this.placements.get(name)?.delete(machine);
+    this.sql.exec("DELETE FROM placements WHERE name = ? AND machine = ?", name, machine);
+  }
+
+  // How busy a machine is, for choosing between them; lower is better. Without metrics (an agent that's just
+  // started) it counts as half busy, so a machine that's measured and quiet wins.
+  load(machine, placedCount, now) {
+    const m = this.liveMetrics.get(machine);
+    const fresh = m && now - m.t < 3 * LIVE_MS;
+    const cpu = fresh ? m.h.cpu : 50;
+    const mem = fresh && m.h.memTotal ? (100 * m.h.memUsed) / m.h.memTotal : 50;
+    return { score: cpu + mem + 15 * placedCount, reason: fresh ? `cpu ${Math.round(cpu)}%, memory ${Math.round(mem)}%, ${placedCount} other project${placedCount === 1 ? "" : "s"}` : "no metrics yet" };
+  }
+
+  place(now) {
+    const up = new Map(); // machine -> its newest live run
+    for (const r of this.liveRuns(now)) if ((up.get(r.machine)?.started ?? -1) < r.started) up.set(r.machine, r);
+    let changed = false;
+    // After a cold start the first machine to check in would get every replica; wait for the fleet (or 3 minutes).
+    const arrived = up.size >= this.machines() || [...up.values()].some((r) => now - r.started > ARRIVAL_MS);
+    const counts = new Map(); // machine -> projects placed on it
+    for (const [name, placed] of this.placements) {
+      // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone.
+      const p = this.projects.get(name);
+      const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
+      for (const machine of placed.keys()) {
+        if (!p || !p.enabled || replicas === REPLICAS_ALL || !up.has(machine)) {
+          this.dropPlacement(name, machine);
+          changed = true;
+        } else counts.set(machine, (counts.get(machine) ?? 0) + 1);
+      }
+    }
+    for (const p of [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!p.enabled) continue;
+      const want = this.version(p.name, p.version)?.replicas ?? 1;
+      if (want === REPLICAS_ALL) continue;
+      const placed = this.placements.get(p.name) ?? this.placements.set(p.name, new Map()).get(p.name);
+      // Too many (replicas were lowered): keep the oldest placements, and healthy ones over failed ones.
+      const extra = [...placed].map(([machine, x]) => ({ machine, x, healthy: up.get(machine)?.status[p.name]?.s === "healthy" }))
+        .sort((a, b) => a.healthy - b.healthy || b.x.since - a.x.since).slice(0, Math.max(0, placed.size - want));
+      for (const { machine } of extra) {
+        this.dropPlacement(p.name, machine);
+        counts.set(machine, counts.get(machine) - 1);
+        changed = true;
+      }
+      // Too few: the machines with the most room, ready ones first.
+      for (let n = placed.size; n < want && arrived; n++) {
+        const best = [...up.values()].filter((r) => !placed.has(r.machine))
+          .map((r) => ({ r, ...this.load(r.machine, counts.get(r.machine) ?? 0, now) }))
+          .sort((a, b) => b.r.ready - a.r.ready || a.score - b.score)[0];
+        if (!best) break; // every machine already has one; the rest get placed when machines show up
+        this.savePlacement(p.name, best.r.machine, { since: now, reason: best.reason });
+        counts.set(best.r.machine, (counts.get(best.r.machine) ?? 0) + 1);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  // ---- machines ----
   // ---- machines ----
 
   sync(body) {
@@ -627,8 +716,9 @@ export class Control extends DurableObject {
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
     }
-    this.advanceRollouts(now);
     this.takeMetrics(r, body.metrics, now);
+    this.place(now);
+    this.settle(now);
     if (!r.retire && (this.extraGithub(r, now) || this.superseded(r, now))) {
       r.retire = 1;
       this.saveRun(r);
@@ -639,7 +729,7 @@ export class Control extends DurableObject {
     return {
       domain: this.env.DOMAIN,
       poll: POLL_S,
-      desired: r.retire ? {} : this.desiredFor(),
+      desired: r.retire ? {} : this.desiredFor(machine),
       retire: Boolean(r.retire),
       handover,
       start,
@@ -648,7 +738,7 @@ export class Control extends DurableObject {
 
   // A run can go once a newer run of the same machine is online and healthy on everything it should run.
   superseded(r, now) {
-    const desired = Object.entries(this.desiredFor());
+    const desired = Object.entries(this.desiredFor(r.machine));
     return this.liveRuns(now).some((x) => x.machine === r.machine && x.started > r.started && x.ready &&
       desired.every(([name, d]) => x.status[name]?.v === d.v && x.status[name]?.s === "healthy"));
   }

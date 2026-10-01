@@ -47,16 +47,16 @@ async function load() {
   catch { document.getElementById("sub").textContent = "Can't reach the control plane"; return; }
   const up = new Set(d.runs.filter((r) => r.live && !r.retiring).map((r) => r.machine));
   document.getElementById("sub").textContent = up.size + " machines up" + (d.dnsError ? " · DNS: " + d.dnsError : "");
-  document.getElementById("projects").innerHTML = "<tr><th>Project</th><th>Version</th><th>State</th><th>Open</th></tr>" +
+  document.getElementById("projects").innerHTML = "<tr><th>Project</th><th>Version</th><th>Replicas</th><th>State</th><th>Open</th></tr>" +
     (d.projects.map((p) => {
       const state = p.state === "live" ? '<span class="ok">live</span>'
         : p.state === "halted" ? '<span class="bad">halted, every machine is back on v' + esc(p.stable ?? "-") + '</span><div class="err">' + esc(p.halted) + "</div>"
-        : '<span class="warn">rolling out: ' + p.rollout + " of " + p.machines + " machines</span>";
+        : '<span class="warn">deploying</span>';
       const links = p.port ? '<a href="https://' + p.name + "." + d.domain + '/" target="_blank"><b>' + esc(p.name) + "." + d.domain + "</b></a> " +
-        d.slots.map((n) => '<a href="https://' + p.name + "-" + n + "." + d.domain + '/" target="_blank">' + n + "</a>").join("") : '<span class="muted">no port</span>';
+        (p.replicas === "all" ? d.slots : p.placed.map((x) => x.machine)).map((n) => '<a href="https://' + p.name + "-" + n + "." + d.domain + '/" target="_blank">' + n + "</a>").join("") : '<span class="muted">no port</span>';
       return "<tr><td><b>" + esc(p.name) + "</b></td><td>v" + p.version + (p.stable && p.stable !== p.version ? ' <span class="muted">(v' + p.stable + " elsewhere)</span>" : "") +
-        "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
-    }).join("") || '<tr><td colspan="4" class="muted">No projects yet</td></tr>');
+        "</td><td>" + (p.replicas === "all" ? "every machine" : p.placed.length + " of " + p.replicas) + "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
+    }).join("") || '<tr><td colspan="5" class="muted">No projects yet</td></tr>');
   document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run or host</th><th>State</th><th>Projects</th></tr>" +
     (d.runs.map((r) => {
       const state = !r.live ? '<span class="muted">gone (seen ' + ago(d.now - r.seen) + " ago)</span>"

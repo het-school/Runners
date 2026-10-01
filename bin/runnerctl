@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # runnerctl: manage projects on the runner control plane (same API as the admin portal).
-#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N]
+#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--replicas N|all]
 #       add or update a project. A folder sends its compose file (if any) plus every other file in it,
 #       e.g. a Dockerfile and what it COPYs. A Dockerfile on its own becomes a one-service project.
 #       The name defaults to the folder or file name. Every machine updates at once.
@@ -24,11 +24,12 @@ case "$cmd" in
   apply)
     [ $# -ge 1 ] || usage
     src=$1; shift
-    name="" port=""
+    name="" port="" replicas=""
     while [ $# -gt 0 ]; do
       case $1 in
         --now) ;; # every deploy goes to every machine at once now; kept so old commands still work
         --port) port=${2:?--port needs a number}; shift ;;
+        --replicas) replicas=${2:?--replicas needs a number or all}; shift ;;
         *) name=$1 ;;
       esac
       shift
@@ -38,9 +39,9 @@ case "$cmd" in
       elif [[ $(basename "$src") == *[Dd]ockerfile ]]; then name=$(basename "$(dirname "$(realpath "$src")")")
       else name=$(basename "${src%.*}"); fi
     fi
-    body=$(python3 - "$src" "$port" <<'PY'
+    body=$(python3 - "$src" "$port" "$replicas" <<'PY'
 import json, os, sys
-src, port = sys.argv[1], sys.argv[2]
+src, port, replicas = sys.argv[1], sys.argv[2], sys.argv[3]
 COMPOSE = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 body = {}
 if os.path.isdir(src):
@@ -66,6 +67,8 @@ else:
     body["compose"] = open(src, encoding="utf-8").read()
 if port:
     body["port"] = int(port)
+if replicas:
+    body["replicas"] = "all" if replicas == "all" else int(replicas)
 print(json.dumps(body))
 PY
 )

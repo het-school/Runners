@@ -137,6 +137,7 @@
     <ol>
       <li>Click <b>New project</b> at the top.</li>
       <li><b>Name:</b> lowercase letters, digits and dashes, such as <code>my-app</code>.</li>
+      <li><b>Replicas:</b> how many machines should run it (default 1), or <code>all</code>. The control plane picks the machines with the most free CPU and memory.</li>
       <li><b>Port:</b> the port your app listens on. You can leave it empty if the compose file sets <code>x-runner.port</code>; with no port the app runs but isn't reachable from outside.</li>
       <li>Paste a <b>Docker Compose</b> file, a <b>Dockerfile</b>, or both. Use <b>Add a file</b> for anything the Dockerfile <code>COPY</code>s (source files, configs).</li>
       <li>Click <b>Deploy</b>. The dots on the project card turn green as each machine reports healthy. A red dot shows the error; fix it and deploy again.</li>
@@ -152,13 +153,14 @@
       <tr><td><code>dockerfile</code></td><td>A Dockerfile, as text. On its own it becomes a one-service app that builds it and publishes <code>port</code>.</td></tr>
       <tr><td><code>files</code></td><td><code>{"path": "text", …}</code>: other files, next to the compose file (e.g. <code>src/main.py</code>, <code>web/Dockerfile</code>).</td></tr>
       <tr><td><code>port</code></td><td>The port the app listens on (or set <code>x-runner.port</code> in the compose file).</td></tr>
+      <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number, or <code>"all"</code>. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away.</td></tr>
     </table></div>
     <p class="hint">Limits: 30 files, 250 KB in all, text files only. Ports 2019 and 19080 are taken. Every <code>build:</code> needs its Dockerfile among the files.</p>
 
     <div class="sec">1. A published image (compose only)</div>
 <pre class="code">curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/whoami \
   -H 'Content-Type: application/json' \
-  -d '{"port": 8080, "compose": "services:\n  web:\n    image: traefik/whoami\n    command: [\"--port\", \"8080\"]\n    ports: [\"8080:8080\"]\n    restart: unless-stopped\n"}'</pre>
+  -d '{"port": 8080, "replicas": 3, "compose": "services:\n  web:\n    image: traefik/whoami\n    command: [\"--port\", \"8080\"]\n    ports: [\"8080:8080\"]\n    restart: unless-stopped\n"}'</pre>
 
     <div class="sec">2. Just a Dockerfile</div>
 <pre class="code">curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/hello \
@@ -220,6 +222,9 @@ curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
       <label for="ed-port">Port</label>
       <input id="ed-port" type="number" min="1" max="65535" placeholder="8080">
       <p class="hint">The port the project listens on, on the machine. Leave it empty to use <code>x-runner.port</code> from the compose file, or to keep the project offline.</p>
+      <label for="ed-replicas">Replicas</label>
+      <input id="ed-replicas" placeholder="1" pattern="all|[0-9]{1,3}" autocomplete="off" style="width:90px">
+      <p class="hint">How many machines run it: a number, or <code>all</code> for every machine. Each replica goes to the machine with the most room; the shared URL spreads visitors across them.</p>
       <label for="ed-compose">Docker Compose</label>
       <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
       <p class="hint">Optional when there's a Dockerfile: one service is made that builds it and publishes the port.</p>
@@ -290,13 +295,15 @@ function render() {
   document.querySelectorAll(".domain").forEach((el) => (el.textContent = status.domain));
   if (document.activeElement !== $("count")) $("count").value = status.machines;
 
-  const STATE = { live: "ok", "rolling out": "warn", halted: "bad", disabled: "off" };
+  const STATE = { live: "ok", deploying: "warn", halted: "bad", disabled: "off" };
   $("projects").innerHTML = status.projects.map((p) => {
-    const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
-    const dots = status.slots.map((n) => {
+    const label = p.state;
+    const where = p.replicas === "all" ? status.slots : p.placed.map((x) => x.machine);
+    const dots = where.map((n) => {
       const s = runs.get(n)?.projects[p.name];
       const cls = !s ? "" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
-      const title = !s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`;
+      const why = p.placed.find((x) => x.machine === n)?.reason;
+      const title = (!s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`) + (why ? ` · placed here: ${why}` : "");
       const inner = `${n}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
       return p.port
         ? `<a class="dot ${cls}" title="${esc(title)}" href="https://${esc(p.name)}-${n}.${esc(status.domain)}/" target="_blank" rel="noopener">${inner}</a>`
@@ -307,7 +314,7 @@ function render() {
         <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
-      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.placed.length} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
@@ -369,6 +376,7 @@ function addFile(path = "", content = "") {
 function fill(spec) {
   const files = { ...(spec.files || {}) };
   $("ed-port").value = spec.port ?? "";
+  $("ed-replicas").value = spec.replicas ?? "";
   $("ed-compose").value = spec.compose || "";
   $("ed-dockerfile").value = files.Dockerfile || "";
   delete files.Dockerfile;
@@ -394,26 +402,28 @@ function renderDetails() {
   const p = status.projects.find((x) => x.name === details.name);
   if (!p) return $("details").close();
   const runs = machineRuns();
-  const STATE = { live: "ok", "rolling out": "warn", halted: "bad", disabled: "off" };
-  const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
+  const STATE = { live: "ok", deploying: "warn", halted: "bad", disabled: "off" };
+  const label = p.state;
   const scroll = $("dt-body").scrollTop;
 
-  const machines = status.slots.map((n) => {
+  const where = p.replicas === "all" ? status.slots : p.placed.map((x) => x.machine);
+  const machines = where.map((n) => {
     const r = runs.get(n);
     const s = r?.projects[p.name];
+    const why = p.placed.find((x) => x.machine === n);
     const target = !p.enabled ? null : p.halted ? p.stable : p.version;
     const cls = !s ? "off" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
     const url = `https://${p.name}-${n}.${status.domain}/`;
     return `<tr><td>${n}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
-      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
       <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
   }).join("");
 
   const versions = spec.versions.slice().reverse().map((v) => `<tr class="pick${v.version === spec.shown ? " shown" : ""}" data-version="${v.version}">
       <td>v${v.version}</td>
       <td>${v.version === p.version ? `<span class="badge">latest</span> ` : ""}${v.version === p.stable ? `<span class="badge ok">good</span>` : ""}</td>
-      <td>${v.port ?? "–"}</td><td class="meta">${esc(new Date(v.created).toLocaleString())}</td></tr>`).join("");
+      <td>${v.port ?? "–"}</td><td>${esc(v.replicas)}</td><td class="meta">${esc(new Date(v.created).toLocaleString())}</td></tr>`).join("");
 
   const files = specFiles(spec);
   if (!files.some(([path]) => path === details.tab)) details.tab = files[0]?.[0] ?? null;
@@ -427,6 +437,7 @@ function renderDetails() {
       <div><dt>Latest version</dt><dd>v${p.version}</dd></div>
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
+      <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.placed.length} of ${p.replicas} placed`}</dd></div>
       <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
@@ -446,7 +457,7 @@ function renderDetails() {
     <div class="sec">Machines</div>
     <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th></tr>${machines}</table></div>
     <div class="sec">Versions</div>
-    <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Created</th></tr>${versions}</table></div>`;
+    <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Replicas</th><th>Created</th></tr>${versions}</table></div>`;
   if (current) $("dt-code").textContent = current[1];
   $("dt-body").scrollTop = scroll;
 }
@@ -538,11 +549,13 @@ $("form").onsubmit = async (ev) => {
   const body = { compose: $("ed-compose").value, files };
   if ($("ed-dockerfile").value.trim()) body.dockerfile = $("ed-dockerfile").value;
   if ($("ed-port").value) body.port = Number($("ed-port").value);
+  const rep = $("ed-replicas").value.trim();
+  if (rep) body.replicas = rep === "all" ? "all" : Number(rep);
   $("ed-save").disabled = true;
   try {
     const p = await api("PUT", `/projects/${encodeURIComponent(name)}`, body);
     $("editor").close();
-    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version} to every machine`);
+    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version}${p.replicas === "all" ? " to every machine" : ` to ${p.replicas} machine${p.replicas === 1 ? "" : "s"}`}`);
     refresh();
   } catch (e) {
     $("ed-error").textContent = e.message;
@@ -563,7 +576,7 @@ document.addEventListener("click", async (ev) => {
     if (act === "edit") return openEditor(name);
     if (act === "retry") {
       const p = await api("GET", `/projects/${name}`);
-      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port });
+      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port, replicas: p.replicas });
       toast(`Retrying ${name} v${p.version} on every machine`);
     }
     if (act === "disable") {
