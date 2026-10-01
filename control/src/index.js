@@ -1,8 +1,13 @@
 // Control plane for hetp4401/runner.
-// Holds the project specs (docker compose files), rolls each change out one machine at a time,
-// tracks which machines are up and starts replacements, and keeps <project>-<n> DNS pointing at tunnel runner-<n>.
-// The agent on every GitHub Actions machine checks in at /api/sync and gets back what it should be running.
+// Holds the project specs (a docker compose file plus any Dockerfiles and build files), rolls each change out one
+// machine at a time, tracks which machines are up and starts replacements, and keeps <project>-<n> DNS pointing at
+// tunnel runner-<n>. The agent on every GitHub Actions machine checks in at /api/sync and gets back what it should run.
+//   /            public status page          /api/*        API, Bearer token (admin, or node for sync/claim/roll)
+//   /admin       admin portal                /admin/api/*  the same API, signed in with Cloudflare Access
 import { DurableObject } from "cloudflare:workers";
+import YAML from "yaml";
+import ADMIN_PAGE from "./admin.html";
+import { STATUS_PAGE } from "./status-page.js";
 
 const POLL_S = 20; // how often agents check in
 const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
@@ -10,6 +15,9 @@ const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long
 const HANDOVER_AFTER_MS = 315 * 60_000; // replace each machine after 5h15m; GitHub stops jobs at 6h
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
+const MAX_FILES = 30;
+const MAX_SPEC_BYTES = 256_000;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -19,6 +27,90 @@ class HttpError extends Error {
 }
 
 const json = (data, status = 200) => Response.json(data, { status });
+const html = (body) => new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
+const isMap = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+const b64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+
+// "./web/" + "Dockerfile" -> "web/Dockerfile"; null if it climbs out of the project folder.
+function joinPath(...parts) {
+  const out = [];
+  for (const seg of parts.join("/").split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (!out.length) return null;
+      out.pop();
+    } else out.push(seg);
+  }
+  return out.join("/");
+}
+
+// Turns what was submitted into a spec the machines can run: { compose, port, files }.
+// Accepts a compose file, a Dockerfile, extra build files, or a mix; a Dockerfile on its own becomes a
+// one-service compose file. Rejects anything that would only fail later on a machine.
+function buildSpec(body) {
+  if (!isMap(body)) throw new HttpError(400, "send a JSON object");
+  let { compose = "", dockerfile = null, files = {}, port = null } = body;
+  if (typeof compose !== "string") throw new HttpError(400, "compose must be the compose file as text");
+  if (!isMap(files)) throw new HttpError(400, "files must be an object of path: content");
+  files = { ...files };
+  if (dockerfile !== null) {
+    if (typeof dockerfile !== "string" || !dockerfile.trim()) throw new HttpError(400, "dockerfile must be the Dockerfile as text");
+    files.Dockerfile = dockerfile;
+  }
+  if (Object.keys(files).length > MAX_FILES) throw new HttpError(400, `at most ${MAX_FILES} files`);
+  let size = compose.length;
+  for (const [path, content] of Object.entries(files)) {
+    if (typeof content !== "string") throw new HttpError(400, `${path} must be text`);
+    if (!FILE_PATH.test(path) || joinPath(path) !== path) throw new HttpError(400, `${path} isn't a usable file path`);
+    if (/^(docker-)?compose\.ya?ml$/.test(path)) throw new HttpError(400, "send the compose file as compose, not as a file");
+    size += path.length + content.length;
+  }
+  if (size > MAX_SPEC_BYTES) throw new HttpError(400, "the spec is bigger than 250 KB");
+  if (port !== null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
+    throw new HttpError(400, "port must be a whole number from 1 to 65535");
+  }
+  if (!compose.trim()) {
+    if (!files.Dockerfile) throw new HttpError(400, "send a compose file, a Dockerfile, or both");
+    // A Dockerfile on its own: build it and publish the port (the app should listen on it inside the container).
+    compose = [
+      ...(port ? ["x-runner:", `  port: ${port}`] : []),
+      "services:",
+      "  app:",
+      "    build: .",
+      ...(port ? [`    ports: ["${port}:${port}"]`] : []),
+      "    restart: unless-stopped",
+      "",
+    ].join("\n");
+  }
+  let doc;
+  try {
+    doc = YAML.parse(compose);
+  } catch (e) {
+    throw new HttpError(400, `the compose file isn't valid YAML: ${e.message.split("\n")[0]}`);
+  }
+  if (!isMap(doc) || !isMap(doc.services) || !Object.keys(doc.services).length) {
+    throw new HttpError(400, "the compose file needs a services: section");
+  }
+  port ??= doc["x-runner"]?.port ?? null;
+  if (port !== null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
+    throw new HttpError(400, "x-runner.port must be a whole number from 1 to 65535");
+  }
+  // Every service that builds from a local folder needs its Dockerfile among the files.
+  for (const [service, def] of Object.entries(doc.services)) {
+    if (!isMap(def) || def.build == null) continue;
+    const build = isMap(def.build) ? def.build : { context: def.build };
+    if (build.dockerfile_inline) continue;
+    const context = String(build.context ?? ".");
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(context) || context.startsWith("git@")) continue; // a git repo or URL
+    const dockerfile = joinPath(context, String(build.dockerfile ?? "Dockerfile"));
+    if (dockerfile === null) throw new HttpError(400, `service ${service} builds from outside the project folder`);
+    if (!(dockerfile in files)) {
+      throw new HttpError(400, `service ${service} builds from ${dockerfile}, but no file with that path was sent`);
+    }
+  }
+  const sorted = Object.fromEntries(Object.keys(files).sort().map((k) => [k, files[k]]));
+  return { compose, port, files: sorted };
+}
 
 export default {
   fetch(request, env) {
@@ -43,13 +135,18 @@ export class Control extends DurableObject {
     ]) {
       this.sql.exec(query);
     }
+    // Columns added after the first release.
+    const columns = (table) => new Set(this.all(`PRAGMA table_info(${table})`).map((c) => c.name));
+    if (!columns("projects").has("enabled")) this.sql.exec("ALTER TABLE projects ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+    if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
     // which happen whenever Cloudflare lets the object sleep.
     this.projects = new Map(this.all("SELECT * FROM projects").map((p) => [p.name, p]));
     this.runs = new Map(this.all("SELECT * FROM runs").map((r) => [r.id, { ...r, status: JSON.parse(r.status), savedSeen: r.seen }]));
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
-    this.versions = new Map(); // "name@version" -> { compose, port }
+    this.versions = new Map(); // "name@version" -> { compose, port, files }
+    this.accessKeys = new Map(); // Cloudflare Access signing keys, by key id
     this.lastCleanup = 0;
     this.dnsError = null;
   }
@@ -87,7 +184,8 @@ export class Control extends DurableObject {
   version(name, v) {
     const key = `${name}@${v}`;
     if (!this.versions.has(key)) {
-      this.versions.set(key, this.all("SELECT compose, port FROM versions WHERE name = ? AND version = ?", name, v)[0]);
+      const row = this.all("SELECT compose, port, files FROM versions WHERE name = ? AND version = ?", name, v)[0];
+      this.versions.set(key, row && { compose: row.compose, port: row.port, files: JSON.parse(row.files ?? "{}") });
     }
     return this.versions.get(key);
   }
@@ -95,10 +193,10 @@ export class Control extends DurableObject {
   saveProject(p) {
     this.projects.set(p.name, p);
     this.sql.exec(
-      `INSERT INTO projects (name, version, stable, rollout, halted, updated) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO projects (name, version, stable, rollout, halted, updated, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (name) DO UPDATE SET version = excluded.version, stable = excluded.stable,
-         rollout = excluded.rollout, halted = excluded.halted, updated = excluded.updated`,
-      p.name, p.version, p.stable, p.rollout, p.halted, p.updated,
+         rollout = excluded.rollout, halted = excluded.halted, updated = excluded.updated, enabled = excluded.enabled`,
+      p.name, p.version, p.stable, p.rollout, p.halted, p.updated, p.enabled,
     );
   }
 
@@ -121,32 +219,28 @@ export class Control extends DurableObject {
     );
   }
 
+  // ---- HTTP ----
+
   async fetch(request) {
     const url = new URL(request.url);
-    const { method } = request;
     const path = url.pathname.replace(/\/+$/, "") || "/";
-    const auth = request.headers.get("authorization") ?? "";
-    const admin = Boolean(this.env.ADMIN_TOKEN) && auth === `Bearer ${this.env.ADMIN_TOKEN}`;
-    const node = admin || (Boolean(this.env.NODE_TOKEN) && auth === `Bearer ${this.env.NODE_TOKEN}`);
-    const body = () => request.json().catch(() => {
-      throw new HttpError(400, "the body must be JSON");
-    });
     try {
-      if (method === "GET" && path === "/") return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
-      if (method === "GET" && path === "/api/status") return json(this.status());
-      if (method === "POST" && ["/api/sync", "/api/claim", "/api/roll"].includes(path)) {
-        if (!node) throw new HttpError(401, "bad token");
-        if (path === "/api/sync") return json(this.sync(await body()));
-        if (path === "/api/claim") return json({ start: this.claimStarts("watchdog", Date.now()) });
-        return json(this.roll(url.searchParams.get("machine")));
+      if (request.method === "GET" && path === "/") return html(STATUS_PAGE);
+      if (request.method === "GET" && path === "/admin") return html(ADMIN_PAGE);
+      if (path.startsWith("/admin/api/")) {
+        // The portal: Cloudflare Access signs people in in front of /admin; check its token here too.
+        const auth = request.headers.get("authorization") ?? "";
+        const signedIn = (this.env.ADMIN_TOKEN && auth === `Bearer ${this.env.ADMIN_TOKEN}`) || (await this.accessUser(request));
+        if (!signedIn) throw new HttpError(401, "sign in again (reload the page)");
+        const origin = request.headers.get("origin");
+        if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
+        return await this.api(request, url, path.slice("/admin/api".length), { admin: true, node: true });
       }
-      const project = path.match(/^\/api\/projects\/([^/]+)$/)?.[1];
-      if (project || path === "/api/settings") {
-        if (!admin) throw new HttpError(401, "bad token");
-        if (path === "/api/settings" && method === "PUT") return json(this.putSettings(await body()));
-        if (project && method === "GET") return json(this.getProject(project));
-        if (project && method === "PUT") return json(this.putProject(project, await body(), url.searchParams.has("now")));
-        if (project && method === "DELETE") return json(this.deleteProject(project));
+      if (path.startsWith("/api/")) {
+        const auth = request.headers.get("authorization") ?? "";
+        const admin = Boolean(this.env.ADMIN_TOKEN) && auth === `Bearer ${this.env.ADMIN_TOKEN}`;
+        const node = admin || (Boolean(this.env.NODE_TOKEN) && auth === `Bearer ${this.env.NODE_TOKEN}`);
+        return await this.api(request, url, path.slice("/api".length), { admin, node });
       }
       throw new HttpError(404, "not found");
     } catch (e) {
@@ -154,16 +248,70 @@ export class Control extends DurableObject {
     }
   }
 
+  async api(request, url, route, { admin, node }) {
+    const { method } = request;
+    const body = () => request.json().catch(() => {
+      throw new HttpError(400, "the body must be JSON");
+    });
+    const need = (ok) => {
+      if (!ok) throw new HttpError(401, "bad token");
+    };
+    if (method === "GET" && route === "/status") return json(this.status());
+    if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
+    if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts("watchdog", Date.now()) });
+    if (method === "POST" && route === "/roll") return need(node), json(this.roll(url.searchParams.get("machine")));
+    if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
+    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable))?$/);
+    if (m) {
+      need(admin);
+      const [, name, action] = m;
+      if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
+      if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
+      if (!action && method === "PUT") return json(this.putProject(name, await body(), url.searchParams.has("now")));
+      if (!action && method === "DELETE") return json(this.deleteProject(name));
+    }
+    throw new HttpError(404, "not found");
+  }
+
+  // Who signed in through Cloudflare Access, or null. Checks the token's signature, audience, issuer and expiry.
+  async accessUser(request) {
+    const token = request.headers.get("cf-access-jwt-assertion");
+    const { ACCESS_TEAM: team, ACCESS_AUD: aud } = this.env;
+    if (!token || !team || !aud) return null;
+    try {
+      const [h, p, sig] = token.split(".");
+      const header = JSON.parse(new TextDecoder().decode(b64url(h)));
+      const claims = JSON.parse(new TextDecoder().decode(b64url(p)));
+      if (claims.iss !== `https://${team}` || claims.exp * 1000 < Date.now()) return null;
+      if (![].concat(claims.aud).includes(aud)) return null;
+      if (!this.accessKeys.has(header.kid)) {
+        const { keys } = await (await fetch(`https://${team}/cdn-cgi/access/certs`)).json();
+        for (const k of keys) {
+          const key = await crypto.subtle.importKey("jwk", k, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+          this.accessKeys.set(k.kid, key);
+        }
+      }
+      const key = this.accessKeys.get(header.kid);
+      const ok = key && (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64url(sig), new TextEncoder().encode(`${h}.${p}`)));
+      return ok ? claims.email || claims.common_name || "signed in" : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ---- projects ----
 
   describe(p) {
     const machines = this.machines();
+    const latest = this.version(p.name, p.version);
     return {
       name: p.name,
       version: p.version,
       stable: p.stable,
-      port: this.version(p.name, p.version)?.port ?? null,
-      state: p.halted ? "halted" : p.stable === p.version ? "live" : "rolling out",
+      port: latest?.port ?? null,
+      files: Object.keys(latest?.files ?? {}),
+      enabled: Boolean(p.enabled),
+      state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "rolling out",
       rollout: Math.min(p.rollout, machines),
       machines,
       halted: p.halted,
@@ -171,51 +319,67 @@ export class Control extends DurableObject {
     };
   }
 
-  getProject(name) {
+  project(name) {
     const p = this.projects.get(name);
     if (!p) throw new HttpError(404, `no project called ${name}`);
+    return p;
+  }
+
+  getProject(name, versionParam) {
+    const p = this.project(name);
+    const v = versionParam ? Number(versionParam) : p.version;
+    const spec = this.version(name, v);
+    if (!spec) throw new HttpError(404, `${name} has no version ${versionParam}`);
     return {
       ...this.describe(p),
-      compose: this.version(name, p.version).compose,
+      shown: v,
+      compose: spec.compose,
+      files: spec.files,
+      port: spec.port,
       versions: this.all("SELECT version, port, created FROM versions WHERE name = ? ORDER BY version", name),
     };
   }
 
   // A new spec becomes a new version, which rolls out machine by machine (or everywhere at once with ?now).
   putProject(name, body, now) {
-    const { compose, port = null } = body ?? {};
     if (!NAME.test(name)) throw new HttpError(400, "project names are lowercase letters, digits and dashes");
-    if (typeof compose !== "string" || !compose.trim()) {
-      throw new HttpError(400, "compose (the docker compose file, as text) is required");
-    }
-    if (compose.length > 100_000) throw new HttpError(400, "compose is too big");
-    if (port !== null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
-      throw new HttpError(400, "port must be a whole number from 1 to 65535");
-    }
+    const spec = buildSpec(body);
     const t = Date.now();
     const machines = this.machines();
     const p = this.projects.get(name);
     const latest = p && this.version(name, p.version);
+    const same = latest && latest.compose === spec.compose && latest.port === spec.port &&
+      JSON.stringify(latest.files) === JSON.stringify(spec.files);
     let next;
-    if (latest && latest.compose === compose && latest.port === port) {
+    if (same) {
       // Same spec again: that retries a stopped rollout, or (?now) pushes it to every machine.
       if (!p.halted && !now) return { ...this.describe(p), unchanged: true };
       next = { ...p, halted: null, rollout: now ? machines : 1, stable: now ? p.version : p.stable, updated: t };
     } else {
       const version = (p?.version ?? 0) + 1;
       this.sql.exec(
-        "INSERT INTO versions (name, version, compose, port, created) VALUES (?, ?, ?, ?, ?)",
-        name, version, compose, port, t,
+        "INSERT INTO versions (name, version, compose, port, files, created) VALUES (?, ?, ?, ?, ?, ?)",
+        name, version, spec.compose, spec.port, JSON.stringify(spec.files), t,
       );
-      next = { name, version, stable: now ? version : (p?.stable ?? null), rollout: now ? machines : 1, halted: null, updated: t };
+      next = {
+        name, version, stable: now ? version : (p?.stable ?? null), rollout: now ? machines : 1, halted: null,
+        updated: t, enabled: p?.enabled ?? 1,
+      };
     }
     this.saveProject(next);
     this.scheduleDns();
     return this.describe(next);
   }
 
+  // Disabled projects stay in the list with their versions, but no machine runs them.
+  setEnabled(name, enabled) {
+    const p = this.project(name);
+    this.saveProject({ ...p, enabled: enabled ? 1 : 0, updated: Date.now() });
+    return this.describe(this.projects.get(name));
+  }
+
   deleteProject(name) {
-    if (!this.projects.has(name)) throw new HttpError(404, `no project called ${name}`);
+    this.project(name);
     this.projects.delete(name);
     this.sql.exec("DELETE FROM projects WHERE name = ?", name);
     this.sql.exec("DELETE FROM versions WHERE name = ?", name);
@@ -224,7 +388,8 @@ export class Control extends DurableObject {
     return { deleted: name };
   }
 
-  putSettings({ machines } = {}) {
+  putSettings(body) {
+    const { machines } = isMap(body) ? body : {};
     if (machines !== undefined) {
       const max = Object.keys(this.tunnels()).length;
       if (!(Number.isInteger(machines) && machines >= 0 && machines <= max)) {
@@ -244,14 +409,15 @@ export class Control extends DurableObject {
   }
 
   // What machine n should run: the new version on machines 1..rollout, the last good one everywhere else.
-  // A halted rollout sends every machine back to the last good version.
+  // A halted rollout sends every machine back to the last good version; disabled projects run nowhere.
   desiredFor(machine) {
     const out = {};
     for (const p of this.projects.values()) {
+      if (!p.enabled) continue;
       const v = !p.halted && machine <= p.rollout ? p.version : p.stable;
       if (v == null) continue;
-      const { compose, port } = this.version(p.name, v);
-      out[p.name] = { v, compose, port };
+      const { compose, port, files } = this.version(p.name, v);
+      out[p.name] = { v, compose, port, files };
     }
     return out;
   }
@@ -266,7 +432,7 @@ export class Control extends DurableObject {
     }
     if (!newest.size) return; // nothing is up to try a new version on
     for (const p of this.projects.values()) {
-      if (p.halted || p.stable === p.version) continue;
+      if (!p.enabled || p.halted || p.stable === p.version) continue;
       let k = p.rollout;
       let changed = false;
       for (;;) {
@@ -302,7 +468,7 @@ export class Control extends DurableObject {
     if (!Number.isInteger(machine) || machine < 1 || !run || !Number.isFinite(started)) {
       throw new HttpError(400, "machine, run and started are required");
     }
-    const status = body.status && typeof body.status === "object" ? body.status : {};
+    const status = isMap(body.status) ? body.status : {};
     const ready = body.ready ? 1 : 0;
     let r = this.runs.get(run);
     if (!r) {
@@ -408,6 +574,7 @@ export class Control extends DurableObject {
   }
 
   // ---- DNS: <project>-<n>.DOMAIN -> tunnel runner-<n>, for every project with a port ----
+  // Disabled projects keep their records, so turning one back on is instant.
 
   scheduleDns() {
     this.ctx.storage.setAlarm(Date.now() + 2_000);
@@ -466,78 +633,3 @@ export class Control extends DurableObject {
     }
   }
 }
-
-const PAGE = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Runner</title>
-<style>
-  :root { --bg: #f7f7f5; --card: #fff; --fg: #1c1b19; --muted: #6f6b66; --line: #e6e3df; --ok: #177245; --warn: #a15c00; --bad: #b42318; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #121110; --card: #1b1a18; --fg: #f1efec; --muted: #a29d97; --line: #2c2a27; --ok: #5bd394; --warn: #f2b84b; --bad: #ff8a7a; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
-  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 40px; }
-  h1 { font-size: 22px; margin: 0; }
-  h2 { font-size: 13px; margin: 28px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  .sub { color: var(--muted); margin-top: 2px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 12px; font-weight: 600; color: var(--muted); }
-  tr:last-child td { border-bottom: 0; }
-  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
-  .links a { margin-right: 6px; }
-  a { color: inherit; }
-  .chip { display: inline-block; margin: 0 8px 2px 0; white-space: nowrap; }
-  .err { color: var(--bad); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-</style>
-</head>
-<body>
-<main>
-  <h1>Runner</h1>
-  <div class="sub" id="sub">Loading…</div>
-  <h2>Projects</h2>
-  <div class="card"><table id="projects"></table></div>
-  <h2>Machines</h2>
-  <div class="card"><table id="machines"></table></div>
-</main>
-<script>
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-const ago = (ms) => { const s = Math.round(ms / 1000); return s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h"; };
-const STATE = { healthy: "ok", applying: "warn", failed: "bad" };
-async function load() {
-  let d;
-  try { d = await (await fetch("/api/status", { cache: "no-store" })).json(); }
-  catch { document.getElementById("sub").textContent = "Can't reach the control plane"; return; }
-  const up = new Set(d.runs.filter((r) => r.live && !r.retiring).map((r) => r.machine));
-  document.getElementById("sub").textContent = up.size + " of " + d.machines + " machines up" + (d.dnsError ? " · DNS: " + d.dnsError : "");
-  document.getElementById("projects").innerHTML = "<tr><th>Project</th><th>Version</th><th>State</th><th>Open</th></tr>" +
-    (d.projects.map((p) => {
-      const state = p.state === "live" ? '<span class="ok">live</span>'
-        : p.state === "halted" ? '<span class="bad">halted, every machine is back on v' + esc(p.stable ?? "-") + '</span><div class="err">' + esc(p.halted) + "</div>"
-        : '<span class="warn">rolling out: ' + p.rollout + " of " + p.machines + " machines</span>";
-      const links = p.port ? Array.from({ length: p.machines }, (_, i) => '<a href="https://' + p.name + "-" + (i + 1) + "." + d.domain + '/" target="_blank">' + (i + 1) + "</a>").join("") : '<span class="muted">no port</span>';
-      return "<tr><td><b>" + esc(p.name) + "</b></td><td>v" + p.version + (p.stable && p.stable !== p.version ? ' <span class="muted">(v' + p.stable + " elsewhere)</span>" : "") +
-        "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
-    }).join("") || '<tr><td colspan="4" class="muted">No projects yet</td></tr>');
-  document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run</th><th>State</th><th>Projects</th></tr>" +
-    (d.runs.map((r) => {
-      const state = !r.live ? '<span class="muted">gone (seen ' + ago(d.now - r.seen) + " ago)</span>"
-        : r.retiring ? '<span class="muted">leaving, replaced</span>'
-        : r.handover ? '<span class="warn">starting its replacement</span>'
-        : r.ready ? '<span class="ok">online</span> <span class="muted">' + ago(d.now - r.started) + "</span>"
-        : '<span class="warn">starting up</span>';
-      const projects = Object.entries(r.projects).map(([name, s]) =>
-        '<span class="chip"><span class="' + (STATE[s.s] || "") + '">●</span> ' + esc(name) + " v" + esc(s.v) + "</span>" + (s.e ? '<div class="err">' + esc(s.e) + "</div>" : "")).join("");
-      return "<tr><td>" + r.machine + '</td><td><a href="https://github.com/' + d.repo + "/actions/runs/" + esc(r.id) + '" target="_blank">' + esc(r.id) + "</a></td><td>" + state + "</td><td>" + (projects || '<span class="muted">none</span>') + "</td></tr>";
-    }).join("") || '<tr><td colspan="4" class="muted">No machines have checked in</td></tr>');
-}
-load();
-setInterval(load, 10000);
-</script>
-</body>
-</html>`;

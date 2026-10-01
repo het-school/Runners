@@ -1,50 +1,91 @@
 #!/usr/bin/env bash
-# runnerctl: manage projects on the runner control plane.
-#   runnerctl apply <compose.yml> [name] [--now]  add or update a project (name defaults to the file name);
-#                                                 --now skips the one-machine-at-a-time rollout
-#   runnerctl get <name>                          print a project's compose file
-#   runnerctl rm <name>                           remove a project from every machine
-#   runnerctl status                              projects and machines
-#   runnerctl roll [machine]                      replace machines one at a time (e.g. after an agent change)
-#   runnerctl machines <n>                        how many machines to keep running
+# runnerctl: manage projects on the runner control plane (same API as the admin portal).
+#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--now]
+#       add or update a project. A folder sends its compose file (if any) plus every other file in it,
+#       e.g. a Dockerfile and what it COPYs. A Dockerfile on its own becomes a one-service project.
+#       The name defaults to the folder or file name. --now updates every machine at once.
+#   runnerctl get <name> [version]   print a project's compose file and other files
+#   runnerctl disable|enable <name>  stop or start a project on every machine (the spec is kept)
+#   runnerctl rm <name>              delete a project and its versions
+#   runnerctl status                 projects and machines
+#   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
+#   runnerctl machines <n>           how many machines to keep running
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,10p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,15p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
 case "$cmd" in
   apply)
     [ $# -ge 1 ] || usage
-    file=$1; shift
-    name="" now=""
-    for a in "$@"; do case $a in --now) now="?now=1" ;; *) name=$a ;; esac; done
-    name=${name:-$(basename "${file%.*}")}
-    # The port to put online comes from the file's x-runner block (docker compose ignores x- keys).
-    body=$(python3 - "$file" <<'PY'
-import json, sys, yaml
-text = open(sys.argv[1]).read()
-doc = yaml.safe_load(text)
-if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict):
-    sys.exit("not a docker compose file (no services:)")
-print(json.dumps({"compose": text, "port": (doc.get("x-runner") or {}).get("port")}))
+    src=$1; shift
+    name="" port="" now=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --now) now="?now=1" ;;
+        --port) port=${2:?--port needs a number}; shift ;;
+        *) name=$1 ;;
+      esac
+      shift
+    done
+    if [ -z "$name" ]; then
+      if [ -d "$src" ]; then name=$(basename "$(realpath "$src")")
+      elif [[ $(basename "$src") == *[Dd]ockerfile ]]; then name=$(basename "$(dirname "$(realpath "$src")")")
+      else name=$(basename "${src%.*}"); fi
+    fi
+    body=$(python3 - "$src" "$port" <<'PY'
+import json, os, sys
+src, port = sys.argv[1], sys.argv[2]
+COMPOSE = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+body = {}
+if os.path.isdir(src):
+    files = {}
+    for root, dirs, names in os.walk(src):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
+        for n in sorted(names):
+            if n.startswith("."):
+                continue
+            rel = os.path.relpath(os.path.join(root, n), src).replace(os.sep, "/")
+            try:
+                text = open(os.path.join(root, n), encoding="utf-8").read()
+            except UnicodeDecodeError:
+                sys.exit(f"{rel} isn't a text file; only text files can be sent")
+            if rel in COMPOSE:
+                body["compose"] = text
+            else:
+                files[rel] = text
+    body["files"] = files
+elif os.path.basename(src).lower().endswith("dockerfile"):
+    body["dockerfile"] = open(src, encoding="utf-8").read()
+else:
+    body["compose"] = open(src, encoding="utf-8").read()
+if port:
+    body["port"] = int(port)
+print(json.dumps(body))
 PY
 )
     api "/projects/$name$now" -X PUT --data-binary "$body" | jq . ;;
-  get) [ $# -eq 1 ] || usage; api "/projects/$1" | jq -r '.compose // .' ;;
+  get)
+    [ $# -ge 1 ] || usage
+    api "/projects/$1${2:+?version=$2}" | jq -r 'if .error then .error else
+      "# \(.name) v\(.shown) (latest v\(.version)), port \(.port // "none")\n\(.compose)"
+      + ([.files | to_entries[] | "\n# --- \(.key)\n\(.value)"] | join("")) end' ;;
+  disable | enable) [ $# -eq 1 ] || usage; api "/projects/$1/$cmd" -X POST | jq . ;;
   rm) [ $# -eq 1 ] || usage; api "/projects/$1" -X DELETE | jq . ;;
   status | ls)
     curl -sS "$URL/api/status" | jq -r '
       "Projects:",
       (.projects[] | "  \(.name)  v\(.version)  \(.state)"
         + (if .state == "rolling out" then " (\(.rollout)/\(.machines))" else "" end)
+        + (if (.files | length) > 0 then "  [builds: \(.files | join(", "))]" else "" end)
         + (if .halted then "\n    \(.halted)" else "" end)),
       "Machines: \([.runs[] | select(.live and (.retiring | not)) | .machine] | unique | length) of \(.machines) up",
-      (.runs[] | "  #\(.machine)  run \(.id)  "
-        + (if (.live | not) then "gone" elif .retiring then "leaving" elif .handover then "starting its replacement"
+      (.runs[] | select(.live) | "  #\(.machine)  run \(.id)  "
+        + (if .retiring then "leaving" elif .handover then "starting its replacement"
            elif .ready then "online" else "starting" end)
         + "  " + ([.projects | to_entries[] | "\(.key) v\(.value.v) \(.value.s)"] | join(", ")))' ;;
   roll) api "/roll${1:+?machine=$1}" -X POST | jq . ;;

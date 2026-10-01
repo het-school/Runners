@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runner admin</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --fg: #1d1c1a; --muted: #6e6a64; --line: #e4e1dc; --soft: #f0eeea;
+    --accent: #2f5bd3; --accent-fg: #ffffff; --ok: #177245; --warn: #a15c00; --bad: #b42318; --off: #8d8882;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121110; --card: #1b1a18; --fg: #f1efec; --muted: #a29d97; --line: #2e2c29; --soft: #24221f;
+      --accent: #7b9cff; --accent-fg: #0b1020; --ok: #5bd394; --warn: #f2b84b; --bad: #ff8a7a; --off: #77726c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  a { color: inherit; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 960px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .brand { font-weight: 700; font-size: 18px; }
+  .brand span { color: var(--muted); font-weight: 500; }
+  .fleet { color: var(--muted); font-size: 14px; flex: 1; }
+  main { max-width: 960px; margin: 0 auto; padding: 8px 16px 48px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 24px 0 10px; }
+  .cards { display: grid; gap: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .name { font-weight: 650; font-size: 16px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; background: var(--soft); white-space: nowrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .off { color: var(--off); }
+  .dots { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 10px; }
+  .dot { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 22px; padding: 0 5px;
+         border-radius: 6px; font-size: 12px; font-weight: 600; text-decoration: none; background: var(--soft); color: var(--muted); }
+  .dot.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  .dot.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .dot.bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+  .err { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bad) 10%, transparent);
+         color: var(--bad); font: 12px/1.4 var(--mono); white-space: pre-wrap; word-break: break-word; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  button { font: inherit; font-size: 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+           padding: 7px 12px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, textarea, select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+  textarea { font: 13px/1.45 var(--mono); min-height: 150px; resize: vertical; tab-size: 2; }
+  input[type="number"] { width: 90px; }
+  label { display: block; font-weight: 600; font-size: 14px; margin: 16px 0 6px; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; margin: 4px 0 0; }
+  .inline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  dialog { border: 0; padding: 0; width: min(760px, 100vw); max-height: 100dvh; border-radius: 14px; background: var(--card); color: var(--fg); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  @media (max-width: 640px) { dialog { width: 100vw; height: 100dvh; max-width: 100vw; border-radius: 0; margin: 0; } }
+  .dlg { display: flex; flex-direction: column; max-height: 100dvh; }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .dlg-head h3 { margin: 0; font-size: 17px; }
+  .dlg-body { padding: 0 16px 16px; overflow: auto; flex: 1; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  .file { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 8px; }
+  .file textarea { min-height: 110px; margin-top: 6px; }
+  .radio { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin: 8px 0 0; }
+  .radio input { width: auto; margin-top: 3px; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
+           padding: 10px 14px; border-radius: 10px; font-size: 14px; max-width: calc(100vw - 32px); display: none; z-index: 10; }
+  .empty { color: var(--muted); padding: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">Runner <span>admin</span></div>
+    <div class="fleet" id="fleet">Loading…</div>
+    <a href="/" class="meta">Status page</a>
+  </div>
+</header>
+<main>
+  <div class="head"><h2>Projects</h2><button class="primary" id="new">New project</button></div>
+  <div class="cards" id="projects"></div>
+  <div class="head">
+    <h2>Machines</h2>
+    <div class="inline">
+      Run <input type="number" id="count" min="0" max="10"> machines
+      <button id="save-count">Save</button>
+      <button id="roll-all">Restart all</button>
+    </div>
+  </div>
+  <div class="cards" id="machines"></div>
+</main>
+
+<dialog id="editor">
+  <form class="dlg" id="form" method="dialog">
+    <div class="dlg-head"><h3 id="ed-title">New project</h3><button type="button" id="ed-close" aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <div id="ed-versions" hidden>
+        <label for="ed-version">Version</label>
+        <div class="inline"><select id="ed-version"></select><button type="button" id="ed-load">Load</button></div>
+        <p class="hint">Load an earlier version and save it to roll back. Saving always makes a new version.</p>
+      </div>
+      <label for="ed-name">Name</label>
+      <input id="ed-name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app">
+      <p class="hint">Lowercase letters, digits and dashes. Machine n serves it at https://<b id="ed-host">name</b>-n.<span class="domain"></span></p>
+      <label for="ed-port">Port</label>
+      <input id="ed-port" type="number" min="1" max="65535" placeholder="8080">
+      <p class="hint">The port the project listens on, on the machine. Leave it empty to use <code>x-runner.port</code> from the compose file, or to keep the project offline.</p>
+      <label for="ed-compose">Docker Compose</label>
+      <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
+      <p class="hint">Optional when there's a Dockerfile: one service is made that builds it and publishes the port.</p>
+      <label for="ed-dockerfile">Dockerfile</label>
+      <textarea id="ed-dockerfile" spellcheck="false" placeholder="FROM node:22-alpine&#10;WORKDIR /app&#10;COPY . .&#10;CMD [&quot;node&quot;, &quot;server.js&quot;]"></textarea>
+      <p class="hint">Builds a custom image. Point a compose service at it with <code>build: .</code></p>
+      <label>Other files</label>
+      <div id="ed-files"></div>
+      <button type="button" id="ed-add-file" style="margin-top:8px">Add a file</button>
+      <p class="hint">Anything else the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>. Paths are relative to the compose file.</p>
+      <label>Rollout</label>
+      <label class="radio"><input type="radio" name="rollout" value="gradual" checked> One machine at a time. Stops and rolls back if a machine reports it broken.</label>
+      <label class="radio"><input type="radio" name="rollout" value="now"> Every machine at once.</label>
+      <div class="err" id="ed-error" hidden></div>
+    </div>
+    <div class="dlg-foot"><button type="button" id="ed-cancel">Cancel</button><button class="primary" id="ed-save" type="submit">Deploy</button></div>
+  </form>
+</dialog>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const ago = (ms) => { const s = Math.round(ms / 1000); return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; };
+let status = null;
+let editing = null; // name of the project open in the editor, or null for a new one
+
+function toast(message) {
+  const t = $("toast");
+  t.textContent = message;
+  t.style.display = "block";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.style.display = "none"), 4000);
+}
+
+async function api(method, path, body) {
+  let res;
+  try {
+    res = await fetch(`/admin/api${path}`, {
+      method,
+      redirect: "manual",
+      headers: body ? { "content-type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new Error("Can't reach the control plane");
+  }
+  if (res.type === "opaqueredirect" || res.status === 401) throw new Error("Signed out. Reload the page to sign in again.");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+// The run that speaks for each machine: its newest live one.
+function machineRuns() {
+  const out = new Map();
+  for (const r of status.runs) if (r.live && !r.retiring && (!out.has(r.machine) || out.get(r.machine).started < r.started)) out.set(r.machine, r);
+  return out;
+}
+
+function render() {
+  const runs = machineRuns();
+  const up = [...runs.values()].filter((r) => r.ready).length;
+  $("fleet").textContent = `${up} of ${status.machines} machines online`;
+  document.querySelectorAll(".domain").forEach((el) => (el.textContent = status.domain));
+  if (document.activeElement !== $("count")) $("count").value = status.machines;
+
+  const STATE = { live: "ok", "rolling out": "warn", halted: "bad", disabled: "off" };
+  $("projects").innerHTML = status.projects.map((p) => {
+    const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
+    const dots = Array.from({ length: p.machines }, (_, i) => {
+      const n = i + 1;
+      const s = runs.get(n)?.projects[p.name];
+      const cls = !s ? "" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
+      const title = !s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`;
+      const inner = `${n}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
+      return p.port
+        ? `<a class="dot ${cls}" title="${esc(title)}" href="https://${esc(p.name)}-${n}.${esc(status.domain)}/" target="_blank" rel="noopener">${inner}</a>`
+        : `<span class="dot ${cls}" title="${esc(title)}">${inner}</span>`;
+    }).join("");
+    return `<div class="card">
+      <div class="row">
+        <div class="grow"><span class="name">${esc(p.name)}</span></div>
+        <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
+      </div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
+      ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
+      <div class="actions">
+        <button data-act="edit" data-name="${esc(p.name)}">Edit</button>
+        ${p.halted ? `<button data-act="retry" data-name="${esc(p.name)}">Retry</button>` : ""}
+        <button data-act="${p.enabled ? "disable" : "enable"}" data-name="${esc(p.name)}">${p.enabled ? "Disable" : "Enable"}</button>
+        <button class="danger" data-act="delete" data-name="${esc(p.name)}">Delete</button>
+      </div>
+    </div>`;
+  }).join("") || `<div class="card empty">No projects yet</div>`;
+
+  const machines = [];
+  for (let n = 1; n <= status.machines; n++) {
+    const r = runs.get(n);
+    const state = !r ? `<span class="badge bad">down</span>`
+      : r.handover ? `<span class="badge warn">starting its replacement</span>`
+      : r.ready ? `<span class="badge ok">online · ${ago(status.now - r.started)}</span>`
+      : `<span class="badge warn">starting up</span>`;
+    const projects = r ? Object.entries(r.projects).map(([name, s]) =>
+      `<span class="dot ${s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn"}" title="${esc(s.e || s.s)}">${esc(name)} v${esc(s.v)}</span>`).join("") : "";
+    machines.push(`<div class="card">
+      <div class="row">
+        <div class="grow"><span class="name">Machine ${n}</span>
+          ${r ? ` <a class="meta" href="https://github.com/${esc(status.repo)}/actions/runs/${esc(r.id)}" target="_blank" rel="noopener">run ${esc(r.id)}</a>` : ""}</div>
+        ${state}
+      </div>
+      ${projects ? `<div class="dots">${projects}</div>` : ""}
+      <div class="actions"><button data-act="restart" data-machine="${n}">Restart</button></div>
+    </div>`);
+  }
+  $("machines").innerHTML = machines.join("");
+}
+
+async function refresh() {
+  try {
+    status = await api("GET", "/status");
+    render();
+  } catch (e) {
+    $("fleet").textContent = e.message;
+  }
+}
+
+// ---- editor ----
+
+function addFile(path = "", content = "") {
+  const div = document.createElement("div");
+  div.className = "file";
+  div.innerHTML = `<div class="row"><input class="grow f-path" placeholder="path, e.g. web/Dockerfile" autocapitalize="off" spellcheck="false">
+    <button type="button" class="danger f-remove">Remove</button></div><textarea class="f-content" spellcheck="false"></textarea>`;
+  div.querySelector(".f-path").value = path;
+  div.querySelector(".f-content").value = content;
+  div.querySelector(".f-remove").onclick = () => div.remove();
+  $("ed-files").append(div);
+}
+
+function fill(spec) {
+  const files = { ...(spec.files || {}) };
+  $("ed-port").value = spec.port ?? "";
+  $("ed-compose").value = spec.compose || "";
+  $("ed-dockerfile").value = files.Dockerfile || "";
+  delete files.Dockerfile;
+  $("ed-files").innerHTML = "";
+  for (const [path, content] of Object.entries(files)) addFile(path, content);
+}
+
+async function openEditor(name) {
+  editing = name;
+  $("ed-error").hidden = true;
+  $("ed-title").textContent = name ? `Edit ${name}` : "New project";
+  $("ed-name").value = name || "";
+  $("ed-name").disabled = Boolean(name);
+  $("ed-host").textContent = name || "name";
+  document.querySelector('input[name="rollout"][value="gradual"]').checked = true;
+  $("ed-versions").hidden = !name;
+  fill({});
+  if (name) {
+    try {
+      const p = await api("GET", `/projects/${name}`);
+      fill(p);
+      $("ed-version").innerHTML = p.versions.slice().reverse().map((v) =>
+        `<option value="${v.version}">v${v.version}${v.version === p.version ? " (latest)" : ""}${v.version === p.stable ? " (good)" : ""} · ${new Date(v.created).toLocaleString()}</option>`).join("");
+    } catch (e) {
+      return toast(e.message);
+    }
+  }
+  $("editor").showModal();
+}
+
+$("ed-name").oninput = () => ($("ed-host").textContent = $("ed-name").value || "name");
+$("ed-load").onclick = async () => {
+  try {
+    fill(await api("GET", `/projects/${editing}?version=${$("ed-version").value}`));
+    toast(`Loaded v${$("ed-version").value}. Deploy to make it the newest version.`);
+  } catch (e) {
+    toast(e.message);
+  }
+};
+$("ed-add-file").onclick = () => addFile();
+$("ed-close").onclick = $("ed-cancel").onclick = () => $("editor").close();
+$("new").onclick = () => openEditor(null);
+
+$("form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const name = editing || $("ed-name").value.trim();
+  const files = {};
+  for (const div of $("ed-files").children) {
+    const path = div.querySelector(".f-path").value.trim();
+    if (path) files[path] = div.querySelector(".f-content").value;
+  }
+  const body = { compose: $("ed-compose").value, files };
+  if ($("ed-dockerfile").value.trim()) body.dockerfile = $("ed-dockerfile").value;
+  if ($("ed-port").value) body.port = Number($("ed-port").value);
+  const now = document.querySelector('input[name="rollout"]:checked').value === "now";
+  $("ed-save").disabled = true;
+  try {
+    const p = await api("PUT", `/projects/${encodeURIComponent(name)}${now ? "?now=1" : ""}`, body);
+    $("editor").close();
+    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version}${now ? " to every machine" : ", one machine at a time"}`);
+    refresh();
+  } catch (e) {
+    $("ed-error").textContent = e.message;
+    $("ed-error").hidden = false;
+  } finally {
+    $("ed-save").disabled = false;
+  }
+};
+
+// ---- list actions ----
+
+document.addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button[data-act]");
+  if (!b) return;
+  const { act, name, machine } = b.dataset;
+  try {
+    if (act === "edit") return openEditor(name);
+    if (act === "retry") {
+      const p = await api("GET", `/projects/${name}`);
+      await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port });
+      toast(`Retrying ${name} v${p.version}, one machine at a time`);
+    }
+    if (act === "disable") {
+      if (!confirm(`Disable ${name}? Its containers stop on every machine. Its spec and versions are kept.`)) return;
+      await api("POST", `/projects/${name}/disable`);
+      toast(`${name} is stopping on every machine`);
+    }
+    if (act === "enable") {
+      await api("POST", `/projects/${name}/enable`);
+      toast(`${name} is starting on every machine`);
+    }
+    if (act === "delete") {
+      if (!confirm(`Delete ${name}? It stops on every machine, and its versions are deleted.`)) return;
+      await api("DELETE", `/projects/${name}`);
+      toast(`${name} deleted`);
+    }
+    if (act === "restart") {
+      if (!confirm(`Restart machine ${machine}? A fresh run takes over before the old one leaves, so nothing goes down.`)) return;
+      await api("POST", `/roll?machine=${machine}`);
+      toast(`Machine ${machine} is starting a fresh run`);
+    }
+    refresh();
+  } catch (e) {
+    toast(e.message);
+  }
+});
+
+$("roll-all").onclick = async () => {
+  if (!confirm("Restart every machine? They're replaced one at a time, so nothing goes down.")) return;
+  try {
+    await api("POST", "/roll");
+    toast("Restarting machines one at a time");
+  } catch (e) {
+    toast(e.message);
+  }
+};
+$("save-count").onclick = async () => {
+  try {
+    const r = await api("PUT", "/settings", { machines: Number($("count").value) });
+    toast(`Keeping ${r.machines} machines running`);
+    refresh();
+  } catch (e) {
+    toast(e.message);
+  }
+};
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

@@ -5,12 +5,16 @@ main = "src/index.js"
 compatibility_date = "2025-09-01"
 workers_dev = false
 routes = [{ pattern = "control.billybishop4-workers.xyz", custom_domain = true }]
+rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
 
 [vars]
 REPO = "hetp4401/runner"
 DOMAIN = "billybishop4-workers.xyz"
 ZONE = "44fb65648f475249f22e9d0cffdd393d"
 MACHINES = "10"
+# Cloudflare Access app "Runner admin" in front of /admin (sign-in with an emailed one-time code).
+ACCESS_TEAM = "bb4.cloudflareaccess.com"
+ACCESS_AUD = "97e29837a6060234898d179bbb0ee9f04694e0da28ff0e0165f498bbe694f1a5"
 
 # Machine n connects Cloudflare tunnel runner-n, so <project>-n points here.
 [vars.TUNNELS]
