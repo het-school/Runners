@@ -3,6 +3,7 @@
 A self-healing fleet on GitHub Actions: 10 machines each run every project, each machine is online through its own Cloudflare tunnel, and the project specs live in a control plane on Cloudflare (not in this repo).
 
 - **Status page:** https://control.billybishop4-workers.xyz
+- **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, load, memory, pressure stalls, disk, network and TCP for the whole fleet, for each machine and for each app (container CPU, memory, I/O, processes, restarts, response time). History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 - **Admin portal:** https://control.billybishop4-workers.xyz/admin. It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
   - add projects and edit them
   - roll back to an earlier version
@@ -41,6 +42,7 @@ The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with 
 
 ```
 GET    /api/status                              projects and machines (no token needed)
+GET    /api/metrics?range=1h|6h|24h|7d|30d      metrics columns per machine and app, plus live samples (no token needed)
 PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...",
                                                 "files": {"path": "text"}, "port": 8080}  (compose or dockerfile required)
 GET    /api/projects/<name>[?version=N]         a version's compose file, files and port, plus the version list

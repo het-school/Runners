@@ -133,11 +133,15 @@ const F = {
   num: (x) => compact(x),
   persec: (x) => (isNum(x) ? compact(x) + "/s" : "–"),
   ms: (x) => (isNum(x) ? (x >= 100 ? Math.round(x) : +x.toFixed(1)) + " ms" : "–"),
-  cores: (x) => (isNum(x) ? +(x / 100).toFixed(2) + " cores" : "–"), // input is % of one core
+  // input is % of one core; under one core it reads better as a percentage
+  cores: (x) => (!isNum(x) ? "–" : x >= 100 ? +(x / 100).toFixed(2) + " cores" : +x.toFixed(x < 1 ? 2 : 1) + "% of a core"),
   load: (x) => (isNum(x) ? x.toFixed(2) : "–"),
 };
-const AXIS = { pct: (x) => Math.round(x) + "%", bytes: (x) => bytes(x).replace(" ", ""), rate: (x) => bytes(x).replace(" ", "") + "/s",
-  num: (x) => compact(x, 2), persec: (x) => compact(x, 2), ms: (x) => compact(x, 2) + "ms", cores: (x) => +(x / 100).toFixed(2) + "", load: (x) => compact(x, 2) };
+// Axis ticks get as many decimals as the tick step needs, so neighbouring ticks never read the same.
+const dec = (step) => Math.min(4, (String(+step.toPrecision(6)).split(".")[1] ?? "").length);
+const fixed = (v, step) => (v >= 10000 ? compact(v, 2) : v.toFixed(dec(step)));
+const AXIS = { pct: (x, s) => fixed(x, s) + "%", bytes: (x) => bytes(x).replace(" ", ""), rate: (x) => bytes(x).replace(" ", "") + "/s",
+  num: fixed, persec: fixed, ms: (x, s) => fixed(x, s) + "ms", cores: (x, s) => fixed(x / 100, s / 100), load: fixed };
 function ago(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   return s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : s < 172800 ? (s / 3600).toFixed(1) + "h" : Math.round(s / 86400) + "d";
@@ -297,7 +301,7 @@ function lineChart(body, t, series, opts = {}) {
   const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img" });
   for (let v = 0; v <= yMax + 1e-9; v += step) {
     el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: v === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1, "shape-rendering": "crispEdges" }, svg);
-    el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = AXIS[unit](v);
+    el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = AXIS[unit](v, step);
   }
   const xt = xTicks(t0, t1, W - L - R);
   for (const tt of xt.ticks) {
@@ -368,6 +372,7 @@ function lineChart(body, t, series, opts = {}) {
 // rows: [{ name, values, onClick? }]; one hue, light (low) to dark (high)
 function heatmap(body, t, rows, opts = {}) {
   const unit = opts.unit ?? "num";
+  rows = rows.map((r) => ({ ...r, values: r.values ?? [] }));
   body.replaceChildren();
   if (!rows.some((r) => r.values?.some(isNum))) {
     body.innerHTML = '<div class="empty">No data in this range yet</div>';
@@ -514,7 +519,7 @@ function combine(cols, how) {
   }
   return out;
 }
-const map2 = (a, b, f) => a.map((v, i) => (isNum(v) && isNum(b?.[i]) ? f(v, b[i]) : null));
+const map2 = (a, b, f) => (a ?? []).map((v, i) => (isNum(v) && isNum(b?.[i]) ? f(v, b[i]) : null));
 const fleetH = (k, how = "sum") => combine(machineNums().map((m) => hcol(m, k)), how);
 function appNames() {
   const set = new Set();
@@ -642,10 +647,10 @@ function renderMachine(main, m) {
   lineChart(card(cpu, "CPU time by kind", "% of all cores"), d.t, [
     { name: "user", values: H("cpuUser") }, { name: "system", values: H("cpuSys") }, { name: "I/O wait", values: H("cpuIowait") },
     { name: "steal", values: H("cpuSteal") }, { name: "irq", values: H("cpuIrq") }, { name: "nice", values: H("cpuNice") },
-  ], { unit: "pct", stacked: true, max: 100 });
+  ], { unit: "pct", stacked: true });
   lineChart(card(cpu, "CPU busy", "average of the interval, its peak, and the busiest core"), d.t, [
     { name: "average", values: H("cpu") }, { name: "peak", values: H("cpuMax") }, { name: "busiest core", values: H("cpuCoreMax") },
-  ], { unit: "pct", max: 100 });
+  ], { unit: "pct" });
   lineChart(card(cpu, "Load average"), d.t, [{ name: "1 min", values: H("load1") }, { name: "5 min", values: H("load5") }, { name: "15 min", values: H("load15") }],
     { unit: "load", ref: { name: "cores", value: x.cores ?? Math.max(0, ...(H("cores") ?? []).filter(isNum)) } });
   lineChart(card(cpu, "Pressure stall (PSI)", "% of time some task was waiting on the resource"), d.t, [
