@@ -71,6 +71,29 @@
   #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
            padding: 10px 14px; border-radius: 10px; font-size: 14px; max-width: calc(100vw - 32px); display: none; z-index: 10; }
   .empty { color: var(--muted); padding: 18px; text-align: center; }
+  .name-link { background: none; border: 0; padding: 0; font: inherit; font-weight: 650; font-size: 16px; color: inherit; cursor: pointer; text-align: left; }
+  .name-link:hover { text-decoration: underline; }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 14px; }
+  .kv div { background: var(--soft); border-radius: 8px; padding: 8px 10px; }
+  .kv dt { font-size: 12px; color: var(--muted); }
+  .kv dd { margin: 2px 0 0; font-weight: 600; word-break: break-word; }
+  .sec { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 22px 0 8px; font-weight: 600; }
+  table.list { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.list th, table.list td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.list th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  table.list tr:last-child td { border-bottom: 0; }
+  table.list tr.pick { cursor: pointer; }
+  table.list tr.pick:hover td { background: var(--soft); }
+  table.list tr.shown td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  .tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 7px 10px; font: 13px var(--mono); color: var(--muted); }
+  .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  pre.code { margin: 0; padding: 12px; background: var(--soft); border-radius: 0 0 10px 10px; overflow: auto; max-height: 50dvh;
+             font: 12.5px/1.5 var(--mono); tab-size: 2; white-space: pre; }
+  .spec-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; margin-bottom: 8px; }
+  .spec-bar select { width: auto; }
+  .small { font-size: 13px; padding: 5px 10px; }
 </style>
 </head>
 <body>
@@ -105,7 +128,7 @@
         <p class="hint">Load an earlier version and save it to roll back. Saving always makes a new version.</p>
       </div>
       <label for="ed-name">Name</label>
-      <input id="ed-name" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app">
+      <input id="ed-name" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app">
       <p class="hint">Lowercase letters, digits and dashes. Machine n serves it at https://<b id="ed-host">name</b>-n.<span class="domain"></span></p>
       <label for="ed-port">Port</label>
       <input id="ed-port" type="number" min="1" max="65535" placeholder="8080">
@@ -127,6 +150,13 @@
     </div>
     <div class="dlg-foot"><button type="button" id="ed-cancel">Cancel</button><button class="primary" id="ed-save" type="submit">Deploy</button></div>
   </form>
+</dialog>
+<dialog id="details">
+  <div class="dlg">
+    <div class="dlg-head"><h3 id="dt-title">Project</h3><button type="button" id="dt-close" aria-label="Close">✕</button></div>
+    <div class="dlg-body" id="dt-body"></div>
+    <div class="dlg-foot"><button type="button" id="dt-done">Close</button><button class="primary" type="button" id="dt-edit">Edit</button></div>
+  </div>
 </dialog>
 <div id="toast"></div>
 
@@ -192,13 +222,14 @@ function render() {
     }).join("");
     return `<div class="card">
       <div class="row">
-        <div class="grow"><span class="name">${esc(p.name)}</span></div>
+        <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
       <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
+        <button data-act="details" data-name="${esc(p.name)}">Details</button>
         <button data-act="edit" data-name="${esc(p.name)}">Edit</button>
         ${p.halted ? `<button data-act="retry" data-name="${esc(p.name)}">Retry</button>` : ""}
         <button data-act="${p.enabled ? "disable" : "enable"}" data-name="${esc(p.name)}">${p.enabled ? "Disable" : "Enable"}</button>
@@ -233,6 +264,7 @@ async function refresh() {
   try {
     status = await api("GET", "/status");
     render();
+    if (details.name && $("details").open) renderDetails();
   } catch (e) {
     $("fleet").textContent = e.message;
   }
@@ -260,6 +292,123 @@ function fill(spec) {
   $("ed-files").innerHTML = "";
   for (const [path, content] of Object.entries(files)) addFile(path, content);
 }
+
+// ---- details ----
+
+const details = { name: null, spec: null, tab: null }; // the project open in the details view and the version shown
+
+function specFiles(spec) {
+  const out = [];
+  if (spec.compose) out.push(["docker-compose.yml", spec.compose]);
+  const files = spec.files || {};
+  if (files.Dockerfile != null) out.push(["Dockerfile", files.Dockerfile]);
+  for (const path of Object.keys(files).sort()) if (path !== "Dockerfile") out.push([path, files[path]]);
+  return out;
+}
+
+function renderDetails() {
+  const spec = details.spec;
+  const p = status.projects.find((x) => x.name === details.name);
+  if (!p) return $("details").close();
+  const runs = machineRuns();
+  const STATE = { live: "ok", "rolling out": "warn", halted: "bad", disabled: "off" };
+  const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
+  const scroll = $("dt-body").scrollTop;
+
+  const machines = Array.from({ length: p.machines }, (_, i) => {
+    const n = i + 1;
+    const r = runs.get(n);
+    const s = r?.projects[p.name];
+    const target = !p.enabled ? null : !p.halted && n <= p.rollout ? p.version : p.stable;
+    const cls = !s ? "off" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
+    const url = `https://${p.name}-${n}.${status.domain}/`;
+    return `<tr><td>${n}</td>
+      <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
+      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
+  }).join("");
+
+  const versions = spec.versions.slice().reverse().map((v) => `<tr class="pick${v.version === spec.shown ? " shown" : ""}" data-version="${v.version}">
+      <td>v${v.version}</td>
+      <td>${v.version === p.version ? `<span class="badge">latest</span> ` : ""}${v.version === p.stable ? `<span class="badge ok">good</span>` : ""}</td>
+      <td>${v.port ?? "–"}</td><td class="meta">${esc(new Date(v.created).toLocaleString())}</td></tr>`).join("");
+
+  const files = specFiles(spec);
+  if (!files.some(([path]) => path === details.tab)) details.tab = files[0]?.[0] ?? null;
+  const current = files.find(([path]) => path === details.tab);
+  const tabs = files.map(([path]) =>
+    `<button type="button" class="tab" role="tab" aria-selected="${path === details.tab}" data-tab="${esc(path)}">${esc(path)}</button>`).join("");
+
+  $("dt-title").innerHTML = `${esc(p.name)} <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>`;
+  $("dt-body").innerHTML = `
+    <dl class="kv">
+      <div><dt>Latest version</dt><dd>v${p.version}</dd></div>
+      <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
+      <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
+      <div><dt>Rollout</dt><dd>${p.enabled ? `${p.rollout} of ${p.machines} machines` : "disabled"}</dd></div>
+      <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
+      <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
+    </dl>
+    ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
+    <div class="sec">Spec</div>
+    <div class="spec-bar">
+      <select id="dt-version" aria-label="Version">${spec.versions.slice().reverse().map((v) =>
+        `<option value="${v.version}"${v.version === spec.shown ? " selected" : ""}>v${v.version}${v.version === p.version ? " (latest)" : ""}${v.version === p.stable ? " (good)" : ""}</option>`).join("")}</select>
+      <span class="meta">${files.length} file${files.length === 1 ? "" : "s"} · port ${spec.port ?? "from x-runner.port or none"}</span>
+      <span class="row">
+        <button type="button" class="small" id="dt-copy"${current ? "" : " disabled"}>Copy</button>
+        ${spec.shown !== p.version ? `<button type="button" class="small" id="dt-restore">Restore in editor</button>` : ""}
+      </span>
+    </div>
+    ${files.length ? `<div class="tabs" role="tablist">${tabs}</div><pre class="code" id="dt-code"></pre>` : `<div class="card empty">No files</div>`}
+    <div class="sec">Machines</div>
+    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th></tr>${machines}</table></div>
+    <div class="sec">Versions</div>
+    <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Created</th></tr>${versions}</table></div>`;
+  if (current) $("dt-code").textContent = current[1];
+  $("dt-body").scrollTop = scroll;
+}
+
+async function showVersion(version) {
+  try {
+    details.spec = await api("GET", `/projects/${encodeURIComponent(details.name)}${version ? `?version=${version}` : ""}`);
+    renderDetails();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function openDetails(name) {
+  details.name = name;
+  details.tab = null;
+  details.spec = null;
+  history.replaceState(null, "", `#${encodeURIComponent(name)}`);
+  await showVersion(null);
+  if (details.spec && !$("details").open) $("details").showModal();
+}
+
+$("dt-body").addEventListener("click", async (ev) => {
+  const tab = ev.target.closest("[data-tab]");
+  if (tab) { details.tab = tab.dataset.tab; return renderDetails(); }
+  const row = ev.target.closest("tr[data-version]");
+  if (row) return showVersion(row.dataset.version);
+  if (ev.target.id === "dt-copy") {
+    const file = specFiles(details.spec).find(([path]) => path === details.tab);
+    try { await navigator.clipboard.writeText(file[1]); toast(`Copied ${file[0]}`); } catch { toast("Couldn't copy"); }
+  }
+  if (ev.target.id === "dt-restore") {
+    const { spec, name } = details;
+    $("details").close();
+    await openEditor(name);
+    fill(spec);
+    $("ed-version").value = spec.shown;
+    toast(`Loaded v${spec.shown}. Deploy to make it the newest version.`);
+  }
+});
+$("dt-body").addEventListener("change", (ev) => { if (ev.target.id === "dt-version") showVersion(ev.target.value); });
+$("dt-close").onclick = $("dt-done").onclick = () => $("details").close();
+$("details").addEventListener("close", () => { details.name = null; history.replaceState(null, "", location.pathname); });
+$("dt-edit").onclick = () => { const name = details.name; $("details").close(); openEditor(name); };
 
 async function openEditor(name) {
   editing = name;
@@ -330,6 +479,7 @@ document.addEventListener("click", async (ev) => {
   if (!b) return;
   const { act, name, machine } = b.dataset;
   try {
+    if (act === "details") return openDetails(name);
     if (act === "edit") return openEditor(name);
     if (act === "retry") {
       const p = await api("GET", `/projects/${name}`);
@@ -380,7 +530,7 @@ $("save-count").onclick = async () => {
   }
 };
 
-refresh();
+refresh().then(() => { if (location.hash.length > 1 && status) openDetails(decodeURIComponent(location.hash.slice(1))); });
 setInterval(refresh, 10000);
 </script>
 </body>
