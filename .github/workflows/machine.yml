@@ -30,7 +30,8 @@ jobs:
           CONTROL_URL: https://control.billybishop4-workers.xyz
           CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-        run: node agent/agent.mjs
+        # exec: the agent is the step's own process, so a cancelled run's signal reaches it and it can hand data back.
+        run: exec node agent/agent.mjs
 
       - name: Container logs
         if: always()

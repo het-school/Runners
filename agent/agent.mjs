@@ -21,6 +21,9 @@ const started = Date.now();
 const hardStop = github ? started + 355 * 60_000 : Infinity; // leave before GitHub kills the job at 6 hours
 const selfHandover = github ? started + 330 * 60_000 : Infinity; // start a replacement ourselves if not asked by then
 const settleBy = started + 10 * 60_000; // open the tunnel by then even if a project is still struggling
+// With no word from the control plane for this long, stateful projects are stopped: after 75 s it counts this run
+// as gone and mounts their data elsewhere, and data must never be written from two machines.
+const FENCE_MS = 70_000;
 const ROUTER_PORT = 19080; // the tunnel sends everything here, and the router (Caddy) picks the project by hostname
 const dir = `${base}/projects`;
 const routerDir = `${base}/router`;
@@ -126,7 +129,7 @@ function reconcile(desired) {
   for (const [name, want] of Object.entries(desired)) {
     const p = projects.get(name);
     if (p?.busy) continue;
-    const retry = p?.s === "failed" && Date.now() - p.at > 3 * 60_000;
+    const retry = (p?.s === "failed" && Date.now() - p.at > 3 * 60_000) || p?.s === "fenced";
     const storageChanged = Boolean(p?.storage) !== Boolean(want.storage) || (want.storage && p.storage.readOnly !== want.storage.readOnly);
     if (!p || p.v !== want.v || p.port !== want.port || storageChanged || retry) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
   }
@@ -274,6 +277,18 @@ async function releaseStateful() {
   await sync().catch(() => {});
 }
 
+// Stop stateful projects while the control plane is out of reach (see FENCE_MS). They're started again when it's
+// back, if they're still wanted here.
+async function fenceStateful(silentFor) {
+  for (const [name, p] of projects) {
+    if (!p.storage || p.busy || p.s === "fenced") continue;
+    log(`${name}: no word from the control plane for ${Math.round(silentFor / 1000)}s; stopping it so its data isn't mounted on two machines`);
+    p.busy = true;
+    await stopStateful(name);
+    Object.assign(p, { s: "fenced", e: "stopped: the control plane was out of reach, so its data may have moved", busy: false, at: Date.now() });
+  }
+}
+
 const storageState = () => {
   const stateful = [...projects.values()].filter((p) => p.storage);
   return !storage ? "none" : stateful.some((p) => p.s === "failed" && /mount/.test(p.e)) ? "down" : "ok";
@@ -347,6 +362,7 @@ async function startTunnel() {
 // ---- control plane and GitHub ----
 
 let ready = false;
+let lastSyncOk = Date.now();
 
 const metrics = startMetrics();
 
@@ -465,8 +481,10 @@ async function main() {
     let plan = null;
     try {
       plan = await sync();
+      lastSyncOk = Date.now();
     } catch (e) {
       log(`control plane unreachable (${e.message}); keeping what's running`);
+      if (Date.now() - lastSyncOk > FENCE_MS) await fenceStateful(Date.now() - lastSyncOk);
     }
     if (plan?.retire) {
       releasing = true;
