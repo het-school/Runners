@@ -229,6 +229,9 @@ async function proxy(request, env, project) {
       res = null;
       continue;
     }
+    // The machine's router answers 404 with this header when it no longer has the project (it's being removed
+    // there); the app never saw the request, so another machine can take it whatever the method.
+    if (res.status === 404 && res.headers.get("x-runner-route") === "none") continue;
     if (retry && [502, 503, 504, 530].includes(res.status)) continue;
     // Keep visitors on the shared hostname when the app redirects to the machine's own one.
     const location = res.headers.get("location");
@@ -941,7 +944,8 @@ export class Control extends DurableObject {
     return this.tunnelJobs.get(n);
   }
 
-  // For the shared URLs: project -> slots whose current run is online and has it healthy.
+  // For the shared URLs: project -> slots whose current run is online, should run it, and has it healthy.
+  // (A machine keeps reporting a project healthy for a moment after it's told to remove it.)
   healthyRoutes(now) {
     const newest = new Map();
     for (const r of this.liveRuns(now)) {
@@ -950,7 +954,7 @@ export class Control extends DurableObject {
     const out = {};
     for (const p of this.projects.values()) {
       if (!p.enabled || !this.version(p.name, p.version)?.port) continue;
-      out[p.name] = [...newest.values()].filter((r) => r.status[p.name]?.s === "healthy").map((r) => r.machine);
+      out[p.name] = [...newest.values()].filter((r) => this.runsOn(p.name, r.machine) && r.status[p.name]?.s === "healthy").map((r) => r.machine);
     }
     return out;
   }
