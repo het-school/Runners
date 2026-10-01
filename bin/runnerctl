@@ -9,13 +9,14 @@
 #   runnerctl rm <name>              delete a project and its versions
 #   runnerctl status                 projects and machines
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
-#   runnerctl machines <n>           how many machines to keep running
+#   runnerctl machines <n>           how many GitHub machines to keep running
+#   runnerctl join-token             the token another host joins with (see /install.sh)
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,15p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,16p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -90,5 +91,6 @@ PY
         + "  " + ([.projects | to_entries[] | "\(.key) v\(.value.v) \(.value.s)"] | join(", ")))' ;;
   roll) api "/roll${1:+?machine=$1}" -X POST | jq . ;;
   machines) [ $# -eq 1 ] || usage; api /settings -X PUT -d "{\"machines\": $1}" | jq . ;;
+  join-token) api /join-token | jq -r .token ;;
   *) usage ;;
 esac

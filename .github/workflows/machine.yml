@@ -1,14 +1,15 @@
 name: machine
 run-name: machine ${{ inputs.machine }}
 
-# One machine of the fleet. Its agent keeps the projects in line with the control plane
-# (https://control.billybishop4-workers.xyz) and starts its own replacement before GitHub's 6-hour limit.
+# One machine of the fleet. Its agent joins the control plane (https://control.billybishop4-workers.xyz), which
+# gives it slot n and the token for tunnel runner-n, keeps the projects in line, and starts its own replacement
+# before GitHub's 6-hour limit.
 # Machines are started by the other machines and by the watchdog workflow; start one here to add it right away.
 on:
   workflow_dispatch:
     inputs:
       machine:
-        description: Machine number (machine n uses Cloudflare tunnel runner-n)
+        description: Slot to take (the control plane gives slot n the tunnel runner-n)
         required: true
 
 permissions:
@@ -28,7 +29,6 @@ jobs:
           MACHINE: ${{ inputs.machine }}
           CONTROL_URL: https://control.billybishop4-workers.xyz
           CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
-          TUNNEL_TOKEN: ${{ secrets[format('CF_TUNNEL_TOKEN_{0}', inputs.machine)] }}
           GH_TOKEN: ${{ github.token }}
         run: node agent/agent.mjs
 

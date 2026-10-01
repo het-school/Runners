@@ -1,24 +1,31 @@
 // Runner agent: keeps one machine's projects in line with the control plane.
-// It starts a local router and this machine's Cloudflare tunnel, checks in every few seconds, starts, updates
-// and removes docker compose projects to match what it's told, restarts ones that stop answering, starts
-// machines the control plane says are missing, and hands over to a fresh run before GitHub's 6-hour limit.
+// It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
+// and the tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's
+// told, and restarts ones that stop answering. On GitHub Actions it also starts machines the control plane says are
+// missing and hands over to a fresh run before GitHub's 6-hour limit; on any other host it just keeps running.
 // No dependencies: Node's built-ins plus the docker CLI.
 import { execFile } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
-const machine = Number(env.MACHINE);
-const run = env.GITHUB_RUN_ID;
+const github = env.GITHUB_ACTIONS === "true";
+const base = github ? env.RUNNER_TEMP : (env.RUNNER_DATA ?? "/var/lib/runner");
 const started = Date.now();
-const hardStop = started + 355 * 60_000; // leave before GitHub kills the job at 6 hours
-const selfHandover = started + 330 * 60_000; // start a replacement ourselves if the control plane hasn't asked by then
+const hardStop = github ? started + 355 * 60_000 : Infinity; // leave before GitHub kills the job at 6 hours
+const selfHandover = github ? started + 330 * 60_000 : Infinity; // start a replacement ourselves if not asked by then
 const settleBy = started + 10 * 60_000; // open the tunnel by then even if a project is still struggling
 const ROUTER_PORT = 19080; // the tunnel sends everything here, and the router (Caddy) picks the project by hostname
-const dir = `${env.RUNNER_TEMP}/projects`;
-const routerDir = `${env.RUNNER_TEMP}/router`;
+const dir = `${base}/projects`;
+const routerDir = `${base}/router`;
+let machine = 0; // the slot, from the control plane
+let tunnelToken = "";
+let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, so it gets its slot back after a restart
+let run = "";
 // Commands run without the agent's own secrets, so a compose file can't read them.
 const cleanEnv = Object.fromEntries(
   Object.entries(env).filter(([k]) => !["TUNNEL_TOKEN", "CONTROL_TOKEN", "GH_TOKEN"].includes(k)),
@@ -190,11 +197,11 @@ async function startRouter() {
 }
 
 async function startTunnel() {
-  await writeFile(`${env.RUNNER_TEMP}/tunnel.yml`, `ingress:\n  - service: http://127.0.0.1:${ROUTER_PORT}\n`);
+  await writeFile(`${base}/tunnel.yml`, `ingress:\n  - service: http://127.0.0.1:${ROUTER_PORT}\n`);
   const r = await sh("docker", ["run", "-d", "--name", "tunnel", "--network", "host", "--restart", "unless-stopped",
-    "-e", "TUNNEL_TOKEN", "-v", `${env.RUNNER_TEMP}/tunnel.yml:/etc/cloudflared/config.yml:ro`,
+    "-e", "TUNNEL_TOKEN", "-v", `${base}/tunnel.yml:/etc/cloudflared/config.yml:ro`,
     "cloudflare/cloudflared:latest", "tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"],
-  { extraEnv: { TUNNEL_TOKEN: env.TUNNEL_TOKEN } });
+  { extraEnv: { TUNNEL_TOKEN: tunnelToken } });
   if (!r.ok) throw new Error(`tunnel didn't start: ${r.out}`);
   for (let i = 0; i < 45; i++) {
     if ((await sh("docker", ["logs", "tunnel"])).out.includes("Registered tunnel connection")) return log("tunnel online");
@@ -209,13 +216,56 @@ let ready = false;
 
 const metrics = startMetrics();
 
+// Get a slot and its tunnel token. Keeps trying: the control plane may be unreachable, or every slot taken.
+async function join() {
+  if (github) {
+    agent = `gh-${env.GITHUB_RUN_ID}`;
+    run = env.GITHUB_RUN_ID;
+  } else {
+    const idFile = `${base}/agent-id`;
+    agent = (await readFile(idFile, "utf8").catch(() => "")).trim();
+    if (!agent) {
+      agent = `host-${randomUUID().slice(0, 8)}`;
+      await writeFile(idFile, agent);
+    }
+    run = `${agent}-${started}`;
+  }
+  for (let wait = 5;; wait = Math.min(wait * 2, 60)) {
+    try {
+      const res = await fetch(`${env.CONTROL_URL}/api/join`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ agent, kind: github ? "github" : "host", label: github ? null : hostname(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      ({ machine, tunnelToken, domain } = data);
+      return log(`joined as machine ${machine} (${agent})`);
+    } catch (e) {
+      log(`couldn't join (${e.message}); trying again in ${wait}s`);
+      await sleep(wait * 1000);
+    }
+  }
+}
+
+// After a restart on a host: projects from last time that are no longer wanted.
+async function removeLeftovers(desired) {
+  for (const name of await readdir(dir).catch(() => [])) {
+    if (name in desired || projects.has(name)) continue;
+    log(`${name}: left over from before; removing`);
+    await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
+    await rm(`${dir}/${name}`, { recursive: true, force: true });
+  }
+}
+
 async function sync() {
   const status = Object.fromEntries([...projects].map(([name, p]) => [name, { v: p.v, s: p.s, e: p.e || undefined }]));
   const sent = metrics.payload();
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ machine, run, started, ready, status, metrics: sent }),
+    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -224,6 +274,7 @@ async function sync() {
 }
 
 async function startMachine(m) {
+  if (!github) return; // only GitHub machines can start other GitHub machines
   const res = await fetch(`https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/workflows/machine.yml/dispatches`, {
     method: "POST",
     headers: {
@@ -242,6 +293,7 @@ async function shutdown(reason, code = 0) {
   if (stopping) return;
   stopping = true;
   log(`${reason}; stopping the tunnel`);
+  // On a host, Docker restarts this container (fetching the latest agent), and it rejoins with the same slot.
   await sh("docker", ["stop", "-t", "10", "tunnel"]);
   process.exit(code);
 }
@@ -249,9 +301,13 @@ process.on("SIGINT", () => shutdown("cancelled"));
 process.on("SIGTERM", () => shutdown("cancelled"));
 
 async function main() {
-  log(`machine ${machine}, run ${run}`);
   await mkdir(dir, { recursive: true });
+  await join();
+  log(`machine ${machine}, run ${run}${github ? "" : ` on ${hostname()}`}`);
+  // A host may still have these from before a restart.
+  await sh("docker", ["rm", "-f", "router", "tunnel"]);
   await startRouter();
+  let cleaned = github;
   let successorAt = 0;
   let lastReport = 0;
   while (Date.now() < hardStop) {
@@ -268,7 +324,12 @@ async function main() {
         updateRouter();
       }
       reconcile(plan.desired);
+      if (!cleaned) {
+        cleaned = true;
+        await removeLeftovers(plan.desired);
+      }
       for (const m of plan.start ?? []) await startMachine(m);
+      if (plan.handover && !github) return shutdown("restarting to update the agent");
       if (plan.handover && Date.now() - successorAt > 10 * 60_000) {
         successorAt = Date.now();
         log("handing over to a fresh run of this machine");

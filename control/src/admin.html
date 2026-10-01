@@ -120,7 +120,7 @@
   <div class="head">
     <h2>Machines</h2>
     <div class="inline">
-      Run <input type="number" id="count" min="0" max="10"> machines
+      Keep <input type="number" id="count" min="0" max="18"> GitHub machines
       <button id="save-count">Save</button>
       <button id="roll-all">Restart all</button>
     </div>
@@ -129,7 +129,8 @@
   <div class="head" id="guide"><h2>How to deploy an app</h2></div>
   <div class="card guide">
     <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. Every machine runs it, and
-      machine <i>n</i> serves it at <code>https://&lt;name&gt;-<i>n</i>.billybishop4-workers.xyz</code> on the app's port.
+      it's reachable at <code>https://&lt;name&gt;.billybishop4-workers.xyz</code> (sent to a machine where it's healthy), and machine <i>n</i>
+      also serves it at <code>https://&lt;name&gt;-<i>n</i>.billybishop4-workers.xyz</code>.
       Each deploy is a new version, and every machine switches to it at once.</p>
 
     <h3>From this page</h3>
@@ -192,8 +193,15 @@ curl -X POST $B/projects/my-app/disable  # stop it everywhere, keep its versions
 curl -X POST $B/projects/my-app/enable
 curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
     <p class="hint">A deploy answers with the project's state. Machines pick the change up within about 20 seconds; builds can take a few minutes.
-      Then open <code>https://my-app-1.billybishop4-workers.xyz</code> (any machine number up to the machine count).
+      Then open <code>https://my-app.billybishop4-workers.xyz</code>, or one machine's copy at <code>https://my-app-1.billybishop4-workers.xyz</code>.
       With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does all of this for you.</p>
+
+    <h3>Add your own machine</h3>
+    <p>Any Linux machine with Docker can join the fleet: it takes a free machine number, gets its own tunnel, and runs every app.
+      Get the join token from the fleet's owner (<code>runnerctl join-token</code>), then run on the machine:</p>
+<pre class="code">curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=&lt;token&gt; sh</pre>
+    <p class="hint">It runs as the container <code>runner-agent</code> and keeps its machine number across restarts.
+      Remove it with <code>docker rm -f runner-agent tunnel router</code>.</p>
   </div>
 </main>
 
@@ -278,15 +286,14 @@ function machineRuns() {
 function render() {
   const runs = machineRuns();
   const up = [...runs.values()].filter((r) => r.ready).length;
-  $("fleet").textContent = `${up} of ${status.machines} machines online`;
+  $("fleet").textContent = `${up} machines online`;
   document.querySelectorAll(".domain").forEach((el) => (el.textContent = status.domain));
   if (document.activeElement !== $("count")) $("count").value = status.machines;
 
   const STATE = { live: "ok", "rolling out": "warn", halted: "bad", disabled: "off" };
   $("projects").innerHTML = status.projects.map((p) => {
     const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
-    const dots = Array.from({ length: p.machines }, (_, i) => {
-      const n = i + 1;
+    const dots = status.slots.map((n) => {
       const s = runs.get(n)?.projects[p.name];
       const cls = !s ? "" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
       const title = !s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`;
@@ -314,7 +321,7 @@ function render() {
   }).join("") || `<div class="card empty">No projects yet</div>`;
 
   const machines = [];
-  for (let n = 1; n <= status.machines; n++) {
+  for (const n of status.slots) {
     const r = runs.get(n);
     const state = !r ? `<span class="badge bad">down</span>`
       : r.handover ? `<span class="badge warn">starting its replacement</span>`
@@ -325,7 +332,8 @@ function render() {
     machines.push(`<div class="card">
       <div class="row">
         <div class="grow"><span class="name">Machine ${n}</span>
-          ${r ? ` <a class="meta" href="https://github.com/${esc(status.repo)}/actions/runs/${esc(r.id)}" target="_blank" rel="noopener">run ${esc(r.id)}</a>` : ""}</div>
+          ${!r ? "" : r.kind === "host" ? ` <span class="meta">own host ${esc(r.label || "")}</span>`
+            : ` <a class="meta" href="https://github.com/${esc(status.repo)}/actions/runs/${esc(r.id)}" target="_blank" rel="noopener">GitHub run ${esc(r.id)}</a>`}</div>
         ${state}
       </div>
       ${projects ? `<div class="dots">${projects}</div>` : ""}
@@ -390,11 +398,10 @@ function renderDetails() {
   const label = p.state === "rolling out" ? `rolling out · ${p.rollout} of ${p.machines}` : p.state;
   const scroll = $("dt-body").scrollTop;
 
-  const machines = Array.from({ length: p.machines }, (_, i) => {
-    const n = i + 1;
+  const machines = status.slots.map((n) => {
     const r = runs.get(n);
     const s = r?.projects[p.name];
-    const target = !p.enabled ? null : !p.halted && n <= p.rollout ? p.version : p.stable;
+    const target = !p.enabled ? null : p.halted ? p.stable : p.version;
     const cls = !s ? "off" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
     const url = `https://${p.name}-${n}.${status.domain}/`;
     return `<tr><td>${n}</td>
@@ -420,7 +427,7 @@ function renderDetails() {
       <div><dt>Latest version</dt><dd>v${p.version}</dd></div>
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
-      <div><dt>Rollout</dt><dd>${p.enabled ? `${p.rollout} of ${p.machines} machines` : "disabled"}</dd></div>
+      <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
     </dl>
@@ -596,7 +603,7 @@ $("roll-all").onclick = async () => {
 $("save-count").onclick = async () => {
   try {
     const r = await api("PUT", "/settings", { machines: Number($("count").value) });
-    toast(`Keeping ${r.machines} machines running`);
+    toast(`Keeping ${r.machines} GitHub machines running`);
     refresh();
   } catch (e) {
     toast(e.message);

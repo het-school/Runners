@@ -46,17 +46,18 @@ async function load() {
   try { d = await (await fetch("/api/status", { cache: "no-store" })).json(); }
   catch { document.getElementById("sub").textContent = "Can't reach the control plane"; return; }
   const up = new Set(d.runs.filter((r) => r.live && !r.retiring).map((r) => r.machine));
-  document.getElementById("sub").textContent = up.size + " of " + d.machines + " machines up" + (d.dnsError ? " · DNS: " + d.dnsError : "");
+  document.getElementById("sub").textContent = up.size + " machines up" + (d.dnsError ? " · DNS: " + d.dnsError : "");
   document.getElementById("projects").innerHTML = "<tr><th>Project</th><th>Version</th><th>State</th><th>Open</th></tr>" +
     (d.projects.map((p) => {
       const state = p.state === "live" ? '<span class="ok">live</span>'
         : p.state === "halted" ? '<span class="bad">halted, every machine is back on v' + esc(p.stable ?? "-") + '</span><div class="err">' + esc(p.halted) + "</div>"
         : '<span class="warn">rolling out: ' + p.rollout + " of " + p.machines + " machines</span>";
-      const links = p.port ? Array.from({ length: p.machines }, (_, i) => '<a href="https://' + p.name + "-" + (i + 1) + "." + d.domain + '/" target="_blank">' + (i + 1) + "</a>").join("") : '<span class="muted">no port</span>';
+      const links = p.port ? '<a href="https://' + p.name + "." + d.domain + '/" target="_blank"><b>' + esc(p.name) + "." + d.domain + "</b></a> " +
+        d.slots.map((n) => '<a href="https://' + p.name + "-" + n + "." + d.domain + '/" target="_blank">' + n + "</a>").join("") : '<span class="muted">no port</span>';
       return "<tr><td><b>" + esc(p.name) + "</b></td><td>v" + p.version + (p.stable && p.stable !== p.version ? ' <span class="muted">(v' + p.stable + " elsewhere)</span>" : "") +
         "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
     }).join("") || '<tr><td colspan="4" class="muted">No projects yet</td></tr>');
-  document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run</th><th>State</th><th>Projects</th></tr>" +
+  document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run or host</th><th>State</th><th>Projects</th></tr>" +
     (d.runs.map((r) => {
       const state = !r.live ? '<span class="muted">gone (seen ' + ago(d.now - r.seen) + " ago)</span>"
         : r.retiring ? '<span class="muted">leaving, replaced</span>'
@@ -65,7 +66,9 @@ async function load() {
         : '<span class="warn">starting up</span>';
       const projects = Object.entries(r.projects).map(([name, s]) =>
         '<span class="chip"><span class="' + (STATE[s.s] || "") + '">●</span> ' + esc(name) + " v" + esc(s.v) + "</span>" + (s.e ? '<div class="err">' + esc(s.e) + "</div>" : "")).join("");
-      return "<tr><td>" + r.machine + '</td><td><a href="https://github.com/' + d.repo + "/actions/runs/" + esc(r.id) + '" target="_blank">' + esc(r.id) + "</a></td><td>" + state + "</td><td>" + (projects || '<span class="muted">none</span>') + "</td></tr>";
+      const run = r.kind === "host" ? esc(r.label || "host") + ' <span class="muted">(own host)</span>'
+        : '<a href="https://github.com/' + d.repo + "/actions/runs/" + esc(r.id) + '" target="_blank">' + esc(r.id) + "</a>";
+      return "<tr><td>" + r.machine + "</td><td>" + run + "</td><td>" + state + "</td><td>" + (projects || '<span class="muted">none</span>') + "</td></tr>";
     }).join("") || '<tr><td colspan="4" class="muted">No machines have checked in</td></tr>');
 }
 load();

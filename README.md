@@ -1,6 +1,6 @@
 # runner
 
-A self-healing fleet on GitHub Actions: 10 machines each run every project, each machine is online through its own Cloudflare tunnel, and the project specs live in a control plane on Cloudflare (not in this repo).
+A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each running every project and online through its own Cloudflare tunnel. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
 - **Status page:** https://control.billybishop4-workers.xyz
 - **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
@@ -13,7 +13,7 @@ A self-healing fleet on GitHub Actions: 10 machines each run every project, each
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need. Machine *n* serves it at `https://<project>-<n>.billybishop4-workers.xyz` on its port. That port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine), and machine *n* also serves it at `https://<project>-<n>.billybishop4-workers.xyz`. That port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
@@ -49,7 +49,9 @@ GET    /api/projects/<name>[?version=N]         a version's compose file, files 
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
-PUT    /api/settings                            {"machines": 10}
+PUT    /api/settings                            {"machines": 10}  (GitHub machines to keep running)
+GET    /api/join-token                          the token a host joins with (admin token only)
+POST   /api/join                                an agent starting up: {"agent", "kind", "want"} -> its slot and tunnel token
 ```
 
 ```sh
@@ -67,6 +69,16 @@ runnerctl apply path/to/Dockerfile myapp --port 8000
 runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>
 runnerctl roll [n] | machines <n>
 ```
+
+## Your own machines
+
+Any Linux machine with Docker can join. Get the token with `runnerctl join-token`, then on the machine:
+
+```sh
+curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
+```
+
+It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker rm -f runner-agent tunnel router`.
 
 ## How it works
 
@@ -89,9 +101,9 @@ runnerctl roll [n] | machines <n>
 
 ## Setup notes
 
-- **Repo secrets:** `CONTROL_NODE_TOKEN`, plus `CF_TUNNEL_TOKEN_1` to `CF_TUNNEL_TOKEN_10`.
-- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_DNS_TOKEN` (a DNS-only token for this zone).
+- **Repo secrets:** `CONTROL_NODE_TOKEN` (the same value as the Worker's `NODE_TOKEN`). Tunnel tokens come from the control plane.
+- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Portal:** `/admin` and `/admin/api/*` are open, with no sign-in. Changes sent from other sites are refused.
-- **More machines:** create tunnel `runner-<n>`, add `CF_TUNNEL_TOKEN_<n>` and the tunnel ID to `wrangler.toml`, deploy, then raise the machine count. GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer.
+- **More machines:** raise the GitHub machine count in the portal (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

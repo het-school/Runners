@@ -1,9 +1,12 @@
 // Control plane for hetp4401/runner.
-// Holds the project specs (a docker compose file plus any Dockerfiles and build files), rolls each change out one
-// machine at a time, tracks which machines are up and starts replacements, and keeps <project>-<n> DNS pointing at
-// tunnel runner-<n>. The agent on every GitHub Actions machine checks in at /api/sync and gets back what it should run.
-//   /            public status page          /api/*        API, Bearer token (admin, or node for sync/claim/roll)
-//   /admin       admin portal                /admin/api/*  the same API, signed in with Cloudflare Access
+// Holds the project specs (a docker compose file plus any Dockerfiles and build files) and sends every change to all
+// machines. Machines find it, not the other way round: any agent (a GitHub Actions run, or any host with Docker) joins
+// at /api/join, gets the lowest free slot n and the token for tunnel runner-<n> (created through the Cloudflare API the
+// first time a slot is used), then checks in at /api/sync. It keeps the GitHub machines topped up, hands each over
+// before GitHub's 6-hour limit, and keeps DNS in line: <project>-<n> points at tunnel runner-<n>, and <project> itself
+// is served by this Worker, which passes each request on to a machine where the project is healthy.
+//   /            public status page          /api/*        API, Bearer token (admin, or node for join/sync/claim)
+//   /admin       admin portal (open)         /admin/api/*  the project API without a token
 //   /metrics     metrics dashboard           /api/metrics  machine and app metrics (no token needed)
 import { DurableObject } from "cloudflare:workers";
 import YAML from "yaml";
@@ -20,6 +23,8 @@ const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
+const HOST_HOLD_MS = 30 * 60_000; // a host that drops out keeps its slot this long, so a restart gets the same one
+const SHARED_DNS = "100::"; // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
 // Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
 // and rolled up into 10-minute rows for the longer views.
 const MIN = 60_000;
@@ -161,8 +166,101 @@ function buildSpec(body) {
   return { compose, port, files: sorted };
 }
 
+// ---- shared URLs: <project>.DOMAIN goes to a machine where the project is healthy ----
+
+let routeCache = { at: 0, data: null, pending: null };
+function healthyRoutes(env) {
+  if (routeCache.data && Date.now() - routeCache.at < 5_000) return routeCache.data;
+  routeCache.pending ??= env.CONTROL.get(env.CONTROL.idFromName("main")).fetch("https://control/internal/routes")
+    .then((r) => r.json())
+    .then((data) => {
+      routeCache = { at: Date.now(), data, pending: null };
+      return data;
+    })
+    .catch((e) => {
+      routeCache.pending = null;
+      if (routeCache.data) return routeCache.data;
+      throw e;
+    });
+  return routeCache.pending;
+}
+
+// FNV-1a; with it each visitor sticks to one machine while that machine stays healthy.
+function hash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+async function proxy(request, env, project) {
+  const slots = (await healthyRoutes(env))[project];
+  if (!slots?.length) {
+    return new Response(`${project} isn't healthy on any machine right now\n`, { status: 503, headers: { "retry-after": "10" } });
+  }
+  const visitor = request.headers.get("cf-connecting-ip") ?? "";
+  const order = slots.map((n) => [n, hash(`${visitor}|${n}`)]).sort((a, b) => b[1] - a[1]).map(([n]) => n);
+  // Requests without a body can try another machine when one doesn't answer.
+  const retry = request.method === "GET" || request.method === "HEAD";
+  const host = new URL(request.url).hostname;
+  let res = null;
+  for (const n of order.slice(0, retry ? 3 : 1)) {
+    const url = new URL(request.url);
+    url.hostname = `${project}-${n}.${env.DOMAIN}`;
+    const req = new Request(url, request);
+    req.headers.set("x-forwarded-host", host);
+    try {
+      res = await fetch(req, { redirect: "manual" });
+    } catch {
+      res = null;
+      continue;
+    }
+    if (retry && [502, 503, 504, 530].includes(res.status)) continue;
+    // Keep visitors on the shared hostname when the app redirects to the machine's own one.
+    const location = res.headers.get("location");
+    if (location?.includes(url.hostname)) {
+      res = new Response(res.body, res);
+      res.headers.set("location", location.replace(url.hostname, host));
+    }
+    break;
+  }
+  return res ?? new Response("no machine answered\n", { status: 502 });
+}
+
+// Served at /install.sh: runs the agent in a container on any machine with Docker. The token isn't in it.
+function installScript(origin) {
+  return `#!/bin/sh
+# Adds this machine to the runner fleet (https://github.com/hetp4401/runner). Needs Docker.
+#   curl -fsSL ${origin}/install.sh | sudo JOIN_TOKEN=<token> sh
+# The agent runs in the container runner-agent, takes a free slot n, and serves every project at
+# https://<project>-n.<domain>. It fetches the latest agent code each time it starts.
+# Remove the machine:  docker rm -f runner-agent tunnel router
+set -eu
+: "\${JOIN_TOKEN:?set JOIN_TOKEN; the fleet's owner gets it with: runnerctl join-token}"
+DATA=\${RUNNER_DATA:-/var/lib/runner}
+command -v docker >/dev/null 2>&1 || { echo "Install Docker first: https://docs.docker.com/engine/install/" >&2; exit 1; }
+mkdir -p "$DATA"
+docker rm -f runner-agent >/dev/null 2>&1 || true
+docker run -d --name runner-agent --restart unless-stopped --network host --hostname "$(hostname)" \\
+  -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
+  -e CONTROL_URL=${origin} -e CONTROL_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
+  docker:cli sh -c '
+    set -e
+    apk add --no-cache nodejs >/dev/null
+    sha=$(wget -qO- https://api.github.com/repos/hetp4401/runner/commits/main | grep -m1 "\\"sha\\"" | cut -d\\" -f4 || true)
+    mkdir -p /agent && cd /agent
+    for f in agent.mjs metrics.mjs; do wget -qO $f https://raw.githubusercontent.com/hetp4401/runner/\${sha:-main}/agent/$f; done
+    exec node agent.mjs'
+echo "Joined. Follow it with: docker logs -f runner-agent"
+`;
+}
+
 export default {
   fetch(request, env) {
+    const host = new URL(request.url).hostname;
+    const suffix = `.${env.DOMAIN}`;
+    if (host !== env.CONTROL_HOST && host.endsWith(suffix) && !host.slice(0, -suffix.length).includes(".")) {
+      return proxy(request, env, host.slice(0, -suffix.length));
+    }
     return env.CONTROL.get(env.CONTROL.idFromName("main")).fetch(request);
   },
 };
@@ -181,6 +279,8 @@ export class Control extends DurableObject {
          seen INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS starts (machine INTEGER PRIMARY KEY, at INTEGER NOT NULL, by TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS slots (n INTEGER PRIMARY KEY, tunnel TEXT NOT NULL, token TEXT NOT NULL, created INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, slot INTEGER NOT NULL, kind TEXT NOT NULL, label TEXT, joined INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_1m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_10m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
     ]) {
@@ -190,6 +290,10 @@ export class Control extends DurableObject {
     const columns = (table) => new Set(this.all(`PRAGMA table_info(${table})`).map((c) => c.name));
     if (!columns("projects").has("enabled")) this.sql.exec("ALTER TABLE projects ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
     if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
+    const runColumns = columns("runs");
+    if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
+    if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'github'");
+    if (!runColumns.has("label")) this.sql.exec("ALTER TABLE runs ADD COLUMN label TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
     // which happen whenever Cloudflare lets the object sleep.
     this.projects = new Map(this.all("SELECT * FROM projects").map((p) => [p.name, p]));
@@ -197,11 +301,17 @@ export class Control extends DurableObject {
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
+    this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
+    this.agents = new Map(this.all("SELECT * FROM agents").map((a) => [a.id, a])); // agent -> the slot it last had
+    this.holds = new Map(); // slot -> { agent, at }: just given out at /join, not checked in yet
+    this.tunnelJobs = new Map(); // slot -> promise, while its tunnel is being looked up or created
     this.lastCleanup = 0;
     this.liveMetrics = new Map(); // machine -> { run, t, h, a }, the newest sample from the run that speaks for it
     this.pendingMetrics = new Map(); // minute -> { machine: { h, a } }, not yet written
     this.lastRollup = 0;
     this.metricsCache = new Map(); // range -> { at, body }
+    // A deploy of this Worker resets its routes to the ones in wrangler.toml, so put the shared ones back.
+    this.scheduleDns();
     this.dnsError = null;
   }
 
@@ -222,9 +332,8 @@ export class Control extends DurableObject {
     return Number(this.settings.get("machines") ?? this.env.MACHINES ?? 10);
   }
 
-  tunnels() {
-    const t = this.env.TUNNELS ?? {};
-    return typeof t === "string" ? JSON.parse(t) : t;
+  maxSlots() {
+    return Number(this.env.MAX_SLOTS ?? 50);
   }
 
   live(run, now) {
@@ -258,10 +367,11 @@ export class Control extends DurableObject {
     this.runs.set(r.id, r);
     r.savedSeen = r.seen;
     this.sql.exec(
-      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET status = excluded.status, ready = excluded.ready,
          handover = excluded.handover, retire = excluded.retire, seen = excluded.seen`,
-      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen,
+      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, r.kind, r.label,
     );
   }
 
@@ -282,11 +392,14 @@ export class Control extends DurableObject {
       if (request.method === "GET" && path === "/") return html(STATUS_PAGE);
       if (request.method === "GET" && path === "/admin") return html(ADMIN_PAGE);
       if (request.method === "GET" && path === "/metrics") return html(METRICS_PAGE);
+      if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
+      if (request.method === "GET" && path === "/internal/routes") return json(this.healthyRoutes(Date.now()));
       if (path.startsWith("/admin/api/")) {
         // The portal is open to anyone with the URL (no sign-in); only refuse changes sent from other sites.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
-        return await this.api(request, url, path.slice("/admin/api".length), { admin: true, node: true });
+        // No machine powers here (joining, checking in): those hand out tunnel tokens and project specs.
+        return await this.api(request, url, path.slice("/admin/api".length), { admin: true, node: false, portal: true });
       }
       if (path.startsWith("/api/")) {
         const auth = request.headers.get("authorization") ?? "";
@@ -300,7 +413,7 @@ export class Control extends DurableObject {
     }
   }
 
-  async api(request, url, route, { admin, node }) {
+  async api(request, url, route, { admin, node, portal = false }) {
     const { method } = request;
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
@@ -310,9 +423,12 @@ export class Control extends DurableObject {
     };
     if (method === "GET" && route === "/status") return json(this.status());
     if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
+    if (method === "POST" && route === "/join") return need(node), json(await this.join(await body()));
     if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
     if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts("watchdog", Date.now()) });
-    if (method === "POST" && route === "/roll") return need(node), json(this.roll(url.searchParams.get("machine")));
+    if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
+    // The token a new host joins with; only with the admin token itself, never through the open portal.
+    if (method === "GET" && route === "/join-token") return need(admin && !portal), json({ token: this.env.NODE_TOKEN });
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable))?$/);
     if (m) {
@@ -419,9 +535,9 @@ export class Control extends DurableObject {
   putSettings(body) {
     const { machines } = isMap(body) ? body : {};
     if (machines !== undefined) {
-      const max = Object.keys(this.tunnels()).length;
+      const max = Math.min(18, this.maxSlots()); // GitHub Free runs 20 jobs at once, and handovers overlap briefly
       if (!(Number.isInteger(machines) && machines >= 0 && machines <= max)) {
-        throw new HttpError(400, `machines must be 0-${max} (one per tunnel)`);
+        throw new HttpError(400, `machines must be 0-${max}`);
       }
       this.setSetting("machines", machines);
       this.scheduleDns();
@@ -438,11 +554,11 @@ export class Control extends DurableObject {
 
   // What machine n should run: the new version on machines 1..rollout, the last good one everywhere else.
   // A halted rollout sends every machine back to the last good version; disabled projects run nowhere.
-  desiredFor(machine) {
+  desiredFor() {
     const out = {};
     for (const p of this.projects.values()) {
       if (!p.enabled) continue;
-      const v = !p.halted && machine <= p.rollout ? p.version : p.stable;
+      const v = p.halted ? p.stable : p.version;
       if (v == null) continue;
       const { compose, port, files } = this.version(p.name, v);
       out[p.name] = { v, compose, port, files };
@@ -456,7 +572,7 @@ export class Control extends DurableObject {
     const machines = this.machines();
     const newest = new Map(); // machine -> its newest run that's up; that's the one that speaks for the machine
     for (const r of this.liveRuns(now)) {
-      if (r.machine <= machines && (newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
+      if ((newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
     }
     if (!newest.size) return; // nothing is up to try a new version on
     for (const p of this.projects.values()) {
@@ -500,7 +616,10 @@ export class Control extends DurableObject {
     const ready = body.ready ? 1 : 0;
     let r = this.runs.get(run);
     if (!r) {
-      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now };
+      const kind = body.kind === "host" ? "host" : "github";
+      const agent = String(body.agent ?? `gh-${run}`).slice(0, 100);
+      const label = String(body.label ?? "").slice(0, 80) || null;
+      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, kind, label };
       this.saveRun(r);
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status);
@@ -510,17 +629,17 @@ export class Control extends DurableObject {
     }
     this.advanceRollouts(now);
     this.takeMetrics(r, body.metrics, now);
-    if (!r.retire && (machine > this.machines() || this.superseded(r, now))) {
+    if (!r.retire && (this.extraGithub(r, now) || this.superseded(r, now))) {
       r.retire = 1;
       this.saveRun(r);
     }
     const handover = !r.retire && this.wantsHandover(r, now);
-    const start = !r.retire && r.ready ? this.claimStarts(run, now) : [];
+    const start = !r.retire && r.ready && r.kind === "github" ? this.claimStarts(run, now) : [];
     this.cleanup(now);
     return {
       domain: this.env.DOMAIN,
       poll: POLL_S,
-      desired: machine <= this.machines() ? this.desiredFor(machine) : {},
+      desired: r.retire ? {} : this.desiredFor(),
       retire: Boolean(r.retire),
       handover,
       start,
@@ -529,7 +648,7 @@ export class Control extends DurableObject {
 
   // A run can go once a newer run of the same machine is online and healthy on everything it should run.
   superseded(r, now) {
-    const desired = Object.entries(this.desiredFor(r.machine));
+    const desired = Object.entries(this.desiredFor());
     return this.liveRuns(now).some((x) => x.machine === r.machine && x.started > r.started && x.ready &&
       desired.every(([name, d]) => x.status[name]?.v === d.v && x.status[name]?.s === "healthy"));
   }
@@ -538,7 +657,7 @@ export class Control extends DurableObject {
   // One machine at a time, oldest first, so at most one machine is ever changing over.
   wantsHandover(r, now) {
     const rollAll = Number(this.settings.get("roll") ?? 0);
-    const due = (x) => now - x.started > HANDOVER_AFTER_MS || x.started < rollAll ||
+    const due = (x) => (x.kind === "github" && now - x.started > HANDOVER_AFTER_MS) || x.started < rollAll ||
       x.started < Number(this.settings.get(`roll_${x.machine}`) ?? 0);
     if (!due(r)) return false;
     const live = this.liveRuns(now);
@@ -553,14 +672,121 @@ export class Control extends DurableObject {
     return true;
   }
 
-  // Machines that should be running but aren't. Whoever asks (an agent or the watchdog workflow) starts them.
+  // GitHub machines to start so `machines` of them run. Whoever asks (a GitHub machine or the watchdog workflow)
+  // starts them, each with the slot it should take; the slot is held for it until it shows up.
   claimStarts(by, now) {
     const live = this.liveRuns(now);
+    const github = new Set(live.filter((x) => x.kind === "github").map((x) => x.machine));
+    const starting = [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !live.some((x) => x.machine === n)).length;
     const out = [];
-    for (let m = 1; m <= this.machines(); m++) {
-      if (live.some((x) => x.machine === m) || now - (this.starts.get(m) ?? 0) < START_WAIT_MS) continue;
-      this.markStart(m, now, by);
-      out.push(m);
+    for (let missing = this.machines() - github.size - starting; missing > 0; missing--) {
+      const n = this.freeSlot(now, null);
+      if (!n) break;
+      this.markStart(n, now, by);
+      out.push(n);
+    }
+    return out;
+  }
+
+  // GitHub runs beyond the `machines` wanted: the ones in the highest slots go.
+  extraGithub(r, now) {
+    if (r.kind !== "github") return false;
+    const slots = [...new Set(this.liveRuns(now).filter((x) => x.kind === "github").map((x) => x.machine))].sort((a, b) => a - b);
+    return slots.indexOf(r.machine) >= this.machines();
+  }
+
+  // A slot is taken while another agent runs in it, while a GitHub machine is starting for it, and for a while
+  // after a host drops out (so it gets the slot back when it restarts).
+  slotTaken(n, now, agent) {
+    if (now - (this.starts.get(n) ?? 0) < START_WAIT_MS) return true;
+    const hold = this.holds.get(n);
+    if (hold && hold.agent !== agent && now - hold.at < 2 * 60_000) return true;
+    return [...this.runs.values()].some((x) => x.machine === n && x.agent !== agent && !x.retire &&
+      (this.live(x, now) || (x.kind === "host" && now - x.seen < HOST_HOLD_MS)));
+  }
+
+  freeSlot(now, agent) {
+    for (let n = 1; n <= this.maxSlots(); n++) if (!this.slotTaken(n, now, agent)) return n;
+    return null;
+  }
+
+  // An agent starting up: give it a slot and that slot's tunnel token. A GitHub machine started for a slot asks for
+  // it (`want`); a host gets the slot it had last time if that's still free, otherwise the lowest free one.
+  async join(body) {
+    const now = Date.now();
+    const agent = String(body?.agent ?? "");
+    if (!agent || agent.length > 100) throw new HttpError(400, "agent (an ID for this agent) is required");
+    const kind = body.kind === "host" ? "host" : "github";
+    const label = String(body.label ?? "").slice(0, 80) || null;
+    const want = Number(body.want);
+    const max = this.maxSlots();
+    let slot = null;
+    if (Number.isInteger(want) && want >= 1 && want <= max) slot = want;
+    else {
+      const before = this.agents.get(agent)?.slot;
+      slot = before && !this.slotTaken(before, now, agent) ? before : this.freeSlot(now, agent);
+    }
+    if (!slot) throw new HttpError(503, `all ${max} slots are taken`);
+    // Recorded before the tunnel lookup, so an agent joining at the same moment doesn't get the same slot.
+    const a = { id: agent, slot, kind, label, joined: now };
+    this.agents.set(agent, a);
+    this.sql.exec(
+      `INSERT INTO agents (id, slot, kind, label, joined) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET slot = excluded.slot, kind = excluded.kind, label = excluded.label, joined = excluded.joined`,
+      agent, slot, kind, label, now,
+    );
+    this.holds.set(slot, { agent, at: now }); // holds the slot until its first check-in
+    const tunnel = await this.tunnelFor(slot);
+    return { machine: slot, tunnelToken: tunnel.token, domain: this.env.DOMAIN };
+  }
+
+  async cf(path, init = {}) {
+    const res = await fetch(`${this.env.CF_API_BASE ?? "https://api.cloudflare.com/client/v4"}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${this.env.CF_API_TOKEN}`, "content-type": "application/json" },
+    });
+    const data = await res.json().catch(() => ({ success: false, errors: [{ message: `HTTP ${res.status}` }] }));
+    if (!data.success) throw new HttpError(502, `Cloudflare API ${path.split("?")[0]}: ${JSON.stringify(data.errors)}`);
+    return data;
+  }
+
+  // Tunnel runner-<n>: found by name (so tunnels made earlier are reused) or created, and kept with its token.
+  tunnelFor(n) {
+    if (this.slots.has(n)) return Promise.resolve(this.slots.get(n));
+    if (!this.tunnelJobs.has(n)) {
+      const job = (async () => {
+        const account = this.env.ACCOUNT_ID;
+        const name = `runner-${n}`;
+        let t = (await this.cf(`/accounts/${account}/cfd_tunnel?name=${name}&is_deleted=false`)).result[0];
+        if (!t) {
+          const secret = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+          t = (await this.cf(`/accounts/${account}/cfd_tunnel`, {
+            method: "POST",
+            body: JSON.stringify({ name, config_src: "local", tunnel_secret: secret }),
+          })).result;
+        }
+        const token = (await this.cf(`/accounts/${account}/cfd_tunnel/${t.id}/token`)).result;
+        const slot = { n, tunnel: t.id, token };
+        this.sql.exec("INSERT OR REPLACE INTO slots (n, tunnel, token, created) VALUES (?, ?, ?, ?)", n, t.id, token, Date.now());
+        this.slots.set(n, slot);
+        this.scheduleDns();
+        return slot;
+      })().finally(() => this.tunnelJobs.delete(n));
+      this.tunnelJobs.set(n, job);
+    }
+    return this.tunnelJobs.get(n);
+  }
+
+  // For the shared URLs: project -> slots whose current run is online and has it healthy.
+  healthyRoutes(now) {
+    const newest = new Map();
+    for (const r of this.liveRuns(now)) {
+      if (r.ready && (newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
+    }
+    const out = {};
+    for (const p of this.projects.values()) {
+      if (!p.enabled || !this.version(p.name, p.version)?.port) continue;
+      out[p.name] = [...newest.values()].filter((r) => r.status[p.name]?.s === "healthy").map((r) => r.machine);
     }
     return out;
   }
@@ -594,7 +820,7 @@ export class Control extends DurableObject {
   }
 
   takeMetrics(r, metrics, now) {
-    if (!isMap(metrics) || r.machine > this.machines() || !this.speaksFor(r, now)) return;
+    if (!isMap(metrics) || r.retire || !this.speaksFor(r, now)) return;
     if (isMap(metrics.live) && isMap(metrics.live.h)) {
       this.liveMetrics.set(r.machine, { run: r.id, started: r.started, t: Number(metrics.live.t) || now, h: metrics.live.h, a: isMap(metrics.live.a) ? metrics.live.a : {} });
     }
@@ -696,6 +922,12 @@ export class Control extends DurableObject {
       domain: this.env.DOMAIN,
       machines: this.machines(),
       dnsError: this.dnsError,
+      dnsNotes: this.dnsNotes ?? [],
+      // Slots to show: ones with a recent run, plus ones a GitHub machine is starting for.
+      slots: [...new Set([
+        ...[...this.runs.values()].filter((r) => now - r.seen < 3600_000).map((r) => r.machine),
+        ...[...this.starts].filter(([, at]) => now - at < START_WAIT_MS).map(([n]) => n),
+      ])].sort((a, b) => a - b),
       projects: [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name)).map((p) => this.describe(p)),
       runs: [...this.runs.values()]
         .filter((r) => now - r.seen < 3600_000)
@@ -709,13 +941,17 @@ export class Control extends DurableObject {
           ready: Boolean(r.ready),
           handover: Boolean(r.handover),
           retiring: Boolean(r.retire),
+          kind: r.kind,
+          label: r.label,
           projects: r.status,
         })),
     };
   }
 
-  // ---- DNS: <project>-<n>.DOMAIN -> tunnel runner-<n>, for every project with a port ----
-  // Disabled projects keep their records, so turning one back on is instant.
+  // ---- DNS and routes ----
+  // <project>-<n>.DOMAIN -> tunnel runner-<n> for every slot that has a tunnel, and <project>.DOMAIN -> this Worker
+  // (a proxied placeholder record plus a Worker route), for every project with a port. Disabled projects keep theirs,
+  // so turning one back on is instant. Names already used by records that aren't ours are left alone.
 
   scheduleDns() {
     this.ctx.storage.setAlarm(Date.now() + 2_000);
@@ -734,43 +970,67 @@ export class Control extends DurableObject {
   }
 
   async syncDns() {
-    const tunnels = this.tunnels();
     const domain = this.env.DOMAIN;
-    const ours = new Set(Object.values(tunnels).map((t) => `${t}.cfargotunnel.com`));
-    const want = new Map();
+    const zone = this.env.ZONE;
+    const tunnelOf = new Map([...this.slots.values()].map((x) => [x.n, `${x.tunnel}.cfargotunnel.com`]));
+    const ours = new Set(tunnelOf.values());
+    const want = new Map(); // name -> CNAME target
+    const shared = new Set(); // <project>.DOMAIN
     for (const p of this.projects.values()) {
       const port = this.version(p.name, p.version)?.port ?? (p.stable != null ? this.version(p.name, p.stable)?.port : null);
       if (!port) continue;
-      for (let m = 1; m <= this.machines(); m++) {
-        if (tunnels[m]) want.set(`${p.name}-${m}.${domain}`, `${tunnels[m]}.cfargotunnel.com`);
-      }
+      shared.add(`${p.name}.${domain}`);
+      for (const [n, target] of tunnelOf) want.set(`${p.name}-${n}.${domain}`, target);
     }
-    const api = async (path, init = {}) => {
-      const res = await fetch(`https://api.cloudflare.com/client/v4/zones/${this.env.ZONE}/dns_records${path}`, {
-        ...init,
-        headers: { authorization: `Bearer ${this.env.CF_DNS_TOKEN}`, "content-type": "application/json" },
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(`Cloudflare DNS API: ${JSON.stringify(data.errors)}`);
-      return data;
-    };
     const existing = [];
     for (let page = 1; ; page++) {
-      const data = await api(`?type=CNAME&per_page=1000&page=${page}`);
+      const data = await this.cf(`/zones/${zone}/dns_records?per_page=1000&page=${page}`);
       existing.push(...data.result);
       if (page >= (data.result_info?.total_pages ?? 1)) break;
     }
-    const byName = new Map(existing.map((r) => [r.name, r]));
+    const isShared = (r) => r.type === "AAAA" && r.content === SHARED_DNS && r.comment === "hetp4401/runner";
+    const byName = new Map();
+    for (const r of existing) (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(r);
+    const notes = [];
     const batch = { deletes: [], posts: [], patches: [] };
-    for (const r of existing) if (ours.has(r.content) && !want.has(r.name)) batch.deletes.push({ id: r.id });
+    for (const r of existing) {
+      if ((r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isShared(r) && !shared.has(r.name))) batch.deletes.push({ id: r.id });
+    }
     for (const [name, content] of want) {
-      const r = byName.get(name);
-      if (!r) batch.posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
-      else if (r.content !== content && ours.has(r.content)) batch.patches.push({ id: r.id, content });
-      // A record with this name that points somewhere else isn't ours, so it's left alone.
+      const rs = byName.get(name) ?? [];
+      const r = rs.find((x) => x.type === "CNAME");
+      if (!rs.length) batch.posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
+      else if (r && r.content !== content && ours.has(r.content)) batch.patches.push({ id: r.id, content });
+    }
+    const servable = new Set(); // shared names this Worker may answer
+    for (const name of shared) {
+      const rs = byName.get(name) ?? [];
+      if (!rs.length) batch.posts.push({ type: "AAAA", name, content: SHARED_DNS, proxied: true, comment: "hetp4401/runner" });
+      else if (!rs.every(isShared)) {
+        notes.push(`${name} is already used by another DNS record, so it isn't a shared URL`);
+        continue;
+      }
+      servable.add(name);
     }
     if (batch.deletes.length || batch.posts.length || batch.patches.length) {
-      await api("/batch", { method: "POST", body: JSON.stringify(batch) });
+      await this.cf(`/zones/${zone}/dns_records/batch`, { method: "POST", body: JSON.stringify(batch) });
     }
+    // Worker routes for the shared names.
+    const script = this.env.SCRIPT_NAME ?? "runner-control";
+    const routes = (await this.cf(`/zones/${zone}/workers/routes`)).result;
+    const mine = new RegExp(`^[a-z0-9-]+\\.${domain.replace(/\./g, "\\.")}/\\*$`);
+    for (const r of routes) {
+      const name = r.pattern.slice(0, -2);
+      if (r.script === script && mine.test(r.pattern) && !servable.has(name)) {
+        await this.cf(`/zones/${zone}/workers/routes/${r.id}`, { method: "DELETE" });
+      }
+    }
+    for (const name of servable) {
+      const r = routes.find((x) => x.pattern === `${name}/*`);
+      if (!r) await this.cf(`/zones/${zone}/workers/routes`, { method: "POST", body: JSON.stringify({ pattern: `${name}/*`, script }) });
+      else if (r.script !== script) notes.push(`${name}/* already routes to Worker ${r.script}`);
+    }
+    this.dnsNotes = notes;
   }
+
 }
