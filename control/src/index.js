@@ -29,7 +29,6 @@ class HttpError extends Error {
 const json = (data, status = 200) => Response.json(data, { status });
 const html = (body) => new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
 const isMap = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
-const b64url = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 
 // "./web/" + "Dockerfile" -> "web/Dockerfile"; null if it climbs out of the project folder.
 function joinPath(...parts) {
@@ -146,7 +145,6 @@ export class Control extends DurableObject {
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
-    this.accessKeys = new Map(); // Cloudflare Access signing keys, by key id
     this.lastCleanup = 0;
     this.dnsError = null;
   }
@@ -228,10 +226,7 @@ export class Control extends DurableObject {
       if (request.method === "GET" && path === "/") return html(STATUS_PAGE);
       if (request.method === "GET" && path === "/admin") return html(ADMIN_PAGE);
       if (path.startsWith("/admin/api/")) {
-        // The portal: Cloudflare Access signs people in in front of /admin; check its token here too.
-        const auth = request.headers.get("authorization") ?? "";
-        const signedIn = (this.env.ADMIN_TOKEN && auth === `Bearer ${this.env.ADMIN_TOKEN}`) || (await this.accessUser(request));
-        if (!signedIn) throw new HttpError(401, "sign in again (reload the page)");
+        // The portal is open to anyone with the URL (no sign-in); only refuse changes sent from other sites.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
         return await this.api(request, url, path.slice("/admin/api".length), { admin: true, node: true });
@@ -273,31 +268,6 @@ export class Control extends DurableObject {
     throw new HttpError(404, "not found");
   }
 
-  // Who signed in through Cloudflare Access, or null. Checks the token's signature, audience, issuer and expiry.
-  async accessUser(request) {
-    const token = request.headers.get("cf-access-jwt-assertion");
-    const { ACCESS_TEAM: team, ACCESS_AUD: aud } = this.env;
-    if (!token || !team || !aud) return null;
-    try {
-      const [h, p, sig] = token.split(".");
-      const header = JSON.parse(new TextDecoder().decode(b64url(h)));
-      const claims = JSON.parse(new TextDecoder().decode(b64url(p)));
-      if (claims.iss !== `https://${team}` || claims.exp * 1000 < Date.now()) return null;
-      if (![].concat(claims.aud).includes(aud)) return null;
-      if (!this.accessKeys.has(header.kid)) {
-        const { keys } = await (await fetch(`https://${team}/cdn-cgi/access/certs`)).json();
-        for (const k of keys) {
-          const key = await crypto.subtle.importKey("jwk", k, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
-          this.accessKeys.set(k.kid, key);
-        }
-      }
-      const key = this.accessKeys.get(header.kid);
-      const ok = key && (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64url(sig), new TextEncoder().encode(`${h}.${p}`)));
-      return ok ? claims.email || claims.common_name || "signed in" : null;
-    } catch {
-      return null;
-    }
-  }
 
   // ---- projects ----
 

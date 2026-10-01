@@ -3,7 +3,7 @@
 A self-healing fleet on GitHub Actions: 10 machines each run every project, each machine is online through its own Cloudflare tunnel, and the project specs live in a control plane on Cloudflare (not in this repo).
 
 - **Status page:** https://control.billybishop4-workers.xyz
-- **Admin portal:** https://control.billybishop4-workers.xyz/admin. Sign in with a code emailed to you through Cloudflare Access. From the portal you can:
+- **Admin portal:** https://control.billybishop4-workers.xyz/admin. It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
   - add projects and edit them
   - roll back to an earlier version
   - disable, enable and delete projects
@@ -37,7 +37,7 @@ Each change is a new version. By default it goes to machine 1, then 2, and so on
 
 ## API
 
-The portal uses `/admin/api/*`, signed in through Access. Scripts use `/api/*` with `Authorization: Bearer <admin token>`.
+The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with `Authorization: Bearer <admin token>`.
 
 ```
 GET    /api/status                              projects and machines (no token needed)
@@ -90,6 +90,6 @@ runnerctl roll [n] | machines <n>
 - **Repo secrets:** `CONTROL_NODE_TOKEN`, plus `CF_TUNNEL_TOKEN_1` to `CF_TUNNEL_TOKEN_10`.
 - **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_DNS_TOKEN` (a DNS-only token for this zone).
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
-- **Portal sign-in:** the Cloudflare Access app "Runner admin" covers `/admin`. The Worker also checks Access's token (`ACCESS_TEAM` / `ACCESS_AUD` in `wrangler.toml`).
+- **Portal:** `/admin` and `/admin/api/*` are open, with no sign-in. Changes sent from other sites are refused.
 - **More machines:** create tunnel `runner-<n>`, add `CF_TUNNEL_TOKEN_<n>` and the tunnel ID to `wrangler.toml`, deploy, then raise the machine count. GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

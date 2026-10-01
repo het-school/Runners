@@ -180,14 +180,12 @@ async function api(method, path, body) {
   try {
     res = await fetch(`/admin/api${path}`, {
       method,
-      redirect: "manual",
       headers: body ? { "content-type": "application/json" } : {},
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
     throw new Error("Can't reach the control plane");
   }
-  if (res.type === "opaqueredirect" || res.status === 401) throw new Error("Signed out. Reload the page to sign in again.");
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
