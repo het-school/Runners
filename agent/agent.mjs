@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { hostname } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
@@ -164,9 +164,28 @@ async function checkHealth() {
 // the compose file binds. Reads and writes go through a local cache; a file is in R2 once the app closes it.
 
 const mounts = new Map(); // name -> the storage config it was mounted with
+const MOUNT_ROOT = "/var/lib/runner/mounts"; // <project>/<replica> under here, the same path the control plane put in the compose file
+
+// The mount container binds the project's folder and mounts into <replica> inside it: a bind's root always looks
+// like a mount point (rclone would refuse it), and a mount made under a shared bind shows up on the host.
+const mountOf = (st) => ({ parent: dirname(st.mount), replica: basename(st.mount) });
 
 async function mounted(name) {
-  return (await sh("docker", ["exec", "mnt-" + name, "mountpoint", "-q", "/mnt"], { timeout: 10_000 })).ok;
+  const st = projects.get(name)?.storage ?? mounts.get(name);
+  if (!st) return false;
+  return (await sh("docker", ["exec", "mnt-" + name, "grep", "-q", ` /mnt/${mountOf(st).replica} fuse`, "/proc/mounts"], { timeout: 10_000 })).ok;
+}
+
+// Root work on the host's mount folder, from a privileged container: a dead mount container leaves its FUSE mount
+// behind on the host, and a file written while nothing was mounted lands in the plain folder; both stop the next
+// mount. (They aren't the replica's data; that's in R2.)
+async function cleanMountDir(st) {
+  const { replica } = mountOf(st);
+  const rel = `/m/${basename(dirname(st.mount))}/${replica}`;
+  const r = await sh("docker", ["run", "--rm", "--privileged", "-v", `${MOUNT_ROOT}:/m:rshared`, "alpine:3.20", "sh", "-c",
+    `umount -l ${rel} 2>/dev/null; umount -l ${rel} 2>/dev/null; mkdir -p ${rel} && n=$(ls -A ${rel} | wc -l) && rm -rf ${rel}/* ${rel}/.[!.]* 2>/dev/null; echo $n`], { timeout: 60_000 });
+  if (!r.ok) throw new Error(`couldn't prepare the mount folder: ${r.out.split("\n").pop()}`);
+  if (Number(r.out.trim()) > 0) log(`${rel}: removed ${r.out.trim()} stray entries written while nothing was mounted`);
 }
 
 async function ensureMount(name, st) {
@@ -175,6 +194,8 @@ async function ensureMount(name, st) {
   if (have && have.prefix === st.prefix && have.readOnly === st.readOnly && (await mounted(name))) return;
   await sh("docker", ["rm", "-f", "mnt-" + name]);
   mounts.delete(name);
+  await cleanMountDir(st);
+  const { parent, replica } = mountOf(st);
   const cache = `${base}/cache/${name}`;
   await mkdir(cache, { recursive: true }).catch(() => {});
   const args = ["run", "-d", "--name", "mnt-" + name, "--restart", "unless-stopped",
@@ -182,8 +203,8 @@ async function ensureMount(name, st) {
     "-e", "RCLONE_CONFIG_R2_TYPE=s3", "-e", "RCLONE_CONFIG_R2_PROVIDER=Cloudflare", "-e", `RCLONE_CONFIG_R2_ENDPOINT=${storage.endpoint}`,
     "-e", "RCLONE_CONFIG_R2_ACCESS_KEY_ID", "-e", "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY",
     "-e", "RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true", "-e", "RCLONE_CONFIG_R2_DIRECTORY_MARKERS=true",
-    "-v", `${st.mount}:/mnt:rshared`, "-v", `${cache}:/cache`,
-    RCLONE, "mount", `r2:${storage.bucket}/${st.prefix}`, "/mnt",
+    "-v", `${parent}:/mnt:rshared`, "-v", `${cache}:/cache`,
+    RCLONE, "mount", `r2:${storage.bucket}/${st.prefix}`, `/mnt/${replica}`, "--allow-non-empty",
     "--allow-other", "--umask", "000", "--vfs-cache-mode", "full", "--cache-dir", "/cache",
     "--vfs-cache-max-size", `${st.limitMb}M`, "--vfs-cache-max-age", "48h", "--vfs-write-back", "1s",
     "--dir-cache-time", "30s", "--poll-interval", "0", "--rc", "--rc-addr", "127.0.0.1:5572", "--rc-no-auth",
@@ -196,15 +217,21 @@ async function ensureMount(name, st) {
     r = await sh("docker", args, { extraEnv: creds });
   }
   if (!r.ok) throw new Error(`couldn't start the data mount: ${r.out.split("\n").pop()}`);
+  mounts.set(name, { prefix: st.prefix, readOnly: st.readOnly, mount: st.mount });
   for (let i = 0; i < 30; i++) {
     if (await mounted(name)) break;
-    if (i === 29) throw new Error(`the data mount didn't come up: ${(await sh("docker", ["logs", "--tail", "5", "mnt-" + name])).out}`);
+    if (i === 29) {
+      mounts.delete(name);
+      throw new Error(`the data mount didn't come up: ${(await sh("docker", ["logs", "--tail", "3", "mnt-" + name])).out.split("\n").pop()}`);
+    }
     await sleep(1000);
   }
   // Seen from another container too (that's how the project's containers get it).
-  const seen = await sh("docker", ["run", "--rm", "-v", `${st.mount}:/m:ro`, "alpine:3.20", "mountpoint", "-q", "/m"], { timeout: 60_000 });
-  if (!seen.ok) throw new Error("the data mount isn't visible to other containers (mount propagation)");
-  mounts.set(name, { prefix: st.prefix, readOnly: st.readOnly });
+  const seen = await sh("docker", ["run", "--rm", "-v", `${parent}:/m:ro`, "alpine:3.20", "grep", "-q", ` /m/${replica} fuse`, "/proc/mounts"], { timeout: 60_000 });
+  if (!seen.ok) {
+    mounts.delete(name);
+    throw new Error("the data mount isn't visible to other containers (mount propagation)");
+  }
 }
 
 // Writes still on their way to R2, per rclone's own stats.
@@ -227,6 +254,8 @@ async function stopStateful(name) {
   await sleep(1500); // the write-back delay
   await sh("docker", ["stop", "-t", "30", "mnt-" + name]);
   await sh("docker", ["rm", "-f", "mnt-" + name]);
+  const st = projects.get(name)?.storage ?? mounts.get(name);
+  if (st) await cleanMountDir(st).catch((e) => log(`${name}: ${e.message}`));
   mounts.delete(name);
 }
 
