@@ -26,16 +26,12 @@ jobs:
 
       - name: Start projects
         env:
-          SECRETS: ${{ toJSON(secrets) }}
           ONLY: ${{ inputs.projects }}
+          # Repo secrets a run.sh needs go here by name, e.g. TORBOX_TOKEN: ${{ secrets.TORBOX_TOKEN }}
         run: |
           echo "START=$(date +%s)" >> "$GITHUB_ENV"
           # A project is any top-level folder with a run.sh, like deploy.sh in my_apps.
           projects=${ONLY:-$(find . -mindepth 2 -maxdepth 2 -name run.sh ! -path './.*' | cut -d/ -f2 | sort)}
-          # Every repository secret reaches run.sh as an env var of the same name.
-          while IFS= read -r -d '' kv; do export "$kv"; done < <(jq -j \
-            'to_entries[] | select(.key | test("^[A-Z_][A-Z0-9_]*$")) | "\(.key)=\(.value)\u0000"' <<< "$SECRETS")
-          unset SECRETS
           started=""
           for p in $projects; do
             echo "::group::$p"

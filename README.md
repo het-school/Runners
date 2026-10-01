@@ -13,7 +13,7 @@ A project is a top-level folder with a `run.sh`, the same idea as `deploy.sh` in
   Dockerfile   optional: built as <project>:latest before run.sh runs
 ```
 
-- Every repository secret is available to `run.sh` as an env var of the same name.
+- To give `run.sh` a repo secret, add it by name to the `env:` of the **Start projects** step in [`run.yml`](.github/workflows/run.yml) (`NAME: ${{ secrets.NAME }}`). Passing all secrets at once gets the workflow flagged as malicious by GitHub.
 - The folder name becomes the hostname, so stick to `a-z`, `0-9` and `-`.
 - Publish the port on the runner (`-p 11470:11470`); the tunnel reaches it at `localhost:<port>`.
 
