@@ -51,6 +51,8 @@ What the mount is and isn't: a file is in R2 once the app closes it, reads and w
 
 Moving a stateful replica (by hand, by eviction, or a handover) stops it first, waits for its last writes to reach R2, then starts it on the next machine: about a minute of downtime for that project. Automatic rebalancing leaves single-replica stateful projects alone for that reason.
 
+When a machine goes away, its replicas are placed elsewhere and start there with their data. Measured: a cancelled GitHub run (the agent gets a signal, stops its apps and says it's leaving) had its stateful replica healthy on another machine in 34 s; a machine that vanishes without any signal takes the 75-second liveness timeout plus ~35 s. An agent that can't reach the control plane for 70 s stops its stateful apps itself, so data is never written from two machines.
+
 ### Placement
 
 Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
