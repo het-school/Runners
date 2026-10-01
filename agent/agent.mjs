@@ -251,30 +251,39 @@ async function pendingUploads(name) {
 
 // Stop a stateful project the safe way: its containers first (so files get closed), then wait for the last
 // uploads, then unmount. After this its data can be mounted somewhere else.
-async function stopStateful(name) {
-  await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "stop", "-t", "20"]);
+async function stopStateful(name, { grace = 20 } = {}) {
+  await stopApp(name, grace);
+  await unmountStateful(name);
+}
+
+const stopApp = (name, grace) => sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "stop", "-t", String(grace)]);
+
+async function unmountStateful(name) {
   for (let i = 0; i < 90 && (await pendingUploads(name)) > 0; i++) await sleep(1000);
   await sleep(1500); // the write-back delay
   await sh("docker", ["stop", "-t", "30", "mnt-" + name]);
   await sh("docker", ["rm", "-f", "mnt-" + name]);
-  const st = projects.get(name)?.storage ?? mounts.get(name);
-  if (st) await cleanMountDir(st).catch((e) => log(`${name}: ${e.message}`));
+  const st = mounts.get(name) ?? projects.get(name)?.storage;
+  if (st?.mount) await cleanMountDir(st).catch((e) => log(`${name}: ${e.message}`));
   mounts.delete(name);
 }
 
-// On the way out: hand every stateful project's data back, and tell the control plane they're stopped, so the
-// run taking over can mount it straight away.
-async function releaseStateful() {
+// On the way out: stop every stateful project (no more writes), tell the control plane straight away so their
+// data can be mounted elsewhere (and, if this run is leaving for good, so all its replicas move now), then let
+// the last writes reach R2 and unmount. A cancelled GitHub run has only seconds before it's killed, so the
+// check-in comes before the slow part.
+async function releaseStateful({ quick = false } = {}) {
   const stateful = [...projects].filter(([, p]) => p.storage);
-  if (!stateful.length) return;
-  log(`stopping ${stateful.map(([name]) => name).join(", ")} so their data can move on`);
+  if (stateful.length) log(`stopping ${stateful.map(([name]) => name).join(", ")} so their data can move on`);
+  for (const [, p] of stateful) p.busy = true;
+  await Promise.all(stateful.map(([name]) => stopApp(name, quick ? 5 : 20)));
+  for (const [name] of stateful) projects.delete(name);
+  if (stateful.length || leaving) await sync().catch(() => {});
   for (const [name, p] of stateful) {
-    p.busy = true;
-    await stopStateful(name);
+    mounts.set(name, { prefix: p.storage.prefix, readOnly: p.storage.readOnly, mount: p.storage.mount });
+    await unmountStateful(name);
     await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down"]);
-    projects.delete(name);
   }
-  await sync().catch(() => {});
 }
 
 // Stop stateful projects while the control plane is out of reach (see FENCE_MS). They're started again when it's
@@ -459,7 +468,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
     if (stopping || releasing) return;
     releasing = true;
     leaving = github;
-    Promise.race([releaseStateful(), sleep(150_000)]).finally(() => shutdown("cancelled"));
+    Promise.race([releaseStateful({ quick: true }), sleep(150_000)]).finally(() => shutdown("cancelled"));
   });
 }
 
