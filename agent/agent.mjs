@@ -6,6 +6,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { dirname, resolve } from "node:path";
 
 const env = process.env;
 const machine = Number(env.MACHINE);
@@ -68,16 +69,29 @@ async function apply(name, want) {
   projects.set(name, p);
   updateRouter();
   log(`${name}: starting v${want.v}`);
-  const file = `${dir}/${name}/compose.yaml`;
-  await mkdir(`${dir}/${name}`, { recursive: true });
-  await writeFile(file, want.compose);
-  // compose only recreates the containers whose config changed, and --wait fails if one won't stay up.
-  const up = await sh("docker", ["compose", "-p", name, "-f", file, "up", "-d", "--build", "--remove-orphans",
-    "--wait", "--wait-timeout", "300"]);
   let s = "healthy";
   let e = "";
-  if (!up.ok) [s, e] = ["failed", up.out.split("\n").slice(-6).join("\n").slice(-600)];
-  else if (want.port && !(await answers(name, 60))) [s, e] = ["failed", `nothing answers on port ${want.port} through the router`];
+  try {
+    const projectDir = `${dir}/${name}`;
+    const file = `${projectDir}/compose.yaml`;
+    await mkdir(projectDir, { recursive: true });
+    // Dockerfiles and anything else the build needs sit next to the compose file, so `build: .` finds them.
+    // The folder isn't cleared first: relative bind mounts (./data) may live in it.
+    for (const [path, content] of Object.entries(want.files ?? {})) {
+      const target = resolve(projectDir, path);
+      if (!target.startsWith(`${projectDir}/`)) throw new Error(`file path ${path} points outside the project`);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, content);
+    }
+    await writeFile(file, want.compose);
+    // compose only recreates the containers whose config changed, and --wait fails if one won't stay up.
+    const up = await sh("docker", ["compose", "-p", name, "-f", file, "up", "-d", "--build", "--remove-orphans",
+      "--wait", "--wait-timeout", "300"]);
+    if (!up.ok) [s, e] = ["failed", up.out.split("\n").slice(-6).join("\n").slice(-600)];
+    else if (want.port && !(await answers(name, 60))) [s, e] = ["failed", `nothing answers on port ${want.port} through the router`];
+  } catch (err) {
+    [s, e] = ["failed", err.message];
+  }
   Object.assign(p, { s, e, busy: false, at: Date.now() });
   log(`${name}: v${want.v} ${s}${e ? ` (${e.split("\n").pop()})` : ""}`);
 }
