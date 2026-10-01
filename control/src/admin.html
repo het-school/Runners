@@ -123,9 +123,11 @@
       Keep <input type="number" id="count" min="0" max="18"> GitHub machines
       <button id="save-count">Save</button>
       <button id="roll-all">Restart all</button>
+      <label class="inline" style="margin:0;font-weight:400"><input type="checkbox" id="rebalance" style="width:auto"> rebalance automatically</label>
     </div>
   </div>
   <div class="cards" id="machines"></div>
+  <div class="meta" id="rebalance-log" style="margin-top:10px"></div>
   <div class="head" id="guide"><h2>How to deploy an app</h2></div>
   <div class="card guide">
     <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. Every machine runs it, and
@@ -294,6 +296,11 @@ function render() {
   $("fleet").textContent = `${up} machines online`;
   document.querySelectorAll(".domain").forEach((el) => (el.textContent = status.domain));
   if (document.activeElement !== $("count")) $("count").value = status.machines;
+  $("rebalance").checked = status.rebalance.on;
+  $("rebalance-log").innerHTML = status.rebalance.log.length
+    ? `<b>Rebalancing</b> · hot machines move their heaviest app off (cpu > 85% or memory > 90% for 5 min); uneven spreads even out; one move per 10 min.<br>` +
+      status.rebalance.log.map((x) => `${esc(ago(status.now - x.t))} ago: ${esc(x.text)}`).join("<br>")
+    : `<b>Rebalancing</b> ${status.rebalance.on ? "is on: hot machines move their heaviest app off (cpu > 85% or memory > 90% for 5 min), uneven spreads even out, one move per 10 min. Nothing moved yet." : "is off."}`;
 
   const STATE = { live: "ok", deploying: "warn", halted: "bad", disabled: "off" };
   $("projects").innerHTML = status.projects.map((p) => {
@@ -330,10 +337,11 @@ function render() {
   const machines = [];
   for (const n of status.slots) {
     const r = runs.get(n);
-    const state = !r ? `<span class="badge bad">down</span>`
+    const hot = status.rebalance.hot.includes(n) ? ` <span class="badge bad">hot</span>` : "";
+    const state = (!r ? `<span class="badge bad">down</span>`
       : r.handover ? `<span class="badge warn">starting its replacement</span>`
       : r.ready ? `<span class="badge ok">online · ${ago(status.now - r.started)}</span>`
-      : `<span class="badge warn">starting up</span>`;
+      : `<span class="badge warn">starting up</span>`) + hot;
     const projects = r ? Object.entries(r.projects).map(([name, s]) =>
       `<span class="dot ${s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn"}" title="${esc(s.e || s.s)}">${esc(name)} v${esc(s.v)}</span>`).join("") : "";
     machines.push(`<div class="card">
@@ -623,6 +631,12 @@ document.addEventListener("click", async (ev) => {
   }
 });
 
+$("rebalance").onchange = async () => {
+  try {
+    const r = await api("PUT", "/settings", { rebalance: $("rebalance").checked });
+    toast(`Automatic rebalancing is ${r.rebalance ? "on" : "off"}`);
+  } catch (e) { toast(e.message); refresh(); }
+};
 $("roll-all").onclick = async () => {
   if (!confirm("Restart every machine? They're replaced one at a time, so nothing goes down.")) return;
   try {

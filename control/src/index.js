@@ -28,7 +28,18 @@ const SHARED_DNS = "100::";
 const REPLICAS_ALL = 0; // stored value of replicas: "all"
 const MAX_REPLICAS = 100;
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
-const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
+const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
+// Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
+// projects than the emptiest machine has one project moved off it, to a machine with room, at most one move per
+// COOLDOWN_MS fleet-wide, and no project more than once per PROJECT_COOLDOWN_MS.
+const HOT_CPU = 85;
+const HOT_MEM = 90;
+const ROOM_CPU = 70; // a destination must be under these
+const ROOM_MEM = 80;
+const SPREAD_GAP = 2;
+const COOLDOWN_MS = 10 * 60_000;
+const PROJECT_COOLDOWN_MS = 30 * 60_000;
+const SETTLED_MS = 5 * 60_000; // a machine takes part once it's been up this long // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
 // Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
 // and rolled up into 10-minute rows for the longer views.
 const MIN = 60_000;
@@ -329,6 +340,10 @@ export class Control extends DurableObject {
         .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null });
     }
     this.bootAt = Date.now();
+    this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
+    this.lastRebalance = 0;
+    this.autoMoved = new Map(); // project -> when it was last moved automatically
+    this.rebalanceLog = JSON.parse(this.settings.get("rebalance_log") ?? "[]");
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
     this.agents = new Map(this.all("SELECT * FROM agents").map((a) => [a.id, a])); // agent -> the slot it last had
     this.holds = new Map(); // slot -> { agent, at }: just given out at /join, not checked in yet
@@ -573,7 +588,11 @@ export class Control extends DurableObject {
   }
 
   putSettings(body) {
-    const { machines } = isMap(body) ? body : {};
+    const { machines, rebalance } = isMap(body) ? body : {};
+    if (rebalance !== undefined) {
+      if (typeof rebalance !== "boolean") throw new HttpError(400, "rebalance must be true or false");
+      this.setSetting("rebalance", rebalance ? "on" : "off");
+    }
     if (machines !== undefined) {
       const max = Math.min(18, this.maxSlots()); // GitHub Free runs 20 jobs at once, and handovers overlap briefly
       if (!(Number.isInteger(machines) && machines >= 0 && machines <= max)) {
@@ -582,7 +601,15 @@ export class Control extends DurableObject {
       this.setSetting("machines", machines);
       this.scheduleDns();
     }
-    return { machines: this.machines() };
+    return { machines: this.machines(), rebalance: this.rebalanceOn() };
+  }
+
+  rebalanceOn() {
+    return this.settings.get("rebalance") !== "off";
+  }
+
+  hotMs() {
+    return Number(this.env.HOT_MS ?? 5 * 60_000);
   }
 
   // Replace machines one at a time (all of them, or just one), e.g. after the agent code changes.
@@ -655,7 +682,7 @@ export class Control extends DurableObject {
     const fresh = m && now - m.t < 3 * LIVE_MS;
     const cpu = fresh ? m.h.cpu : 50;
     const mem = fresh && m.h.memTotal ? (100 * m.h.memUsed) / m.h.memTotal : 50;
-    return { score: cpu + mem + 15 * placedCount, reason: fresh ? `cpu ${Math.round(cpu)}%, memory ${Math.round(mem)}%, ${placedCount} other project${placedCount === 1 ? "" : "s"}` : "no metrics yet" };
+    return { score: cpu + mem + 30 * placedCount, reason: fresh ? `cpu ${Math.round(cpu)}%, memory ${Math.round(mem)}%, ${placedCount} other project${placedCount === 1 ? "" : "s"}` : "no metrics yet" };
   }
 
   place(now) {
@@ -768,6 +795,90 @@ export class Control extends DurableObject {
     return { machine, moved, failed };
   }
 
+  // ---- automatic rebalancing ----
+
+  // Over the limits on every sample going back at least HOT_MS, with enough samples to mean it.
+  isHot(machine, now) {
+    const list = (this.samples.get(machine) ?? []).filter((x) => now - x.t <= this.hotMs() * 1.5);
+    if (list.length < 3 || now - list[0].t < this.hotMs()) return false;
+    return list.every((x) => x.cpu > HOT_CPU || x.mem > HOT_MEM);
+  }
+
+  hasRoom(machine, now) {
+    const m = this.liveMetrics.get(machine);
+    if (!m || now - m.t > 3 * LIVE_MS || !m.h.memTotal) return false;
+    return m.h.cpu < ROOM_CPU && (100 * m.h.memUsed) / m.h.memTotal < ROOM_MEM;
+  }
+
+  // The placed (movable) project using the most of a machine, by its own CPU and memory there.
+  heaviestOn(machine, now) {
+    const m = this.liveMetrics.get(machine);
+    const memTotal = m?.h.memTotal || 1;
+    let best = null;
+    for (const [name, placed] of this.placements) {
+      const x = placed.get(machine);
+      if (!x || x.leaving) continue;
+      if ((this.version(name, this.projects.get(name)?.version)?.replicas ?? 1) === REPLICAS_ALL) continue;
+      if (now - (this.autoMoved.get(name) ?? 0) < PROJECT_COOLDOWN_MS) continue;
+      const a = m?.a[name];
+      const weight = a ? (a.cpu || 0) + (100 * (a.mem || 0)) / memTotal : 0;
+      if (!best || weight > best.weight) best = { name, weight };
+    }
+    return best;
+  }
+
+  logRebalance(now, text) {
+    this.rebalanceLog.unshift({ t: now, text });
+    this.rebalanceLog.length = Math.min(this.rebalanceLog.length, 30);
+    this.setSetting("rebalance_log", JSON.stringify(this.rebalanceLog));
+  }
+
+  rebalance(now) {
+    if (!this.rebalanceOn() || now - this.lastRebalance < 30_000) return;
+    this.lastRebalance = now;
+    if (now - (this.rebalanceLog[0]?.t ?? 0) < COOLDOWN_MS) return;
+    // One move at a time: wait for any move (by hand or automatic) to finish.
+    for (const placed of this.placements.values()) for (const x of placed.values()) if (x.leaving) return;
+    const up = this.liveMachines(now);
+    const settled = [...up.values()].filter((r) => r.ready && now - r.started > SETTLED_MS && this.liveMetrics.has(r.machine));
+    if (settled.length < 2) return;
+    const counts = this.placementCounts();
+    // Hot machines first, busiest first; then the most loaded machine if the spread is uneven.
+    let from = null;
+    let why = "";
+    const hot = settled.filter((r) => this.isHot(r.machine, now) && (counts.get(r.machine) ?? 0) > 0)
+      .sort((a, b) => this.liveMetrics.get(b.machine).h.cpu - this.liveMetrics.get(a.machine).h.cpu);
+    if (hot.length) {
+      from = hot[0].machine;
+      const h = this.liveMetrics.get(from).h;
+      why = `machine ${from} is hot (cpu ${Math.round(h.cpu)}%, memory ${Math.round((100 * h.memUsed) / h.memTotal)}%)`;
+    } else {
+      const byCount = settled.map((r) => ({ machine: r.machine, n: counts.get(r.machine) ?? 0 })).sort((a, b) => b.n - a.n);
+      const most = byCount[0];
+      const least = byCount[byCount.length - 1];
+      if (most.n - least.n < SPREAD_GAP) return;
+      from = most.machine;
+      why = `machine ${from} has ${most.n} projects, machine ${least.machine} has ${least.n}`;
+    }
+    const pick = this.heaviestOn(from, now);
+    if (!pick) return;
+    const dest = this.bestMachine(pick.name, new Map([...up].filter(([m]) => this.hasRoom(m, now) && settled.some((r) => r.machine === m))), counts, now);
+    if (!dest) {
+      if (now - (this.rebalanceLog[0]?.t ?? 0) > COOLDOWN_MS * 3) this.logRebalance(now, `${why}, but no machine has room for ${pick.name}`);
+      return;
+    }
+    try {
+      this.move(pick.name, from, String(dest.machine));
+      const x = this.placements.get(pick.name).get(dest.machine);
+      x.reason = `moved here from machine ${from} automatically: ${why}; ${dest.reason}`;
+      this.savePlacement(pick.name, dest.machine, x);
+      this.autoMoved.set(pick.name, now);
+      this.logRebalance(now, `moved ${pick.name} from machine ${from} to machine ${dest.machine}: ${why}`);
+    } catch (e) {
+      this.logRebalance(now, `couldn't move ${pick.name} off machine ${from}: ${e.message}`);
+    }
+  }
+
   // ---- machines ----
 
   sync(body) {
@@ -796,6 +907,7 @@ export class Control extends DurableObject {
     this.takeMetrics(r, body.metrics, now);
     this.place(now);
     this.settle(now);
+    this.rebalance(now);
     if (!r.retire && (this.extraGithub(r, now) || this.superseded(r, now))) {
       r.retire = 1;
       this.saveRun(r);
@@ -990,7 +1102,11 @@ export class Control extends DurableObject {
   takeMetrics(r, metrics, now) {
     if (!isMap(metrics) || r.retire || !this.speaksFor(r, now)) return;
     if (isMap(metrics.live) && isMap(metrics.live.h)) {
-      this.liveMetrics.set(r.machine, { run: r.id, started: r.started, t: Number(metrics.live.t) || now, h: metrics.live.h, a: isMap(metrics.live.a) ? metrics.live.a : {} });
+      const h = metrics.live.h;
+      this.liveMetrics.set(r.machine, { run: r.id, started: r.started, t: Number(metrics.live.t) || now, h, a: isMap(metrics.live.a) ? metrics.live.a : {} });
+      const list = this.samples.get(r.machine) ?? this.samples.set(r.machine, []).get(r.machine);
+      list.push({ t: now, cpu: Number(h.cpu) || 0, mem: h.memTotal ? (100 * (h.memUsed || 0)) / h.memTotal : 0 });
+      while (list.length && now - list[0].t > this.hotMs() * 2) list.shift();
     }
     for (const m of Array.isArray(metrics.minutes) ? metrics.minutes.slice(-60) : []) {
       const t = Number(m?.t);
@@ -1091,6 +1207,7 @@ export class Control extends DurableObject {
       machines: this.machines(),
       dnsError: this.dnsError,
       dnsNotes: this.dnsNotes ?? [],
+      rebalance: { on: this.rebalanceOn(), log: this.rebalanceLog.slice(0, 10), hot: [...this.liveMachines(now).keys()].filter((m) => this.isHot(m, now)) },
       // Slots to show: ones with a recent run, plus ones a GitHub machine is starting for.
       slots: [...new Set([
         ...[...this.runs.values()].filter((r) => now - r.seen < 3600_000).map((r) => r.machine),

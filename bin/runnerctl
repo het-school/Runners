@@ -13,12 +13,13 @@
 #   runnerctl join-token             the token another host joins with (see /install.sh)
 #   runnerctl move <name> <from> [to]  move one copy of a project off a machine (new copy first, old one removed once healthy)
 #   runnerctl evict <machine>        move every placed project off a machine
+#   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,18p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,19p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -99,5 +100,6 @@ PY
   join-token) api /join-token | jq -r .token ;;
   move) [ $# -ge 2 ] || usage; api "/projects/$1/move?from=$2${3:+&to=$3}" -X POST | jq -c '.placed' ;;
   evict) [ $# -eq 1 ] || usage; api "/machines/$1/evict" -X POST | jq . ;;
+  rebalance) case ${1:-} in on) v=true ;; off) v=false ;; *) usage ;; esac; api /settings -X PUT -d "{\"rebalance\": $v}" | jq . ;;
   *) usage ;;
 esac

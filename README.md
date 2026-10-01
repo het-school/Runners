@@ -35,7 +35,9 @@ The control plane checks a spec before accepting it. It must be valid YAML with 
 
 ### Placement
 
-Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (the machine is hot, or you're about to remove it), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
+Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
+
+Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. Projects set to `all` never move. The portal lists what moved and why. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
 
 ### Rollouts
 
@@ -54,7 +56,7 @@ GET    /api/projects/<name>[?version=N]         a version's compose file, files 
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
-PUT    /api/settings                            {"machines": 10}  (GitHub machines to keep running)
+PUT    /api/settings                            {"machines": 10, "rebalance": true}  (GitHub machines to keep running; automatic rebalancing)
 POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 GET    /api/join-token                          the token a host joins with (admin token only)
