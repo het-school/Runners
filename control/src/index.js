@@ -909,7 +909,9 @@ export class Control extends DurableObject {
   // The machine with the most room that doesn't already run the project, ready ones first.
   bestMachine(name, up, counts, now) {
     const placed = this.placements.get(name) ?? new Map();
-    return [...up.values()].filter((r) => !placed.has(r.machine))
+    const stateful = this.isStateful(name);
+    // A stateful replica only goes where the agent has said its data mounts work (an older agent says nothing).
+    return [...up.values()].filter((r) => !placed.has(r.machine) && (!stateful || r.storageState === "ok"))
       .map((r) => ({ machine: r.machine, ready: r.ready, ...this.load(r.machine, counts.get(r.machine) ?? 0, now) }))
       .sort((a, b) => b.ready - a.ready || a.score - b.score)[0] ?? null;
   }
