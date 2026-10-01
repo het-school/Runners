@@ -4,7 +4,7 @@ A self-healing fleet on GitHub Actions: 10 machines each run every project, each
 
 - **Status page:** https://control.billybishop4-workers.xyz
 - **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
-- **Admin portal:** https://control.billybishop4-workers.xyz/admin. It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
+- **Admin portal:** https://control.billybishop4-workers.xyz/admin (step-by-step deploy guide for the portal and the API at [/admin#guide](https://control.billybishop4-workers.xyz/admin#guide)). It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
   - add projects and edit them
   - roll back to an earlier version
   - disable, enable and delete projects

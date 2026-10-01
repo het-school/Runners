@@ -94,6 +94,14 @@
   .spec-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; margin-bottom: 8px; }
   .spec-bar select { width: auto; }
   .small { font-size: 13px; padding: 5px 10px; }
+  .guide { line-height: 1.55; }
+  .guide h3 { font-size: 15px; margin: 18px 0 6px; }
+  .guide h3:first-of-type { margin-top: 10px; }
+  .guide p { margin: 6px 0; }
+  .guide ol { margin: 4px 0; padding-left: 22px; }
+  .guide code { font: 13px var(--mono); background: var(--soft); padding: 1px 4px; border-radius: 4px; }
+  .guide pre.code { border-radius: 10px; margin: 0 0 8px; position: relative; }
+  .guide pre.code button { position: absolute; top: 6px; right: 6px; }
 </style>
 </head>
 <body>
@@ -101,6 +109,7 @@
   <div class="bar">
     <div class="brand">Runner <span>admin</span></div>
     <div class="fleet" id="fleet">Loading…</div>
+    <a href="#guide" class="meta">How to deploy</a>
     <a href="/metrics" class="meta">Metrics</a>
     <a href="/" class="meta">Status page</a>
   </div>
@@ -117,6 +126,75 @@
     </div>
   </div>
   <div class="cards" id="machines"></div>
+  <div class="head" id="guide"><h2>How to deploy an app</h2></div>
+  <div class="card guide">
+    <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. Every machine runs it, and
+      machine <i>n</i> serves it at <code>https://&lt;name&gt;-<i>n</i>.billybishop4-workers.xyz</code> on the app's port.
+      Each deploy is a new version, and every machine switches to it at once.</p>
+
+    <h3>From this page</h3>
+    <ol>
+      <li>Click <b>New project</b> at the top.</li>
+      <li><b>Name:</b> lowercase letters, digits and dashes, such as <code>my-app</code>.</li>
+      <li><b>Port:</b> the port your app listens on. You can leave it empty if the compose file sets <code>x-runner.port</code>; with no port the app runs but isn't reachable from outside.</li>
+      <li>Paste a <b>Docker Compose</b> file, a <b>Dockerfile</b>, or both. Use <b>Add a file</b> for anything the Dockerfile <code>COPY</code>s (source files, configs).</li>
+      <li>Click <b>Deploy</b>. The dots on the project card turn green as each machine reports healthy. A red dot shows the error; fix it and deploy again.</li>
+    </ol>
+    <p class="hint">To change an app, open it and click <b>Edit</b>. To roll back, pick an earlier version in the editor, click <b>Load</b>, then <b>Deploy</b>.</p>
+
+    <h3>With the API</h3>
+    <p>Send JSON to <code>PUT /admin/api/projects/&lt;name&gt;</code>. No token is needed. Scripts that have the admin token can use
+      <code>/api/…</code> instead, with <code>Authorization: Bearer &lt;token&gt;</code>; the routes and bodies are the same.</p>
+    <div class="wrap"><table class="list">
+      <tr><th>Field</th><th>What it is</th></tr>
+      <tr><td><code>compose</code></td><td>The compose file, as text. Required unless you send <code>dockerfile</code>.</td></tr>
+      <tr><td><code>dockerfile</code></td><td>A Dockerfile, as text. On its own it becomes a one-service app that builds it and publishes <code>port</code>.</td></tr>
+      <tr><td><code>files</code></td><td><code>{"path": "text", …}</code>: other files, next to the compose file (e.g. <code>src/main.py</code>, <code>web/Dockerfile</code>).</td></tr>
+      <tr><td><code>port</code></td><td>The port the app listens on (or set <code>x-runner.port</code> in the compose file).</td></tr>
+    </table></div>
+    <p class="hint">Limits: 30 files, 250 KB in all, text files only. Ports 2019 and 19080 are taken. Every <code>build:</code> needs its Dockerfile among the files.</p>
+
+    <div class="sec">1. A published image (compose only)</div>
+<pre class="code">curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/whoami \
+  -H 'Content-Type: application/json' \
+  -d '{"port": 8080, "compose": "services:\n  web:\n    image: traefik/whoami\n    command: [\"--port\", \"8080\"]\n    ports: [\"8080:8080\"]\n    restart: unless-stopped\n"}'</pre>
+
+    <div class="sec">2. Just a Dockerfile</div>
+<pre class="code">curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/hello \
+  -H 'Content-Type: application/json' \
+  -d '{"port": 9000, "dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]"}'</pre>
+
+    <div class="sec">3. Your own code from files on disk</div>
+    <p class="hint" style="margin-top:0">Escaping files into JSON by hand is painful; let <code>jq</code> build the body:</p>
+<pre class="code"># my-app/Dockerfile, my-app/app.py
+jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py \
+  '{port: 8000, dockerfile: $df, files: {"app.py": $app}}' |
+curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/my-app \
+  -H 'Content-Type: application/json' --data-binary @-</pre>
+<pre class="code"># a compose file with its own build folder: compose.yaml has  build: ./web
+jq -n --rawfile c compose.yaml --rawfile d web/Dockerfile --rawfile s web/server.js \
+  '{compose: $c, files: {"web/Dockerfile": $d, "web/server.js": $s}}' |
+curl -X PUT https://control.billybishop4-workers.xyz/admin/api/projects/my-app \
+  -H 'Content-Type: application/json' --data-binary @-</pre>
+
+    <div class="sec">Check on it, roll back, turn off</div>
+<pre class="code">B=https://control.billybishop4-workers.xyz/admin/api
+
+curl $B/status                           # every project and machine; per-machine state is under runs[].projects
+curl $B/projects/my-app                  # the current spec and the list of versions
+curl $B/projects/my-app?version=2        # an earlier version
+
+# roll back: send version 2's spec again (it becomes a new version)
+curl -s "$B/projects/my-app?version=2" | jq '{compose, files, port}' |
+  curl -X PUT $B/projects/my-app -H 'Content-Type: application/json' --data-binary @-
+
+curl -X POST $B/projects/my-app/disable  # stop it everywhere, keep its versions
+curl -X POST $B/projects/my-app/enable
+curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
+    <p class="hint">A deploy answers with the project's state. Machines pick the change up within about 20 seconds; builds can take a few minutes.
+      Then open <code>https://my-app-1.billybishop4-workers.xyz</code> (any machine number up to the machine count).
+      With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does all of this for you.</p>
+  </div>
 </main>
 
 <dialog id="editor">
@@ -525,7 +603,23 @@ $("save-count").onclick = async () => {
   }
 };
 
-refresh().then(() => { if (location.hash.length > 1 && status) openDetails(decodeURIComponent(location.hash.slice(1))); });
+document.querySelectorAll(".guide pre.code").forEach((pre) => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "small";
+  b.textContent = "Copy";
+  b.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(pre.firstChild.textContent);
+    b.textContent = "Copied";
+    setTimeout(() => (b.textContent = "Copy"), 1500);
+  });
+  pre.append(b);
+});
+refresh().then(() => {
+  const name = decodeURIComponent(location.hash.slice(1));
+  if (status?.projects.some((p) => p.name === name)) openDetails(name);
+  else if (name) document.getElementById(name)?.scrollIntoView();
+});
 setInterval(refresh, 10000);
 </script>
 </body>
