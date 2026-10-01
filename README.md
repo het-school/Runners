@@ -35,7 +35,7 @@ The control plane checks a spec before accepting it. It must be valid YAML with 
 
 ### Placement
 
-Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
+Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (the machine is hot, or you're about to remove it), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
 
 ### Rollouts
 
@@ -55,6 +55,8 @@ POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
 PUT    /api/settings                            {"machines": 10}  (GitHub machines to keep running)
+POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
+POST   /api/machines/<n>/evict                  move every placed project off machine n
 GET    /api/join-token                          the token a host joins with (admin token only)
 POST   /api/join                                an agent starting up: {"agent", "kind", "want"} -> its slot and tunnel token
 ```

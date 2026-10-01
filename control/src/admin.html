@@ -314,7 +314,7 @@ function render() {
         <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
-      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.placed.length} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
@@ -344,7 +344,7 @@ function render() {
         ${state}
       </div>
       ${projects ? `<div class="dots">${projects}</div>` : ""}
-      <div class="actions"><button data-act="restart" data-machine="${n}">Restart</button></div>
+      <div class="actions"><button data-act="restart" data-machine="${n}">Restart</button><button data-act="evict" data-machine="${n}">Move apps off</button></div>
     </div>`);
   }
   $("machines").innerHTML = machines.join("");
@@ -416,7 +416,8 @@ function renderDetails() {
     const url = `https://${p.name}-${n}.${status.domain}/`;
     return `<tr><td>${n}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
-      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}</td>
       <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
   }).join("");
 
@@ -437,7 +438,7 @@ function renderDetails() {
       <div><dt>Latest version</dt><dd>v${p.version}</dd></div>
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
-      <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.placed.length} of ${p.replicas} placed`}</dd></div>
+      <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} placed`}</dd></div>
       <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
@@ -455,7 +456,7 @@ function renderDetails() {
     </div>
     ${files.length ? `<div class="tabs" role="tablist">${tabs}</div><pre class="code" id="dt-code"></pre>` : `<div class="card empty">No files</div>`}
     <div class="sec">Machines</div>
-    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th></tr>${machines}</table></div>
+    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th>URL</th><th></th></tr>${machines}</table></div>
     <div class="sec">Versions</div>
     <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Replicas</th><th>Created</th></tr>${versions}</table></div>`;
   if (current) $("dt-code").textContent = current[1];
@@ -483,6 +484,19 @@ async function openDetails(name) {
 $("dt-body").addEventListener("click", async (ev) => {
   const tab = ev.target.closest("[data-tab]");
   if (tab) { details.tab = tab.dataset.tab; return renderDetails(); }
+  const mv = ev.target.closest("[data-move]");
+  if (mv) {
+    const from = mv.dataset.move;
+    const to = prompt(`Move ${details.name} off machine ${from} to which machine? Leave empty for the one with the most room. The new copy starts first; the old one is removed once it's healthy.`, "");
+    if (to === null) return;
+    try {
+      const p = await api("POST", `/projects/${encodeURIComponent(details.name)}/move?from=${from}${to.trim() ? `&to=${Number(to)}` : ""}`);
+      const dest = p.placed.find((x) => x.leaving?.to == null && x.machine !== Number(from) && x.reason.startsWith("moved here from machine " + from));
+      toast(`Moving ${details.name} from machine ${from}${dest ? ` to machine ${dest.machine}` : ""}`);
+      refresh();
+    } catch (e) { toast(e.message); }
+    return;
+  }
   const row = ev.target.closest("tr[data-version]");
   if (row) return showVersion(row.dataset.version);
   if (ev.target.id === "dt-copy") {
@@ -597,6 +611,11 @@ document.addEventListener("click", async (ev) => {
       if (!confirm(`Restart machine ${machine}? A fresh run takes over before the old one leaves, so nothing goes down.`)) return;
       await api("POST", `/roll?machine=${machine}`);
       toast(`Machine ${machine} is starting a fresh run`);
+    }
+    if (act === "evict") {
+      if (!confirm(`Move every placed app off machine ${machine}? Each goes to the machine with the most room; the new copy starts first and the old one is removed once it's healthy. Apps set to "all" stay.`)) return;
+      const r = await api("POST", `/machines/${machine}/evict`);
+      toast(r.moved.length ? `Moving ${r.moved.join(", ")} off machine ${machine}` : `Nothing placed on machine ${machine}` + (r.failed.length ? `; ${r.failed.join("; ")}` : ""));
     }
     refresh();
   } catch (e) {

@@ -27,7 +27,8 @@ const HOST_HOLD_MS = 30 * 60_000; // a host that drops out keeps its slot this l
 const SHARED_DNS = "100::";
 const REPLICAS_ALL = 0; // stored value of replicas: "all"
 const MAX_REPLICAS = 100;
-const ARRIVAL_MS = 3 * 60_000; // on a cold start, wait this long for the fleet to show up before placing anything // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
+const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
+const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
 // Metrics: agents send one summary per machine per minute; the fleet's minute is stored as one row (few writes),
 // and rolled up into 10-minute rows for the longer views.
 const MIN = 60_000;
@@ -294,7 +295,7 @@ export class Control extends DurableObject {
       `CREATE TABLE IF NOT EXISTS starts (machine INTEGER PRIMARY KEY, at INTEGER NOT NULL, by TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS placements (name TEXT NOT NULL, machine INTEGER NOT NULL, since INTEGER NOT NULL,
-         reason TEXT NOT NULL, PRIMARY KEY (name, machine))`,
+         reason TEXT NOT NULL, leaving TEXT, PRIMARY KEY (name, machine))`,
       `CREATE TABLE IF NOT EXISTS slots (n INTEGER PRIMARY KEY, tunnel TEXT NOT NULL, token TEXT NOT NULL, created INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, slot INTEGER NOT NULL, kind TEXT NOT NULL, label TEXT, joined INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_1m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
@@ -307,6 +308,7 @@ export class Control extends DurableObject {
     if (!columns("projects").has("enabled")) this.sql.exec("ALTER TABLE projects ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
     if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
     if (!columns("versions").has("replicas")) this.sql.exec("ALTER TABLE versions ADD COLUMN replicas INTEGER");
+    if (!columns("placements").has("leaving")) this.sql.exec("ALTER TABLE placements ADD COLUMN leaving TEXT");
     const runColumns = columns("runs");
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'github'");
@@ -320,8 +322,10 @@ export class Control extends DurableObject {
     this.versions = new Map(); // "name@version" -> { compose, port, files }
     this.placements = new Map(); // project -> Map(machine -> { since, reason })
     for (const x of this.all("SELECT * FROM placements")) {
-      (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name)).set(x.machine, { since: x.since, reason: x.reason });
+      (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name))
+        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null });
     }
+    this.bootAt = Date.now();
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
     this.agents = new Map(this.all("SELECT * FROM agents").map((a) => [a.id, a])); // agent -> the slot it last had
     this.holds = new Map(); // slot -> { agent, at }: just given out at /join, not checked in yet
@@ -451,10 +455,13 @@ export class Control extends DurableObject {
     // The token a new host joins with; only with the admin token itself, never through the open portal.
     if (method === "GET" && route === "/join-token") return need(admin && !portal), json({ token: this.env.NODE_TOKEN });
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
-    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable))?$/);
+    const ev = route.match(/^\/machines\/(\d+)\/evict$/);
+    if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
+    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move))?$/);
     if (m) {
       need(admin);
       const [, name, action] = m;
+      if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
       if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
       if (!action && method === "PUT") return json(this.putProject(name, await body()));
@@ -470,13 +477,15 @@ export class Control extends DurableObject {
     const latest = this.version(p.name, p.version);
     const replicas = latest?.replicas ?? 1;
     const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x })).sort((a, b) => a.machine - b.machine);
+    const staying = placed.filter((x) => !x.leaving).length;
     return {
       name: p.name,
       version: p.version,
       stable: p.stable,
       port: latest?.port ?? null,
       replicas: replicas === REPLICAS_ALL ? "all" : replicas,
-      placed, // the machines it's placed on (empty when replicas is "all": then it's every machine)
+      placed, // the machines it's placed on (empty when replicas is "all": then it's every machine); leaving = being moved away
+      staying,
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
       state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
@@ -627,7 +636,8 @@ export class Control extends DurableObject {
 
   savePlacement(name, machine, x) {
     (this.placements.get(name) ?? this.placements.set(name, new Map()).get(name)).set(machine, x);
-    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason) VALUES (?, ?, ?, ?)", name, machine, x.since, x.reason);
+    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving) VALUES (?, ?, ?, ?, ?)",
+      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null);
   }
 
   dropPlacement(name, machine) {
@@ -646,21 +656,24 @@ export class Control extends DurableObject {
   }
 
   place(now) {
-    const up = new Map(); // machine -> its newest live run
-    for (const r of this.liveRuns(now)) if ((up.get(r.machine)?.started ?? -1) < r.started) up.set(r.machine, r);
+    const up = this.liveMachines(now); // machine -> its newest live run
     let changed = false;
-    // After a cold start the first machine to check in would get every replica; wait for the fleet (or 3 minutes).
-    const arrived = up.size >= this.machines() || [...up.values()].some((r) => now - r.started > ARRIVAL_MS);
+    // After a (re)start the first machine to check in would get every replica, because it's the only one with
+    // metrics; wait until every machine that's up has reported some (or 3 minutes).
+    const measured = (machine) => now - (this.liveMetrics.get(machine)?.t ?? 0) < 3 * LIVE_MS;
+    const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.machines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> projects placed on it
     for (const [name, placed] of this.placements) {
       // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone.
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
-      for (const machine of placed.keys()) {
-        if (!p || !p.enabled || replicas === REPLICAS_ALL || !up.has(machine)) {
+      for (const [machine, x] of placed) {
+        // A copy being moved away goes once its replacement is healthy, or after a while regardless.
+        const moved = x.leaving && (up.get(x.leaving.to)?.status[name]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
+        if (!p || !p.enabled || replicas === REPLICAS_ALL || !up.has(machine) || moved) {
           this.dropPlacement(name, machine);
           changed = true;
-        } else counts.set(machine, (counts.get(machine) ?? 0) + 1);
+        } else if (!x.leaving) counts.set(machine, (counts.get(machine) ?? 0) + 1);
       }
     }
     for (const p of [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -668,29 +681,90 @@ export class Control extends DurableObject {
       const want = this.version(p.name, p.version)?.replicas ?? 1;
       if (want === REPLICAS_ALL) continue;
       const placed = this.placements.get(p.name) ?? this.placements.set(p.name, new Map()).get(p.name);
+      // Copies being moved away don't count; the move's new copy does.
+      const staying = [...placed].filter(([, x]) => !x.leaving);
       // Too many (replicas were lowered): keep the oldest placements, and healthy ones over failed ones.
-      const extra = [...placed].map(([machine, x]) => ({ machine, x, healthy: up.get(machine)?.status[p.name]?.s === "healthy" }))
-        .sort((a, b) => a.healthy - b.healthy || b.x.since - a.x.since).slice(0, Math.max(0, placed.size - want));
+      const extra = staying.map(([machine, x]) => ({ machine, x, healthy: up.get(machine)?.status[p.name]?.s === "healthy" }))
+        .sort((a, b) => a.healthy - b.healthy || b.x.since - a.x.since).slice(0, Math.max(0, staying.length - want));
       for (const { machine } of extra) {
         this.dropPlacement(p.name, machine);
         counts.set(machine, counts.get(machine) - 1);
         changed = true;
       }
       // Too few: the machines with the most room, ready ones first.
-      for (let n = placed.size; n < want && arrived; n++) {
-        const best = [...up.values()].filter((r) => !placed.has(r.machine))
-          .map((r) => ({ r, ...this.load(r.machine, counts.get(r.machine) ?? 0, now) }))
-          .sort((a, b) => b.r.ready - a.r.ready || a.score - b.score)[0];
+      for (let n = staying.length - extra.length; n < want && arrived; n++) {
+        const best = this.bestMachine(p.name, up, counts, now);
         if (!best) break; // every machine already has one; the rest get placed when machines show up
-        this.savePlacement(p.name, best.r.machine, { since: now, reason: best.reason });
-        counts.set(best.r.machine, (counts.get(best.r.machine) ?? 0) + 1);
+        this.savePlacement(p.name, best.machine, { since: now, reason: best.reason, leaving: null });
+        counts.set(best.machine, (counts.get(best.machine) ?? 0) + 1);
         changed = true;
       }
     }
     return changed;
   }
 
-  // ---- machines ----
+  // The machine with the most room that doesn't already run the project, ready ones first.
+  bestMachine(name, up, counts, now) {
+    const placed = this.placements.get(name) ?? new Map();
+    return [...up.values()].filter((r) => !placed.has(r.machine))
+      .map((r) => ({ machine: r.machine, ready: r.ready, ...this.load(r.machine, counts.get(r.machine) ?? 0, now) }))
+      .sort((a, b) => b.ready - a.ready || a.score - b.score)[0] ?? null;
+  }
+
+  liveMachines(now) {
+    const up = new Map();
+    for (const r of this.liveRuns(now)) if ((up.get(r.machine)?.started ?? -1) < r.started) up.set(r.machine, r);
+    return up;
+  }
+
+  placementCounts() {
+    const counts = new Map();
+    for (const placed of this.placements.values()) for (const [machine, x] of placed) if (!x.leaving) counts.set(machine, (counts.get(machine) ?? 0) + 1);
+    return counts;
+  }
+
+  // Move one copy of a project off a machine: the new copy is placed first, and the old one is dropped once the
+  // new one is healthy (see place()). `to` picks the destination; otherwise it's the machine with the most room.
+  move(name, from, to) {
+    const p = this.project(name);
+    const now = Date.now();
+    const placed = this.placements.get(name);
+    const x = placed?.get(from);
+    if (!x) throw new HttpError(400, `${name} isn't placed on machine ${from}`);
+    if (x.leaving) throw new HttpError(409, `${name} is already moving from machine ${from} to ${x.leaving.to}`);
+    const up = this.liveMachines(now);
+    let dest;
+    if (to) {
+      dest = Number(to);
+      if (!up.has(dest)) throw new HttpError(400, `machine ${to} isn't up`);
+      if (placed.has(dest)) throw new HttpError(400, `${name} already runs on machine ${to}`);
+      dest = { machine: dest, reason: `moved here from machine ${from} by hand` };
+    } else {
+      const best = this.bestMachine(name, up, this.placementCounts(), now);
+      if (!best) throw new HttpError(409, `no other machine is up for ${name}`);
+      dest = { machine: best.machine, reason: `moved here from machine ${from}: ${best.reason}` };
+    }
+    this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null });
+    this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now } });
+    return this.describe(p);
+  }
+
+  // Move every copy off a machine (it's hot, or about to be removed).
+  evict(machine) {
+    const moved = [];
+    const failed = [];
+    for (const [name, placed] of this.placements) {
+      if (!placed.has(machine) || placed.get(machine).leaving) continue;
+      try {
+        this.move(name, machine, null);
+        moved.push(name);
+      } catch (e) {
+        failed.push(`${name}: ${e.message}`);
+      }
+    }
+    return { machine, moved, failed };
+  }
+
   // ---- machines ----
 
   sync(body) {
