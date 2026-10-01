@@ -79,6 +79,7 @@ POST   /api/roll[?machine=N]                    replace machines one at a time
 PUT    /api/settings                            {"machines": 10, "rebalance": true}  (GitHub machines to keep running; automatic rebalancing)
 POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
+DELETE /api/slots/<n>                           retire an empty slot beyond the GitHub count: tunnel, records and DNS names go
 GET    /api/join-token                          the token a host joins with (admin token only)
 POST   /api/join                                an agent starting up: {"agent", "kind", "want"} -> its slot and tunnel token
 ```
@@ -107,7 +108,7 @@ Any Linux machine with Docker can join. Get the token with `runnerctl join-token
 curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
 ```
 
-It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker rm -f runner-agent tunnel router`.
+It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker stop runner-agent && docker rm -f runner-agent tunnel router` (stopping first lets it hand stateful data back), then retire its slot from the portal or with `runnerctl retire <n>` so its tunnel and `<app>-n` names go too.
 
 ## How it works
 

@@ -373,7 +373,7 @@ function render() {
         ${state}
       </div>
       ${projects ? `<div class="dots">${projects}</div>` : ""}
-      <div class="actions"><button data-act="restart" data-machine="${n}">Restart</button><button data-act="evict" data-machine="${n}">Move apps off</button></div>
+      <div class="actions">${r ? `<button data-act="restart" data-machine="${n}">Restart</button><button data-act="evict" data-machine="${n}">Move apps off</button>` : `<button class="danger" data-act="retire" data-machine="${n}">Retire slot</button>`}</div>
     </div>`);
   }
   $("machines").innerHTML = machines.join("");
@@ -662,6 +662,11 @@ document.addEventListener("click", async (ev) => {
       if (!confirm(`Restart machine ${machine}? A fresh run takes over before the old one leaves, so nothing goes down.`)) return;
       await api("POST", `/roll?machine=${machine}`);
       toast(`Machine ${machine} is starting a fresh run`);
+    }
+    if (act === "retire") {
+      if (!confirm(`Retire slot ${machine}? Its Cloudflare tunnel and <app>-${machine} names are deleted. A machine joining later gets a new slot. (Slots within the GitHub machine count can't be retired.)`)) return;
+      const r = await api("DELETE", `/slots/${machine}`);
+      toast(`Slot ${r.retired} retired`);
     }
     if (act === "evict") {
       if (!confirm(`Move every placed app off machine ${machine}? Each goes to the machine with the most room; the new copy starts first and the old one is removed once it's healthy. Apps set to "all" stay.`)) return;

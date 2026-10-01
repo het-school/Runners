@@ -565,6 +565,8 @@ export class Control extends DurableObject {
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const ev = route.match(/^\/machines\/(\d+)\/evict$/);
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
+    const sl = route.match(/^\/slots\/(\d+)$/);
+    if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|wipe))?$/);
     if (m) {
       need(admin);
@@ -1088,6 +1090,10 @@ export class Control extends DurableObject {
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
     }
     this.takeMetrics(r, body.metrics, now);
+    if (body.leaving && !r.retire) {
+      r.retire = 1; // going away for good: its replicas can be placed elsewhere right now
+      this.saveRun(r);
+    }
     this.place(now);
     this.settle(now);
     this.rebalance(now);
@@ -1237,6 +1243,32 @@ export class Control extends DurableObject {
       this.tunnelJobs.set(n, job);
     }
     return this.tunnelJobs.get(n);
+  }
+
+  // Retire a slot nothing runs in any more: delete its tunnel, forget its runs and agents, and drop its DNS names.
+  // Slots within the GitHub machine count get refilled, so they can't be retired; lower the count first.
+  async retireSlot(n) {
+    const now = Date.now();
+    if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "slot must be a machine number");
+    if (n <= this.machines()) throw new HttpError(409, `slot ${n} is within the ${this.machines()} GitHub machines kept running; lower that first`);
+    if (this.liveRuns(now).some((r) => r.machine === n)) throw new HttpError(409, `machine ${n} is still up; stop it first`);
+    const slot = this.slots.get(n);
+    if (slot) {
+      await this.cf(`/accounts/${this.env.ACCOUNT_ID}/cfd_tunnel/${slot.tunnel}?cascade=true`, { method: "DELETE" });
+      this.slots.delete(n);
+      this.sql.exec("DELETE FROM slots WHERE n = ?", n);
+    }
+    for (const [id, a] of this.agents) if (a.slot === n) this.agents.delete(id);
+    this.sql.exec("DELETE FROM agents WHERE slot = ?", n);
+    for (const r of [...this.runs.values()]) if (r.machine === n) this.runs.delete(r.id);
+    this.sql.exec("DELETE FROM runs WHERE machine = ?", n);
+    this.starts.delete(n);
+    this.sql.exec("DELETE FROM starts WHERE machine = ?", n);
+    this.holds.delete(n);
+    this.liveMetrics.delete(n);
+    for (const [name, placed] of this.placements) if (placed.has(n)) this.dropPlacement(name, n);
+    this.scheduleDns();
+    return { retired: n, tunnel: slot?.tunnel ?? null };
   }
 
   // For the shared URLs: project -> slots whose current run is online, should run it, and has it healthy.

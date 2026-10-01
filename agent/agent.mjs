@@ -401,7 +401,7 @@ async function sync() {
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, storage: storageState(), metrics: sent }),
+    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, storage: storageState(), leaving, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -425,6 +425,8 @@ async function startMachine(m) {
 }
 
 let stopping = false;
+let releasing = false; // handing stateful data back before leaving: the main loop stands down meanwhile
+let leaving = false; // told the control plane this run is going away for good (its replicas can be placed elsewhere now)
 async function shutdown(reason, code = 0) {
   if (stopping) return;
   stopping = true;
@@ -434,9 +436,13 @@ async function shutdown(reason, code = 0) {
   process.exit(code);
 }
 // Stopped from outside: hand stateful projects' data back first if there's time (a host gives the agent 3 minutes).
+// On GitHub that means the machine is going away for good, so its replicas can be placed elsewhere straight away;
+// a host is probably just restarting its agent and keeps them.
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
-    if (stopping) return;
+    if (stopping || releasing) return;
+    releasing = true;
+    leaving = github;
     Promise.race([releaseStateful(), sleep(150_000)]).finally(() => shutdown("cancelled"));
   });
 }
@@ -452,6 +458,10 @@ async function main() {
   let successorAt = 0;
   let lastReport = 0;
   while (Date.now() < hardStop) {
+    if (releasing) { // a signal handler is handing data back; don't start anything meanwhile
+      await sleep(1000);
+      continue;
+    }
     let plan = null;
     try {
       plan = await sync();
@@ -459,6 +469,7 @@ async function main() {
       log(`control plane unreachable (${e.message}); keeping what's running`);
     }
     if (plan?.retire) {
+      releasing = true;
       await releaseStateful();
       return shutdown("a newer run of this machine is healthy, so this one is leaving");
     }
@@ -478,6 +489,7 @@ async function main() {
       }
       for (const m of plan.start ?? []) await startMachine(m);
       if (plan.handover && !github) {
+        releasing = true;
         await releaseStateful();
         return shutdown("restarting to update the agent");
       }

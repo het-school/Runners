@@ -15,12 +15,13 @@
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 #   runnerctl wipe <name> [replica]  delete a (disabled) stateful project's data from the fleet's storage
+#   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names (not within the GitHub count)
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,20p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,21p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -110,5 +111,6 @@ PY
   evict) [ $# -eq 1 ] || usage; api "/machines/$1/evict" -X POST | jq . ;;
   rebalance) case ${1:-} in on) v=true ;; off) v=false ;; *) usage ;; esac; api /settings -X PUT -d "{\"rebalance\": $v}" | jq . ;;
   wipe) [ $# -ge 1 ] || usage; api "/projects/$1/wipe${2:+?replica=$2}" -X POST | jq '{name, replica, deleted, usage}' ;;
+  retire) [ $# -eq 1 ] || usage; api "/slots/$1" -X DELETE | jq . ;;
   *) usage ;;
 esac
