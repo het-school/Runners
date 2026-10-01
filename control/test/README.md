@@ -11,4 +11,9 @@ control/test/rebalance.sh   # automatic rebalancing (uses a 20-second hot window
 control/test/stateful.sh    # stateful projects: spec, per-machine rendering, handovers, stop-first moves
 ```
 
+`e2e-stateful.sh` is different: it drives the *live* fleet with a throwaway stateful project (`e2e-stateful.yml`, a tiny
+file store). `deploy`, `write`, `read`, `objects`, `state`, `wait <machine>` and `machine` are its phases; move the
+project with `runnerctl move`, hand a machine over with `runnerctl roll`, and `read` again to see the data follow.
+It needs `~/.config/runnerctl/token` and `~/.config/runnerctl/r2.env`.
+
 They need Node, `npx wrangler`, `jq` and `curl`, and use ports 8911 (control plane) and 8790 (mock).
