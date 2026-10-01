@@ -33,7 +33,7 @@ The control plane checks a spec before accepting it. It must be valid YAML with 
 
 ### Rollouts
 
-Each change is a new version. By default it goes to machine 1, then 2, and so on, each once the previous one reports it healthy. If any machine reports the new version broken, the rollout stops and every machine returns to the last good version. Use **every machine at once** (`--now` / `?now=1`) to skip that. A disabled project keeps its spec and versions but runs nowhere.
+Each change is a new version, and every machine switches to it at once. There's no automatic rollback: if the new version fails, the machines show it as failed until you deploy a fix or load an earlier version in the portal and deploy it. A disabled project keeps its spec and versions but runs nowhere.
 
 ## API
 
@@ -41,7 +41,7 @@ The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with 
 
 ```
 GET    /api/status                              projects and machines (no token needed)
-PUT    /api/projects/<name>[?now=1]             create or update: {"compose": "...", "dockerfile": "...",
+PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...",
                                                 "files": {"path": "text"}, "port": 8080}  (compose or dockerfile required)
 GET    /api/projects/<name>[?version=N]         a version's compose file, files and port, plus the version list
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
@@ -61,7 +61,7 @@ curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello \
 ```
 runnerctl apply examples/hello --port 9000   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
 runnerctl apply examples/stremio.yml         # a compose file
-runnerctl apply path/to/Dockerfile myapp --port 8000 --now
+runnerctl apply path/to/Dockerfile myapp --port 8000
 runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>
 runnerctl roll [n] | machines <n>
 ```

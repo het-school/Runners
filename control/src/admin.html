@@ -143,9 +143,7 @@
       <div id="ed-files"></div>
       <button type="button" id="ed-add-file" style="margin-top:8px">Add a file</button>
       <p class="hint">Anything else the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>. Paths are relative to the compose file.</p>
-      <label>Rollout</label>
-      <label class="radio"><input type="radio" name="rollout" value="gradual" checked> One machine at a time. Stops and rolls back if a machine reports it broken.</label>
-      <label class="radio"><input type="radio" name="rollout" value="now"> Every machine at once.</label>
+      <p class="hint">Deploying updates every machine at once.</p>
       <div class="err" id="ed-error" hidden></div>
     </div>
     <div class="dlg-foot"><button type="button" id="ed-cancel">Cancel</button><button class="primary" id="ed-save" type="submit">Deploy</button></div>
@@ -415,7 +413,6 @@ async function openEditor(name) {
   $("ed-name").value = name || "";
   $("ed-name").disabled = Boolean(name);
   $("ed-host").textContent = name || "name";
-  document.querySelector('input[name="rollout"][value="gradual"]').checked = true;
   $("ed-versions").hidden = !name;
   fill({});
   if (name) {
@@ -455,12 +452,11 @@ $("form").onsubmit = async (ev) => {
   const body = { compose: $("ed-compose").value, files };
   if ($("ed-dockerfile").value.trim()) body.dockerfile = $("ed-dockerfile").value;
   if ($("ed-port").value) body.port = Number($("ed-port").value);
-  const now = document.querySelector('input[name="rollout"]:checked').value === "now";
   $("ed-save").disabled = true;
   try {
-    const p = await api("PUT", `/projects/${encodeURIComponent(name)}${now ? "?now=1" : ""}`, body);
+    const p = await api("PUT", `/projects/${encodeURIComponent(name)}`, body);
     $("editor").close();
-    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version}${now ? " to every machine" : ", one machine at a time"}`);
+    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version} to every machine`);
     refresh();
   } catch (e) {
     $("ed-error").textContent = e.message;
@@ -482,7 +478,7 @@ document.addEventListener("click", async (ev) => {
     if (act === "retry") {
       const p = await api("GET", `/projects/${name}`);
       await api("PUT", `/projects/${name}`, { compose: p.compose, files: p.files, port: p.port });
-      toast(`Retrying ${name} v${p.version}, one machine at a time`);
+      toast(`Retrying ${name} v${p.version} on every machine`);
     }
     if (act === "disable") {
       if (!confirm(`Disable ${name}? Its containers stop on every machine. Its spec and versions are kept.`)) return;

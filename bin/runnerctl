@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # runnerctl: manage projects on the runner control plane (same API as the admin portal).
-#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--now]
+#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N]
 #       add or update a project. A folder sends its compose file (if any) plus every other file in it,
 #       e.g. a Dockerfile and what it COPYs. A Dockerfile on its own becomes a one-service project.
-#       The name defaults to the folder or file name. --now updates every machine at once.
+#       The name defaults to the folder or file name. Every machine updates at once.
 #   runnerctl get <name> [version]   print a project's compose file and other files
 #   runnerctl disable|enable <name>  stop or start a project on every machine (the spec is kept)
 #   runnerctl rm <name>              delete a project and its versions
@@ -23,10 +23,10 @@ case "$cmd" in
   apply)
     [ $# -ge 1 ] || usage
     src=$1; shift
-    name="" port="" now=""
+    name="" port=""
     while [ $# -gt 0 ]; do
       case $1 in
-        --now) now="?now=1" ;;
+        --now) ;; # every deploy goes to every machine at once now; kept so old commands still work
         --port) port=${2:?--port needs a number}; shift ;;
         *) name=$1 ;;
       esac
@@ -68,7 +68,7 @@ if port:
 print(json.dumps(body))
 PY
 )
-    api "/projects/$name$now" -X PUT --data-binary "$body" | jq . ;;
+    api "/projects/$name" -X PUT --data-binary "$body" | jq . ;;
   get)
     [ $# -ge 1 ] || usage
     api "/projects/$1${2:+?version=$2}" | jq -r 'if .error then .error else

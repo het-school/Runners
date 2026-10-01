@@ -262,7 +262,7 @@ export class Control extends DurableObject {
       const [, name, action] = m;
       if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
-      if (!action && method === "PUT") return json(this.putProject(name, await body(), url.searchParams.has("now")));
+      if (!action && method === "PUT") return json(this.putProject(name, await body()));
       if (!action && method === "DELETE") return json(this.deleteProject(name));
     }
     throw new HttpError(404, "not found");
@@ -310,8 +310,8 @@ export class Control extends DurableObject {
     };
   }
 
-  // A new spec becomes a new version, which rolls out machine by machine (or everywhere at once with ?now).
-  putProject(name, body, now) {
+  // A new spec becomes a new version, which goes to every machine at once.
+  putProject(name, body) {
     if (!NAME.test(name)) throw new HttpError(400, "project names are lowercase letters, digits and dashes");
     const spec = buildSpec(body);
     const t = Date.now();
@@ -322,9 +322,9 @@ export class Control extends DurableObject {
       JSON.stringify(latest.files) === JSON.stringify(spec.files);
     let next;
     if (same) {
-      // Same spec again: that retries a stopped rollout, or (?now) pushes it to every machine.
-      if (!p.halted && !now) return { ...this.describe(p), unchanged: true };
-      next = { ...p, halted: null, rollout: now ? machines : 1, stable: now ? p.version : p.stable, updated: t };
+      // Same spec again: a no-op, unless the version hasn't reached every machine yet (then push it there).
+      if (!p.halted && p.stable === p.version && p.rollout >= machines) return { ...this.describe(p), unchanged: true };
+      next = { ...p, halted: null, rollout: machines, stable: p.version, updated: t };
     } else {
       const version = (p?.version ?? 0) + 1;
       this.sql.exec(
@@ -332,7 +332,7 @@ export class Control extends DurableObject {
         name, version, spec.compose, spec.port, JSON.stringify(spec.files), t,
       );
       next = {
-        name, version, stable: now ? version : (p?.stable ?? null), rollout: now ? machines : 1, halted: null,
+        name, version, stable: version, rollout: machines, halted: null,
         updated: t, enabled: p?.enabled ?? 1,
       };
     }
