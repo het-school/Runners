@@ -2,7 +2,7 @@
 
 A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
-The control plane doesn't know what a machine is; its agent says. An agent describes itself with a **pool** (the name of a replaceable set it belongs to: the control plane keeps each pool at its size by asking members to start replacements; or none, for a standalone host that keeps its slot across restarts), an **expiry** (when the run will be gone for certain, so its handover is scheduled from that; or none), a link and a label, and a **leaving** flag on its last check-in. The GitHub Actions agent is one pool member with a 6-hour expiry; anything else that runs the agent fits the same contract.
+The control plane doesn't know what a machine is, or how long it lives; it's told. An agent describes itself with a **pool** (the name of a replaceable set it belongs to: the control plane keeps each pool at its size by asking members to start replacements; or none, for a standalone host that keeps its slot across restarts), a link and a label, and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). On GitHub Actions that ping comes from a one-line timer in the workflow, 4h15m-5h15m into the job at random; a host could send it from a cron before maintenance, a cloud VM from its termination notice.
 
 - **Status page:** https://control.billybishop4-workers.xyz
 - **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
@@ -85,8 +85,9 @@ POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to 
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 DELETE /api/slots/<n>                           retire an empty slot beyond the GitHub count: tunnel, records and DNS names go
 GET    /api/join-token                          the token a host joins with (admin token only)
-POST   /api/join                                an agent starting up: {"agent", "pool", "expires", "url", "label", "want"} -> its slot and tunnel token
+POST   /api/join                                an agent starting up: {"agent", "pool", "url", "label", "want"} -> its slot and tunnel token
 POST   /api/claim?pool=<name>                    machines to start so the pool has its size (for a watchdog outside the pool)
+POST   /api/drain                               {"run": id} or {"machine": n}: it's going down soon, hand it over
 ```
 
 ```sh
@@ -124,13 +125,13 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - tracks machines and hands out restarts
   - keeps the DNS for `<project>-<n>` pointed at tunnel `runner-<n>`
 - **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), run by [`machine.yml`](.github/workflows/machine.yml) on every machine. It:
-  - checks in every 20 seconds, describing its machine: pool `github`, expiry at the 6-hour limit, its run page
+  - checks in every 20 seconds, describing its machine: pool `github`, its run page
   - writes each project's files and runs `docker compose up -d --build --wait`
   - removes what's no longer wanted
   - restarts projects that stop answering
   - routes `<project>-<n>` hostnames through a local Caddy router behind the tunnel
 - **Self-healing**:
-  - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime. Each run hands over up to an hour early (an offset fixed by its ID), so machines that were replaced together drift apart instead of all cycling in the same window.
+  - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime: a timer in the workflow pings the control plane 4h15m-5h15m in (at random, so machines that were replaced together drift apart).
   - If a machine dies, the others start a replacement within about 2 minutes.
   - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left.
   - [`roll.yml`](.github/workflows/roll.yml) restarts the fleet one machine at a time when the agent changes.

@@ -30,8 +30,13 @@ jobs:
           CONTROL_URL: https://control.billybishop4-workers.xyz
           CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-        # exec: the agent is the step's own process, so a cancelled run's signal reaches it and it can hand data back.
-        run: exec node agent/agent.mjs
+        run: |
+          # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down
+          # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved.
+          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
+              -H 'Content-Type: application/json' -d "{\"run\": \"$GITHUB_RUN_ID\"}" "$CONTROL_URL/api/drain" ) &
+          # exec: the agent is the step's own process, so a cancelled run's signal reaches it and it can hand data back.
+          exec node agent/agent.mjs
 
       - name: Container logs
         if: always()

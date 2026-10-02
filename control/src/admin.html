@@ -362,6 +362,7 @@ function render() {
     const hot = (status.rebalance.hot.includes(n) ? ` <span class="badge bad">hot</span>` : "") + (r?.storage === "down" ? ` <span class="badge bad">data mount down</span>` : "");
     const state = (!r ? `<span class="badge bad">down</span>`
       : r.handover ? `<span class="badge warn">starting its replacement</span>`
+      : r.draining ? `<span class="badge warn">going down soon: handing over next</span>`
       : r.ready ? `<span class="badge ok">online · ${ago(status.now - r.started)}</span>`
       : `<span class="badge warn">starting up</span>`) + hot;
     const projects = r ? Object.entries(r.projects).map(([name, s]) =>
@@ -369,7 +370,7 @@ function render() {
     machines.push(`<div class="card">
       <div class="row">
         <div class="grow"><span class="name">Machine ${n}</span>
-          ${!r ? "" : r.url ? ` <a class="meta" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : ` <span class="meta">${esc(r.label || r.id)}</span>`}${r?.pool ? ` <span class="meta">· pool ${esc(r.pool)}</span>` : r ? ` <span class="meta">· standalone</span>` : ""}${r?.expires ? ` <span class="meta">· expires in ${esc(ago(r.expires - status.now))}</span>` : ""}</div>
+          ${!r ? "" : r.url ? ` <a class="meta" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : ` <span class="meta">${esc(r.label || r.id)}</span>`}${r?.pool ? ` <span class="meta">· pool ${esc(r.pool)}</span>` : r ? ` <span class="meta">· standalone</span>` : ""}</div>
         ${state}
       </div>
       ${projects ? `<div class="dots">${projects}</div>` : ""}

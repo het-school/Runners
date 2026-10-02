@@ -5,9 +5,11 @@
 // at /api/sync. The agent describes its machine; this never knows what's behind it:
 //   pool     the name of a replaceable set it belongs to (members are started on request to keep the pool's size),
 //            or none for a standalone host that keeps its slot across restarts
-//   expires  when this run will be gone for certain (its handover is scheduled from that), or none
 //   url      what to link to for it, and a label
 //   leaving  on its last check-in, when it's going for good (its replicas are placed elsewhere at once)
+// and whatever runs the machine pings POST /api/drain when it's going down soon (a timer in the GitHub workflow,
+// a cron before maintenance, a cloud termination notice): the control plane then hands the machine over, one at a
+// time, the same way as for a requested roll. Nothing here predicts lifetimes.
 // It also keeps DNS in line: <project>-<n> points at tunnel runner-<n>, and <project> itself is served by this
 // Worker, which passes each request on to a machine where the project is healthy.
 //   /            public status page          /api/*        API, Bearer token (admin, or node for join/sync/claim)
@@ -22,8 +24,6 @@ import { STATUS_PAGE } from "./status-page.js";
 const POLL_S = 20; // how often agents check in
 const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
-const HANDOVER_LEAD_MS = 40 * 60_000; // a run that expires is handed over at least this long before then
-const HANDOVER_JITTER_MS = 60 * 60_000; // and up to this much earlier still (fixed by its ID), so machines drift apart
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
@@ -410,7 +410,7 @@ export class Control extends DurableObject {
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); // no longer used
     if (!runColumns.has("label")) this.sql.exec("ALTER TABLE runs ADD COLUMN label TEXT");
-    for (const col of ["pool TEXT", "expires INTEGER", "url TEXT"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
+    for (const col of ["pool TEXT", "url TEXT", "drain INTEGER"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
     if (!columns("agents").has("pool")) this.sql.exec("ALTER TABLE agents ADD COLUMN pool TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
     // which happen whenever Cloudflare lets the object sleep.
@@ -522,11 +522,11 @@ export class Control extends DurableObject {
     this.runs.set(r.id, r);
     r.savedSeen = r.seen;
     this.sql.exec(
-      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label, pool, expires, url)
+      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label, pool, url, drain)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET status = excluded.status, ready = excluded.ready, handover = excluded.handover,
-         retire = excluded.retire, seen = excluded.seen, label = excluded.label, pool = excluded.pool, expires = excluded.expires, url = excluded.url`,
-      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, "", r.label, r.pool ?? null, r.expires ?? null, r.url ?? null,
+         retire = excluded.retire, seen = excluded.seen, label = excluded.label, pool = excluded.pool, url = excluded.url, drain = excluded.drain`,
+      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, "", r.label, r.pool ?? null, r.url ?? null, r.drain ?? 0,
     );
   }
 
@@ -581,6 +581,7 @@ export class Control extends DurableObject {
     if (method === "POST" && route === "/join") return need(node), json(await this.join(await body()));
     if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
     if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts(url.searchParams.get("pool"), "claim", Date.now()) });
+    if (method === "POST" && route === "/drain") return need(node), json(this.drain(await body()));
     if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
     // The token a new host joins with; only with the admin token itself, never through the open portal.
     if (method === "GET" && route === "/join-token") return need(admin && !portal), json({ token: this.env.NODE_TOKEN });
@@ -1109,18 +1110,17 @@ export class Control extends DurableObject {
     const ready = body.ready ? 1 : 0;
     // How the agent describes its machine (see the top of this file).
     const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
-    const expires = Number.isFinite(Number(body.expires)) && body.expires ? Number(body.expires) : null;
     const url = typeof body.url === "string" && /^https:\/\/[^\s"<>]{1,300}$/.test(body.url) ? body.url : null;
     const label = String(body.label ?? "").slice(0, 80) || null;
     let r = this.runs.get(run);
     if (!r) {
       const agent = String(body.agent ?? run).slice(0, 100);
-      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, expires, url };
+      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, url, drain: 0 };
       this.saveRun(r);
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status) ||
-        pool !== (r.pool ?? null) || expires !== (r.expires ?? null) || url !== (r.url ?? null) || label !== (r.label ?? null);
-      Object.assign(r, { status, ready, seen: now, pool, expires, url, label });
+        pool !== (r.pool ?? null) || url !== (r.url ?? null) || label !== (r.label ?? null);
+      Object.assign(r, { status, ready, seen: now, pool, url, label });
       r.storageState = typeof body.storage === "string" ? body.storage.slice(0, 20) : undefined;
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
@@ -1158,12 +1158,28 @@ export class Control extends DurableObject {
       Object.entries(this.desiredFor(x, now)).every(([name, d]) => x.status[name]?.v === d.v && (x.status[name]?.s === "healthy" || (d.prepare && x.status[name]?.s === "prepared"))));
   }
 
-  // Ask a run to start its own replacement when its expiry is near (or a roll was requested). One machine at a
-  // time, oldest first, so at most one machine is ever changing over.
+  // "This machine is going down soon": from whatever runs it. Its handover is scheduled like a requested roll.
+  drain(body) {
+    const now = Date.now();
+    const runId = body?.run != null ? String(body.run) : null;
+    const machine = Number(body?.machine);
+    const runs = [...this.runs.values()].filter((x) => this.live(x, now) && !x.retire &&
+      ((runId && x.id === runId) || (Number.isInteger(machine) && x.machine === machine)));
+    if (!runs.length) throw new HttpError(404, "no live run matches that run or machine");
+    for (const x of runs) {
+      if (!x.drain) {
+        x.drain = now;
+        this.saveRun(x);
+      }
+    }
+    return { draining: runs.map((x) => ({ run: x.id, machine: x.machine })) };
+  }
+
+  // Ask a run to start its own replacement when it's been told it's going down (or a roll was requested). One
+  // machine at a time, oldest first, so at most one machine is ever changing over.
   wantsHandover(r, now) {
     const rollAll = Number(this.settings.get("roll") ?? 0);
-    const due = (x) => (x.expires && now > x.expires - HANDOVER_LEAD_MS - (hash(String(x.id)) % HANDOVER_JITTER_MS)) || x.started < rollAll ||
-      x.started < Number(this.settings.get(`roll_${x.machine}`) ?? 0);
+    const due = (x) => Boolean(x.drain) || x.started < rollAll || x.started < Number(this.settings.get(`roll_${x.machine}`) ?? 0);
     if (!due(r)) return false;
     const live = this.liveRuns(now);
     const hasSuccessor = (x) => live.some((y) => y.machine === x.machine && y.started > x.started);
@@ -1483,7 +1499,7 @@ export class Control extends DurableObject {
           handover: Boolean(r.handover),
           retiring: Boolean(r.retire),
           pool: r.pool ?? null,
-          expires: r.expires ?? null,
+          draining: Boolean(r.drain),
           url: r.url ?? null,
           label: r.label,
           storage: r.storageState,

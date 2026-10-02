@@ -16,8 +16,8 @@ import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
 // What this agent tells the control plane about its machine. On GitHub Actions: it's one of the "github" pool
-// (interchangeable, started on request), gone for certain at the 6-hour limit, with its run page to link to.
-// Anywhere else it's a standalone host that keeps its slot across restarts and never expires.
+// (interchangeable, started on request), with its run page to link to; the workflow's own timer tells the control
+// plane when the run is going down. Anywhere else it's a standalone host that keeps its slot across restarts.
 const github = env.GITHUB_ACTIONS === "true";
 const pool = github ? "github" : null;
 const base = github ? env.RUNNER_TEMP : (env.RUNNER_DATA ?? "/var/lib/runner");
@@ -39,7 +39,6 @@ let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, 
 let run = "";
 const describe = () => ({
   pool,
-  expires: github ? hardStop : null,
   url: github ? `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null,
   label: github ? `run ${env.GITHUB_RUN_ID}` : hostname(),
 });
