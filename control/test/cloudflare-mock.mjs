@@ -3,7 +3,7 @@ const log = [];
 let n = 0;
 http.createServer((req, res) => {
   let body = ""; req.on("data", c => body += c); req.on("end", () => {
-    const u = new URL(req.url, "http://x"); log.push(`${req.method} ${u.pathname}${u.search} ${body.slice(0,300)}`);
+    const u = new URL(req.url, "http://x"); log.push(`${req.method} ${u.pathname}${u.search} ${body.slice(0,4000)}`);
     console.log(log.at(-1));
     let result = [];
     if (u.pathname.endsWith("/cfd_tunnel") && req.method === "POST") result = { id: `tun-${JSON.parse(body).name}` };

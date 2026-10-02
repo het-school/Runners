@@ -8,6 +8,7 @@ portal would. Each prints what happened; read the output.
 control/test/placement.sh   # replicas and placement by capacity
 control/test/moves.sh       # moving replicas, evicting a machine
 control/test/rebalance.sh   # automatic rebalancing (uses a 20-second hot window)
+control/test/replicas.sh    # replica numbers, their routes and DNS names
 ```
 
 They need Node, `npx wrangler`, `jq` and `curl`, and use ports 8911 (control plane) and 8790 (mock).

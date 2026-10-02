@@ -154,7 +154,7 @@
       <tr><td><code>dockerfile</code></td><td>A Dockerfile, as text. On its own it becomes a one-service app that builds it and publishes <code>port</code>.</td></tr>
       <tr><td><code>files</code></td><td><code>{"path": "text", …}</code>: other files, next to the compose file (e.g. <code>src/main.py</code>, <code>web/Dockerfile</code>).</td></tr>
       <tr><td><code>port</code></td><td>The port the app listens on (or set <code>x-runner.port</code> in the compose file).</td></tr>
-      <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number, or <code>"all"</code>. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away.</td></tr>
+      <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number, or <code>"all"</code>. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away. Replicas are numbered from 1, and replica <i>k</i> is at <code>https://&lt;name&gt;-<i>k</i>.&lt;domain&gt;</code> whichever machine it's on; lowering the count removes the highest numbers.</td></tr>
     </table></div>
     <p class="hint">Limits: 30 files, 250 KB in all, text files only. Ports 2019 and 19080 are taken. Every <code>build:</code> needs its Dockerfile among the files.</p>
 
@@ -219,7 +219,7 @@ curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
       </div>
       <label for="ed-name">Name</label>
       <input id="ed-name" required pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app">
-      <p class="hint">Lowercase letters, digits and dashes. Machine n serves it at https://<b id="ed-host">name</b>-n.<span class="domain"></span></p>
+      <p class="hint">Lowercase letters, digits and dashes, not ending in a dash and a number. Replica k is at https://<b id="ed-host">name</b>-k.<span class="domain"></span>, whichever machine it's on.</p>
       <label for="ed-port">Port</label>
       <input id="ed-port" type="number" min="1" max="65535" placeholder="8080">
       <p class="hint">The port the project listens on, on the machine. Leave it empty to use <code>x-runner.port</code> from the compose file, or to keep the project offline.</p>
@@ -306,15 +306,18 @@ function render() {
   const STATE = { live: "ok", deploying: "warn", halted: "bad", disabled: "off" };
   $("projects").innerHTML = status.projects.map((p) => {
     const label = p.state;
-    const where = p.replicas === "all" ? status.slots : p.placed.map((x) => x.machine);
-    const dots = where.map((n) => {
-      const s = runs.get(n)?.projects[p.name];
+    // A dot per replica, linking to its URL; for "all", a dot per machine (those have only the shared URL).
+    const copies = p.replicas === "all" ? status.slots.map((n) => ({ machine: n }))
+      : Array.from({ length: p.replicas }, (_, i) => p.placed.find((x) => x.replica === i + 1 && !x.leaving) ?? { replica: i + 1 });
+    const dots = copies.map((x) => {
+      const n = x.machine;
+      const s = n != null ? runs.get(n)?.projects[p.name] : null;
       const cls = !s ? "" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
-      const why = p.placed.find((x) => x.machine === n)?.reason;
-      const title = (!s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`) + (why ? ` · placed here: ${why}` : "");
-      const inner = `${n}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
-      return p.port
-        ? `<a class="dot ${cls}" title="${esc(title)}" href="https://${esc(p.name)}-${n}.${esc(status.domain)}/" target="_blank" rel="noopener">${inner}</a>`
+      const where = n == null ? "not placed yet" : !s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`;
+      const title = (x.replica ? `replica ${x.replica} · ` : "") + where + (x.reason ? ` · placed here: ${x.reason}` : "");
+      const inner = `${x.replica ?? n}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
+      return p.port && x.replica
+        ? `<a class="dot ${cls}" title="${esc(title)}" href="https://${esc(p.name)}-${x.replica}.${esc(status.domain)}/" target="_blank" rel="noopener">${inner}</a>`
         : `<span class="dot ${cls}" title="${esc(title)}">${inner}</span>`;
     }).join("");
     return `<div class="card">
@@ -415,19 +418,21 @@ function renderDetails() {
   const label = p.state;
   const scroll = $("dt-body").scrollTop;
 
-  const where = p.replicas === "all" ? status.slots : p.placed.map((x) => x.machine);
-  const machines = where.map((n) => {
-    const r = runs.get(n);
+  // A row per copy: each replica's machine (then the old one while it moves), or every machine for "all".
+  const copies = p.replicas === "all" ? status.slots.map((n) => ({ machine: n }))
+    : Array.from({ length: p.replicas }, (_, i) => p.placed.filter((x) => x.replica === i + 1)).flatMap((xs, i) => xs.length ? xs : [{ replica: i + 1 }]);
+  const machines = copies.map((x) => {
+    const n = x.machine;
+    const r = n != null ? runs.get(n) : null;
     const s = r?.projects[p.name];
-    const why = p.placed.find((x) => x.machine === n);
     const target = !p.enabled ? null : p.halted ? p.stable : p.version;
     const cls = !s ? "off" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
-    const url = `https://${p.name}-${n}.${status.domain}/`;
-    return `<tr><td>${n}</td>
+    const url = x.replica && !x.leaving ? `https://${p.name}-${x.replica}.${status.domain}/` : null;
+    return `<tr><td>${x.replica ?? "–"}</td><td>${n ?? "–"}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
-      <td><span class="${cls}">${esc(!r ? "machine down" : s ? s.s : "not running")}</span>${why ? `<div class="meta">${why.leaving ? `moving to machine ${why.leaving.to}` : `placed ${esc(ago(status.now - why.since))} ago: ${esc(why.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
-      <td>${why && !why.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}</td>
-      <td>${p.port ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : `<span class="meta">no port</span>`}</td></tr>`;
+      <td><span class="${cls}">${esc(n == null ? "not placed yet" : !r ? "machine down" : s ? s.s : "not running")}</span>${x.since ? `<div class="meta">${x.leaving ? `moving to machine ${x.leaving.to}` : `placed ${esc(ago(status.now - x.since))} ago: ${esc(x.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
+      <td>${x.since && !x.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}</td>
+      <td>${!p.port ? `<span class="meta">no port</span>` : url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace("https://", "").replace(/\/$/, ""))}</a>` : ""}</td></tr>`;
   }).join("");
 
   const versions = spec.versions.slice().reverse().map((v) => `<tr class="pick${v.version === spec.shown ? " shown" : ""}" data-version="${v.version}">
@@ -464,8 +469,8 @@ function renderDetails() {
       </span>
     </div>
     ${files.length ? `<div class="tabs" role="tablist">${tabs}</div><pre class="code" id="dt-code"></pre>` : `<div class="card empty">No files</div>`}
-    <div class="sec">Machines</div>
-    <div class="wrap"><table class="list"><tr><th>#</th><th>Version</th><th>Status</th><th></th><th>URL</th></tr>${machines}</table></div>
+    <div class="sec">Replicas</div>
+    <div class="wrap"><table class="list"><tr><th>Replica</th><th>Machine</th><th>Version</th><th>Status</th><th></th><th>URL</th></tr>${machines}</table></div>
     <div class="sec">Versions</div>
     <div class="wrap"><table class="list"><tr><th>Version</th><th></th><th>Port</th><th>Replicas</th><th>Created</th></tr>${versions}</table></div>`;
   if (current) $("dt-code").textContent = current[1];

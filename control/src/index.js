@@ -10,8 +10,10 @@
 // and whatever runs the machine pings POST /api/drain when it's going down soon (a timer in the GitHub workflow,
 // a cron before maintenance, a cloud termination notice): the control plane then hands the machine over, one at a
 // time, the same way as for a requested roll. Nothing here predicts lifetimes.
-// It also keeps DNS in line: <project>-<n> points at tunnel runner-<n>, and <project> itself is served by this
-// Worker, which passes each request on to a machine where the project is healthy.
+// It also keeps DNS in line. The public URLs are this Worker's: <project> passes each request on to a machine where
+// the project is healthy, and <project>-<k> to the machine running replica k (replicas are numbered 1 to N and keep
+// their number when they move, so these URLs only change with the replica count). The Worker reaches machine n at
+// <project>-m<n>, which points at tunnel runner-<n>.
 //   /            public status page          /api/*        API, Bearer token (admin, or node for join/sync/claim)
 //   /admin       admin portal (open)         /admin/api/*  the project API without a token
 //   /metrics     metrics dashboard           /api/metrics  machine and app metrics (no token needed)
@@ -30,7 +32,8 @@ const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
-const SHARED_DNS = "100::"; // <project>.DOMAIN is a proxied placeholder record; the Worker route answers it
+const SHARED_DNS = "100::"; // <project>.DOMAIN and <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
+const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
 const REPLICAS_ALL = 0; // stored value of replicas: "all"
 const MAX_REPLICAS = 100;
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
@@ -198,7 +201,7 @@ function buildSpec(body) {
   return { compose, port, replicas, files: sorted };
 }
 
-// ---- shared URLs: <project>.DOMAIN goes to a machine where the project is healthy ----
+// ---- public URLs: <project>.DOMAIN goes to a machine where the project is healthy, <project>-<k> to replica k's ----
 
 let routeCache = { at: 0, data: null, pending: null };
 function healthyRoutes(env) {
@@ -224,20 +227,26 @@ function hash(s) {
   return h >>> 0;
 }
 
-async function proxy(request, env, project) {
-  const slots = (await healthyRoutes(env))[project];
-  if (!slots?.length) {
-    return new Response(`${project} isn't healthy on any machine right now\n`, { status: 503, headers: { "retry-after": "10" } });
+async function proxy(request, env, label) {
+  const routes = await healthyRoutes(env);
+  const replica = routes.replicas[label];
+  const slots = replica ?? routes.shared[label];
+  if (!slots) return new Response(`nothing is served at ${label}\n`, { status: 404 });
+  if (!slots.length) {
+    return new Response(`${label} isn't healthy on any machine right now\n`, { status: 503, headers: { "retry-after": "10" } });
   }
+  const project = replica ? label.replace(/-\d+$/, "") : label;
+  // A replica's URL has one machine (two while the replica moves, the new copy first); the shared URL keeps each
+  // visitor on one of the project's machines.
   const visitor = request.headers.get("cf-connecting-ip") ?? "";
-  const order = slots.map((n) => [n, hash(`${visitor}|${n}`)]).sort((a, b) => b[1] - a[1]).map(([n]) => n);
+  const order = replica ? slots : slots.map((n) => [n, hash(`${visitor}|${n}`)]).sort((a, b) => b[1] - a[1]).map(([n]) => n);
   // Requests without a body can try another machine when one doesn't answer.
   const retry = request.method === "GET" || request.method === "HEAD";
   const host = new URL(request.url).hostname;
   let res = null;
   for (const n of order.slice(0, retry ? 3 : 1)) {
     const url = new URL(request.url);
-    url.hostname = `${project}-${n}.${env.DOMAIN}`;
+    url.hostname = `${project}-m${n}.${env.DOMAIN}`;
     const req = new Request(url, request);
     req.headers.set("x-forwarded-host", host);
     try {
@@ -329,6 +338,7 @@ export class Control extends DurableObject {
     if (!columns("versions").has("files")) this.sql.exec("ALTER TABLE versions ADD COLUMN files TEXT");
     if (!columns("versions").has("replicas")) this.sql.exec("ALTER TABLE versions ADD COLUMN replicas INTEGER");
     if (!columns("placements").has("leaving")) this.sql.exec("ALTER TABLE placements ADD COLUMN leaving TEXT");
+    if (!columns("placements").has("replica")) this.sql.exec("ALTER TABLE placements ADD COLUMN replica INTEGER");
     const runColumns = columns("runs");
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); // no longer used
@@ -344,10 +354,24 @@ export class Control extends DurableObject {
     this.poolAsks = new Map();
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
-    this.placements = new Map(); // project -> Map(machine -> { since, reason })
+    this.placements = new Map(); // project -> Map(machine -> { since, reason, leaving, replica })
     for (const x of this.all("SELECT * FROM placements ORDER BY since")) {
       (this.placements.get(x.name) ?? this.placements.set(x.name, new Map()).get(x.name))
-        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null });
+        .set(x.machine, { since: x.since, reason: x.reason, leaving: x.leaving ? JSON.parse(x.leaving) : null, replica: x.replica });
+    }
+    // Placements from before replica numbers get theirs now; a copy being moved away shares its new copy's.
+    for (const [name, placed] of this.placements) {
+      for (const [machine, x] of placed) {
+        if (x.replica != null) continue;
+        const from = [...placed.values()].find((y) => y.leaving?.to === machine && y.replica != null);
+        x.replica = from?.replica ?? this.freeReplica(name);
+        this.savePlacement(name, machine, x);
+        const to = x.leaving && placed.get(x.leaving.to);
+        if (to && to.replica == null) {
+          to.replica = x.replica;
+          this.savePlacement(name, x.leaving.to, to);
+        }
+      }
     }
     this.bootAt = Date.now();
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
@@ -534,7 +558,8 @@ export class Control extends DurableObject {
   describe(p) {
     const latest = this.version(p.name, p.version);
     const replicas = latest?.replicas ?? 1;
-    const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x })).sort((a, b) => a.machine - b.machine);
+    const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x }))
+      .sort((a, b) => a.replica - b.replica || Boolean(a.leaving) - Boolean(b.leaving));
     const staying = placed.filter((x) => !x.leaving).length;
     return {
       name: p.name,
@@ -542,7 +567,9 @@ export class Control extends DurableObject {
       stable: p.stable,
       port: latest?.port ?? null,
       replicas: replicas === REPLICAS_ALL ? "all" : replicas,
-      placed, // the machines it's placed on (empty when replicas is "all": then it's every machine); leaving = being moved away
+      // Each replica's machine, by replica number; a copy being moved away (leaving) comes after its new copy.
+      // Empty when replicas is "all": then it's every machine.
+      placed,
       staying,
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
@@ -578,6 +605,9 @@ export class Control extends DurableObject {
   // A new spec becomes a new version, which goes to every machine at once.
   putProject(name, body) {
     if (!NAME.test(name)) throw new HttpError(400, "project names are lowercase letters, digits and dashes");
+    if (!this.projects.has(name) && NUMBERED.test(name)) {
+      throw new HttpError(400, "a project name can't end in -<number> or -m<number>: those are the URLs of its replicas and machines");
+    }
     const spec = buildSpec(body);
     const t = Date.now();
     const machines = this.expectedMachines();
@@ -705,12 +735,22 @@ export class Control extends DurableObject {
   // ---- placement ----
   // A project with N replicas runs on N machines. New replicas go to the machine with the most room: the least CPU
   // and memory in use (from its latest metrics) and the fewest projects already placed on it. A placement stays
-  // where it is until that machine is gone; then the replica moves to the best machine left.
+  // where it is until that machine is gone; then the replica moves to the best machine left. Replicas are numbered
+  // 1 to N, and a replica keeps its number (and so its URL, <project>-<k>) wherever it runs; lowering N removes the
+  // highest numbers.
 
   savePlacement(name, machine, x) {
     (this.placements.get(name) ?? this.placements.set(name, new Map()).get(name)).set(machine, x);
-    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving) VALUES (?, ?, ?, ?, ?)",
-      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null);
+    this.sql.exec("INSERT OR REPLACE INTO placements (name, machine, since, reason, leaving, replica) VALUES (?, ?, ?, ?, ?, ?)",
+      name, machine, x.since, x.reason, x.leaving ? JSON.stringify(x.leaving) : null, x.replica ?? null);
+  }
+
+  // The lowest replica number that no staying copy of the project has.
+  freeReplica(name) {
+    const used = new Set([...(this.placements.get(name)?.values() ?? [])].filter((x) => !x.leaving).map((x) => x.replica));
+    let k = 1;
+    while (used.has(k)) k++;
+    return k;
   }
 
   dropPlacement(name, machine) {
@@ -737,13 +777,14 @@ export class Control extends DurableObject {
     const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> projects placed on it
     for (const [name, placed] of this.placements) {
-      // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone.
+      // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone, nor
+      // replicas numbered above the count (it was lowered), along with any copy of theirs being moved.
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
       for (const [machine, x] of placed) {
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
         const moved = x.leaving && (up.get(x.leaving.to)?.status[name]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
-        if (!p || !p.enabled || replicas === REPLICAS_ALL || !up.has(machine) || moved) {
+        if (!p || !p.enabled || replicas === REPLICAS_ALL || x.replica > replicas || !up.has(machine) || moved) {
           this.dropPlacement(name, machine);
           changed = true;
         } else if (!x.leaving) counts.set(machine, (counts.get(machine) ?? 0) + 1);
@@ -754,21 +795,14 @@ export class Control extends DurableObject {
       const want = this.version(p.name, p.version)?.replicas ?? 1;
       if (want === REPLICAS_ALL) continue;
       const placed = this.placements.get(p.name) ?? this.placements.set(p.name, new Map()).get(p.name);
-      // Copies being moved away don't count; the move's new copy does.
-      const staying = [...placed].filter(([, x]) => !x.leaving);
-      // Too many (replicas were lowered): keep the oldest placements, and healthy ones over failed ones.
-      const extra = staying.map(([machine, x]) => ({ machine, x, healthy: up.get(machine)?.status[p.name]?.s === "healthy" }))
-        .sort((a, b) => a.healthy - b.healthy || b.x.since - a.x.since).slice(0, Math.max(0, staying.length - want));
-      for (const { machine } of extra) {
-        this.dropPlacement(p.name, machine);
-        counts.set(machine, counts.get(machine) - 1);
-        changed = true;
-      }
-      // Too few: the machines with the most room, ready ones first.
-      for (let n = staying.length - extra.length; n < want && arrived; n++) {
+      // Each number from 1 to the count needs a copy that's staying: a move's new copy counts, its old one doesn't.
+      // Missing ones go to the machines with the most room, ready ones first.
+      const have = new Set([...placed.values()].filter((x) => !x.leaving).map((x) => x.replica));
+      for (let k = 1; k <= want && arrived; k++) {
+        if (have.has(k)) continue;
         const best = this.bestMachine(p.name, up, counts, now);
         if (!best) break; // every machine already has one; the rest get placed when machines show up
-        this.savePlacement(p.name, best.machine, { since: now, reason: best.reason, leaving: null });
+        this.savePlacement(p.name, best.machine, { since: now, reason: best.reason, leaving: null, replica: k });
         counts.set(best.machine, (counts.get(best.machine) ?? 0) + 1);
         changed = true;
       }
@@ -817,7 +851,7 @@ export class Control extends DurableObject {
       if (!best) throw new HttpError(409, `no other machine is up for ${name}`);
       dest = { machine: best.machine, reason: `moved here from machine ${from}: ${best.reason}` };
     }
-    this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null });
+    this.savePlacement(name, dest.machine, { since: now, reason: dest.reason, leaving: null, replica: x.replica });
     this.savePlacement(name, from, { ...x, leaving: { to: dest.machine, at: now } });
     return this.describe(p);
   }
@@ -1137,7 +1171,7 @@ export class Control extends DurableObject {
     if (this.liveRuns(now).some((r) => r.machine === n)) throw new HttpError(409, `machine ${n} is still up; stop it first`);
     const slot = this.slots.get(n);
     if (slot) {
-      // Its <project>-n names first: the regular DNS sync only touches records of tunnels it still knows.
+      // Its <project>-m<n> names first: the regular DNS sync only touches records of tunnels it still knows.
       const records = (await this.cf(`/zones/${this.env.ZONE}/dns_records?type=CNAME&content=${slot.tunnel}.cfargotunnel.com&per_page=1000`)).result;
       if (records.length) await this.cf(`/zones/${this.env.ZONE}/dns_records/batch`, { method: "POST", body: JSON.stringify({ deletes: records.map((r) => ({ id: r.id })) }) });
       await this.cf(`/accounts/${this.env.ACCOUNT_ID}/cfd_tunnel/${slot.tunnel}?cascade=true`, { method: "DELETE" });
@@ -1157,19 +1191,29 @@ export class Control extends DurableObject {
     return { retired: n, tunnel: slot?.tunnel ?? null };
   }
 
-  // For the shared URLs: project -> slots whose current run is online, should run it, and has it healthy.
+  // For the public URLs, the machines each may go to: those whose current run is online, should run the project, and
+  // has it healthy. shared: project -> its machines; replicas: "<project>-<k>" -> replica k's machine, plus the old
+  // copy while it's being moved, after the new one. Disabled projects are there with no machines.
   // (A machine keeps reporting a project healthy for a moment after it's told to remove it.)
   healthyRoutes(now) {
     const newest = new Map();
     for (const r of this.liveRuns(now)) {
       if (r.ready && (newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
     }
-    const out = {};
+    const healthy = (name, machine) => newest.get(machine)?.status[name]?.s === "healthy";
+    const shared = {};
+    const replicas = {};
     for (const p of this.projects.values()) {
-      if (!p.enabled || !this.version(p.name, p.version)?.port) continue;
-      out[p.name] = [...newest.values()].filter((r) => this.runsOn(p.name, r.machine) && r.status[p.name]?.s === "healthy").map((r) => r.machine);
+      const spec = this.version(p.name, p.version);
+      if (!spec?.port) continue;
+      shared[p.name] = p.enabled ? [...newest.keys()].filter((m) => this.runsOn(p.name, m) && healthy(p.name, m)) : [];
+      if (spec.replicas === REPLICAS_ALL) continue;
+      for (let k = 1; k <= spec.replicas; k++) replicas[`${p.name}-${k}`] = [];
+      if (!p.enabled) continue;
+      const copies = [...(this.placements.get(p.name) ?? [])].sort(([, a], [, b]) => Boolean(a.leaving) - Boolean(b.leaving));
+      for (const [machine, x] of copies) if (healthy(p.name, machine)) replicas[`${p.name}-${x.replica}`]?.push(machine);
     }
-    return out;
+    return { shared, replicas };
   }
 
   cleanup(now) {
@@ -1337,9 +1381,10 @@ export class Control extends DurableObject {
   }
 
   // ---- DNS and routes ----
-  // <project>-<n>.DOMAIN -> tunnel runner-<n> for every slot that has a tunnel, and <project>.DOMAIN -> this Worker
-  // (a proxied placeholder record plus a Worker route), for every project with a port. Disabled projects keep theirs,
-  // so turning one back on is instant. Names already used by records that aren't ours are left alone.
+  // For every project with a port: <project>.DOMAIN and <project>-<k>.DOMAIN (k from 1 to its replica count) -> this
+  // Worker (a proxied placeholder record plus a Worker route), and <project>-m<n>.DOMAIN -> tunnel runner-<n> for every
+  // slot that has a tunnel, which is how the Worker reaches machine n. Disabled projects keep theirs, so turning one
+  // back on is instant. Names already used by records that aren't ours are left alone.
 
   scheduleDns() {
     this.dnsDue = Date.now() + 2_000;
@@ -1369,12 +1414,15 @@ export class Control extends DurableObject {
     const tunnelOf = new Map([...this.slots.values()].map((x) => [x.n, `${x.tunnel}.cfargotunnel.com`]));
     const ours = new Set(tunnelOf.values());
     const want = new Map(); // name -> CNAME target
-    const shared = new Set(); // <project>.DOMAIN
+    const shared = new Set(); // names this Worker answers: <project>.DOMAIN and <project>-<k>.DOMAIN
     for (const p of this.projects.values()) {
-      const port = this.version(p.name, p.version)?.port ?? (p.stable != null ? this.version(p.name, p.stable)?.port : null);
+      const spec = this.version(p.name, p.version);
+      const port = spec?.port ?? (p.stable != null ? this.version(p.name, p.stable)?.port : null);
       if (!port) continue;
       shared.add(`${p.name}.${domain}`);
-      for (const [n, target] of tunnelOf) want.set(`${p.name}-${n}.${domain}`, target);
+      const replicas = spec?.replicas ?? 1;
+      for (let k = 1; replicas !== REPLICAS_ALL && k <= replicas; k++) shared.add(`${p.name}-${k}.${domain}`);
+      for (const [n, target] of tunnelOf) want.set(`${p.name}-m${n}.${domain}`, target);
     }
     const existing = [];
     for (let page = 1; ; page++) {
@@ -1383,33 +1431,39 @@ export class Control extends DurableObject {
       if (page >= (data.result_info?.total_pages ?? 1)) break;
     }
     const isShared = (r) => r.type === "AAAA" && r.content === SHARED_DNS && r.comment === "hetp4401/runner";
+    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isShared(r) && !shared.has(r.name)));
+    // Records on their way out don't keep a name from being used (machine n's old <project>-<n> becomes replica n's).
+    const gone = new Set(deletes.map((r) => r.id));
     const byName = new Map();
-    for (const r of existing) (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(r);
+    for (const r of existing) if (!gone.has(r.id)) (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(r);
     const notes = [];
-    const batch = { deletes: [], posts: [], patches: [] };
-    for (const r of existing) {
-      if ((r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isShared(r) && !shared.has(r.name))) batch.deletes.push({ id: r.id });
-    }
+    const posts = [];
+    const patches = [];
     for (const [name, content] of want) {
       const rs = byName.get(name) ?? [];
       const r = rs.find((x) => x.type === "CNAME");
-      if (!rs.length) batch.posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
-      else if (r && r.content !== content && ours.has(r.content)) batch.patches.push({ id: r.id, content });
+      if (!rs.length) posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
+      else if (r && r.content !== content && ours.has(r.content)) patches.push({ id: r.id, content });
     }
-    const servable = new Set(); // shared names this Worker may answer
+    const servable = new Set(); // names this Worker may answer
     for (const name of shared) {
       const rs = byName.get(name) ?? [];
-      if (!rs.length) batch.posts.push({ type: "AAAA", name, content: SHARED_DNS, proxied: true, comment: "hetp4401/runner" });
+      if (!rs.length) posts.push({ type: "AAAA", name, content: SHARED_DNS, proxied: true, comment: "hetp4401/runner" });
       else if (!rs.every(isShared)) {
-        notes.push(`${name} is already used by another DNS record, so it isn't a shared URL`);
+        notes.push(`${name} is already used by another DNS record, so this Worker doesn't answer it`);
         continue;
       }
       servable.add(name);
     }
-    if (batch.deletes.length || batch.posts.length || batch.patches.length) {
+    // At most 100 changes per batch (the free plan's limit is 200), deletes first; a batch applies its own deletes
+    // before its posts, and nothing at all if one change fails.
+    const ops = [...deletes.map((r) => ["deletes", { id: r.id }]), ...patches.map((x) => ["patches", x]), ...posts.map((x) => ["posts", x])];
+    for (let i = 0; i < ops.length; i += 100) {
+      const batch = {};
+      for (const [kind, x] of ops.slice(i, i + 100)) (batch[kind] ??= []).push(x);
       await this.cf(`/zones/${zone}/dns_records/batch`, { method: "POST", body: JSON.stringify(batch) });
     }
-    // Worker routes for the shared names.
+    // Worker routes for the names it answers.
     const script = this.env.SCRIPT_NAME ?? "runner-control";
     const routes = (await this.cf(`/zones/${zone}/workers/routes`)).result;
     const mine = new RegExp(`^[a-z0-9-]+\\.${domain.replace(/\./g, "\\.")}/\\*$`);

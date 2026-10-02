@@ -12,7 +12,7 @@ put() { curl -s -X PUT $B/api/projects/$1 -H "$A" -H content-type:application/js
 join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"github\",\"want\":$2}" >/dev/null; }
 # sync machine run cpu mem [statusjson]
 sync() { curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$1,\"run\":\"$2\",\"agent\":\"gh-$2\",\"pool\":\"github\",\"started\":$START,\"ready\":true,\"status\":${5:-{\}},\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":$3,\"memUsed\":$4,\"memTotal\":100},\"a\":{}}}}" | jq -c '{m:'$1', desired:(.desired|keys)}'; }
-show() { curl -s $B/api/status | jq -c '.projects[] | {name, staying, placed:[.placed[] | "\(.machine)\(if .leaving then " (leaving→\(.leaving.to))" else "" end)"]}'; }
+show() { curl -s $B/api/status | jq -c '.projects[] | {name, staying, placed:[.placed[] | "r\(.replica)@\(.machine)\(if .leaving then " (leaving→\(.leaving.to))" else "" end)"]}'; }
 put web '{"port":8080,"dockerfile":"FROM x","replicas":1}'
 join a 1; join b 2; join c 3
 sync 1 r1 80 80 >/dev/null; sync 2 r2 5 20 >/dev/null; sync 3 r3 30 40 >/dev/null

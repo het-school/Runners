@@ -89,6 +89,7 @@ PY
       "Projects:",
       (.projects[] | "  \(.name)  v\(.version)  \(.state)"
         + (if .state == "rolling out" then " (\(.rollout)/\(.machines))" else "" end)
+        + (if (.placed | length) > 0 then "  replicas: " + ([.placed[] | select(.leaving | not) | "\(.replica)→#\(.machine)"] | join(" ")) else "" end)
         + (if (.files | length) > 0 then "  [builds: \(.files | join(", "))]" else "" end)
         + (if .halted then "\n    \(.halted)" else "" end)),
       "Machines: \([.runs[] | select(.live and (.retiring | not)) | .machine] | unique | length) of \(.expected) up",

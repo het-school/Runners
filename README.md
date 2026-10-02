@@ -15,7 +15,7 @@ The control plane doesn't know what a machine is, or how long it lives; it's tol
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (default 1), or `all`. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine), and machine *n* also serves it at `https://<project>-<n>.billybishop4-workers.xyz`. That port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (default 1), or `all`. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine). Replicas are numbered from 1, and replica *k* is also at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does (`all` projects have only the shared URL). The port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
@@ -33,13 +33,13 @@ A project is a docker compose file, optionally with Dockerfiles and other files 
 - **Dockerfile only:** a custom image. The control plane wraps it in a one-service compose file (`build: .`) that publishes the port. The app should listen on that port.
 - **Compose plus files:** files sit next to the compose file, so `build: .` or `build: ./web` (with `web/Dockerfile`) find them. You can also include whatever the Dockerfiles `COPY`, as long as it's text. Every machine builds the image when the version changes.
 
-The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, and file paths must stay inside the project. Ports 2019 and 19080 are taken by the router.
+Project names are lowercase letters, digits and dashes, and can't end in `-<number>` or `-m<number>` (those are replica and machine URLs). The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, and file paths must stay inside the project. Ports 2019 and 19080 are taken by the router.
 
 ### Placement
 
-Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
+Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute, keeping its number and URL. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
 
-Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. Projects set to `all` never move. The portal lists what moved and why. Lowering the count removes the newest placements first; raising it adds more. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
+Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. Projects set to `all` never move. The portal lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
 
 ### Rollouts
 
@@ -92,7 +92,7 @@ Any Linux machine with Docker can join. Get the token with `runnerctl join-token
 curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
 ```
 
-It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker rm -f runner-agent tunnel router`, then retire its slot from the portal or with `runnerctl retire <n>` so its tunnel and `<app>-n` names go too.
+It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker rm -f runner-agent tunnel router`, then retire its slot from the portal or with `runnerctl retire <n>` so its tunnel and `<app>-m<n>` names go too.
 
 ## How it works
 
@@ -101,13 +101,13 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - places each project's replicas on the machines with the most room, and moves them when a machine goes
   - runs the rollouts
   - tracks machines and hands out restarts
-  - keeps the DNS for `<project>-<n>` pointed at tunnel `runner-<n>`
+  - keeps the DNS in line: `<project>` and `<project>-<k>` are answered by the Worker, which reaches machine *n* at `<project>-m<n>`, pointed at tunnel `runner-<n>`
 - **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), run by [`machine.yml`](.github/workflows/machine.yml) on every machine. It:
   - checks in every 20 seconds, describing its machine: pool `github`, its run page
   - writes each project's files and runs `docker compose up -d --build --wait`
   - removes what's no longer wanted
   - restarts projects that stop answering
-  - routes `<project>-<n>` hostnames through a local Caddy router behind the tunnel
+  - routes `<project>-m<n>` hostnames through a local Caddy router behind the tunnel
 - **Self-healing**:
   - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime: a timer in the workflow pings the control plane 4h15m-5h15m in (at random, so machines that were replaced together drift apart).
   - If a machine dies, the others start a replacement within about 2 minutes.

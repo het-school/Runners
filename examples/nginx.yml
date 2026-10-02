@@ -1,4 +1,4 @@
-# Stock nginx serving its default welcome page, at https://nginx-<n>.billybishop4-workers.xyz.
+# Stock nginx serving its default welcome page, at https://nginx.billybishop4-workers.xyz.
 x-runner:
   port: 8080
 services:
