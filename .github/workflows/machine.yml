@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 360 # GitHub's limit; the agent leaves at about 355 minutes
     steps:
       - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.AGENT_REPO || github.repository }} # another account's copy runs this repo's agent (README: Another GitHub account)
 
       - name: Agent
         env:
@@ -37,7 +39,7 @@ jobs:
           # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved.
           ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
               -H 'Content-Type: application/json' -d "{\"run\": \"$GITHUB_RUN_ID\"}" "$CONTROL_URL/api/drain" ) &
-          # exec: the agent is the step's own process, so a cancelled run's signal reaches it and it can hand data back.
+          # exec: the agent is the step's own process, so a cancelled run's signal reaches it and it can say it's leaving.
           exec node agent/agent.mjs
 
       - name: Container logs

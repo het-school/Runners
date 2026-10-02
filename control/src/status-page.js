@@ -55,7 +55,7 @@ async function load() {
       const links = p.port ? '<a href="https://' + p.name + "." + d.domain + '/" target="_blank"><b>' + esc(p.name) + "." + d.domain + "</b></a> " +
         (p.replicas === "all" ? d.slots : p.placed.map((x) => x.machine)).map((n) => '<a href="https://' + p.name + "-" + n + "." + d.domain + '/" target="_blank">' + n + "</a>").join("") : '<span class="muted">no port</span>';
       return "<tr><td><b>" + esc(p.name) + "</b></td><td>v" + p.version + (p.stable && p.stable !== p.version ? ' <span class="muted">(v' + p.stable + " elsewhere)</span>" : "") +
-        "</td><td>" + (p.replicas === "all" ? "every machine" : p.placed.length + " of " + p.replicas) + (p.stateful ? ' <span class="muted">stateful</span>' : "") + "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
+        "</td><td>" + (p.replicas === "all" ? "every machine" : p.placed.length + " of " + p.replicas) + "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="muted">No projects yet</td></tr>');
   document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run or host</th><th>State</th><th>Projects</th></tr>" +
     (d.runs.map((r) => {
