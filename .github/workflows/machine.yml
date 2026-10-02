@@ -27,6 +27,8 @@ jobs:
       - name: Agent
         env:
           MACHINE: ${{ inputs.machine }}
+          POOL: ${{ vars.POOL || 'github' }} # this repo's pool on the control plane (set the POOL variable in a second account's copy)
+          POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
           CONTROL_URL: https://control.billybishop4-workers.xyz
           CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
           GH_TOKEN: ${{ github.token }}

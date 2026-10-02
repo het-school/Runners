@@ -15,11 +15,11 @@ import { basename, dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
-// What this agent tells the control plane about its machine. On GitHub Actions: it's one of the "github" pool
-// (interchangeable, started on request), with its run page to link to; the workflow's own timer tells the control
+// What this agent tells the control plane about its machine. On GitHub Actions: it's one of the POOL pool ("github"
+// unless the repo sets the POOL variable, so another account's copy of this repo is its own pool) (interchangeable, started on request), with its run page to link to; the workflow's own timer tells the control
 // plane when the run is going down. Anywhere else it's a standalone host that keeps its slot across restarts.
 const github = env.GITHUB_ACTIONS === "true";
-const pool = github ? "github" : null;
+const pool = github ? env.POOL || "github" : null;
 const base = github ? env.RUNNER_TEMP : (env.RUNNER_DATA ?? "/var/lib/runner");
 const started = Date.now();
 const hardStop = github ? started + 355 * 60_000 : Infinity; // leave before GitHub kills the job at 6 hours
@@ -39,6 +39,7 @@ let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, 
 let run = "";
 const describe = () => ({
   pool,
+  poolSize: pool && env.POOL_SIZE ? Number(env.POOL_SIZE) : undefined, // how many machines the pool should have
   url: github ? `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null,
   label: github ? `run ${env.GITHUB_RUN_ID}` : hostname(),
 });

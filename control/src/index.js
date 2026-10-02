@@ -417,6 +417,8 @@ export class Control extends DurableObject {
     this.projects = new Map(this.all("SELECT * FROM projects").map((p) => [p.name, p]));
     this.runs = new Map(this.all("SELECT * FROM runs").map((r) => [r.id, { ...r, status: JSON.parse(r.status), savedSeen: r.seen }]));
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
+    this.startPools = new Map();
+    this.poolAsks = new Map();
     this.settings = new Map(this.all("SELECT key, value FROM settings").map((s) => [s.key, s.value]));
     this.versions = new Map(); // "name@version" -> { compose, port, files }
     this.placements = new Map(); // project -> Map(machine -> { since, reason })
@@ -467,12 +469,20 @@ export class Control extends DurableObject {
     );
   }
 
-  // Pools and how many machines each should have running: the POOLS setting (JSON), with the var as the default.
+  // Pools and how many machines each should have running. Any pool can join: its members (and whatever watches it,
+  // through /api/claim) say how big it should be. The POOLS setting (portal, runnerctl pool) overrides that, and the
+  // POOLS var is the default for a pool nobody has given a size for.
   pools() {
     const fromEnv = typeof this.env.POOLS === "string" ? JSON.parse(this.env.POOLS || "{}") : this.env.POOLS ?? {};
-    const out = { ...fromEnv, ...JSON.parse(this.settings.get("pools") ?? "{}") };
-    for (const r of this.runs.values()) if (r.pool && !(r.pool in out)) out[r.pool] = 0; // pools that showed up on their own
+    const out = { ...fromEnv, ...Object.fromEntries(this.poolAsks), ...JSON.parse(this.settings.get("pools") ?? "{}") };
+    for (const r of this.runs.values()) if (r.pool && !(r.pool in out)) out[r.pool] = 0; // pools that showed up without a size
     return out;
+  }
+
+  // A pool's size as its joiners give it (kept in memory: members re-send it with every check-in).
+  askPoolSize(pool, size) {
+    const n = Number(size);
+    if (pool && size != null && size !== "" && Number.isInteger(n) && n >= 0 && n <= this.maxSlots()) this.poolAsks.set(pool, n);
   }
 
   poolSize(pool) {
@@ -530,8 +540,9 @@ export class Control extends DurableObject {
     );
   }
 
-  markStart(machine, at, by) {
+  markStart(machine, at, by, pool) {
     this.starts.set(machine, at);
+    this.startPools.set(machine, pool); // in memory only: after a restart claims wait for runs to re-identify anyway
     this.sql.exec(
       "INSERT INTO starts (machine, at, by) VALUES (?, ?, ?) ON CONFLICT (machine) DO UPDATE SET at = excluded.at, by = excluded.by",
       machine, at, by,
@@ -580,7 +591,12 @@ export class Control extends DurableObject {
     if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
     if (method === "POST" && route === "/join") return need(node), json(await this.join(await body()));
     if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
-    if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts(url.searchParams.get("pool"), "claim", Date.now()) });
+    if (method === "POST" && route === "/claim") {
+      need(node);
+      const pool = url.searchParams.get("pool");
+      this.askPoolSize(pool, url.searchParams.get("size"));
+      return json({ start: this.claimStarts(pool, "claim", Date.now()) });
+    }
     if (method === "POST" && route === "/drain") return need(node), json(this.drain(await body()));
     if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
     // The token a new host joins with; only with the admin token itself, never through the open portal.
@@ -1112,6 +1128,7 @@ export class Control extends DurableObject {
     const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
     const url = typeof body.url === "string" && /^https:\/\/[^\s"<>]{1,300}$/.test(body.url) ? body.url : null;
     const label = String(body.label ?? "").slice(0, 80) || null;
+    this.askPoolSize(pool, body.poolSize);
     let r = this.runs.get(run);
     if (!r) {
       const agent = String(body.agent ?? run).slice(0, 100);
@@ -1203,12 +1220,14 @@ export class Control extends DurableObject {
     // start a whole pool's worth of extras. Give them a couple of check-ins (a cold start has no live runs to wait for).
     if (now - this.bootAt < 2 * LIVE_MS && live.some((x) => now - x.seen > now - this.bootAt)) return [];
     const members = new Set(live.filter((x) => x.pool === pool).map((x) => x.machine));
-    const starting = [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !live.some((x) => x.machine === n)).length;
+    // Only this pool's starts count (a start from before a restart, pool unknown, counts for every pool).
+    const starting = [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !live.some((x) => x.machine === n) &&
+      (this.startPools.get(n) ?? pool) === pool).length;
     const out = [];
     for (let missing = this.poolSize(pool) - members.size - starting; missing > 0; missing--) {
       const n = this.freeSlot(now, null);
       if (!n) break;
-      this.markStart(n, now, by);
+      this.markStart(n, now, by, pool);
       out.push(n);
     }
     return out;
