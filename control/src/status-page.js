@@ -52,12 +52,12 @@ async function load() {
       const state = p.state === "live" ? '<span class="ok">live</span>'
         : p.state === "halted" ? '<span class="bad">halted, every machine is back on v' + esc(p.stable ?? "-") + '</span><div class="err">' + esc(p.halted) + "</div>"
         : '<span class="warn">deploying</span>';
-      // The shared URL, then each replica's (replica k keeps its URL wherever it runs; "all" has only the shared one).
-      const replicas = p.replicas === "all" ? [] : Array.from({ length: p.replicas }, (_, i) => i + 1);
+      // The shared URL, then each replica's (replica k keeps its URL wherever it runs).
+      const replicas = Array.from({ length: p.replicas }, (_, i) => i + 1);
       const links = p.port ? '<a href="https://' + p.name + "." + d.domain + '/" target="_blank"><b>' + esc(p.name) + "." + d.domain + "</b></a> " +
         replicas.map((k) => '<a href="https://' + p.name + "-" + k + "." + d.domain + '/" target="_blank">' + k + "</a>").join("") : '<span class="muted">no port</span>';
       return "<tr><td><b>" + esc(p.name) + "</b></td><td>v" + p.version + (p.stable && p.stable !== p.version ? ' <span class="muted">(v' + p.stable + " elsewhere)</span>" : "") +
-        "</td><td>" + (p.replicas === "all" ? "every machine" : p.placed.length + " of " + p.replicas) + "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
+        "</td><td>" + p.staying + " of " + p.replicas + "</td><td>" + state + '</td><td class="links">' + links + "</td></tr>";
     }).join("") || '<tr><td colspan="5" class="muted">No projects yet</td></tr>');
   document.getElementById("machines").innerHTML = "<tr><th>Machine</th><th>Run or host</th><th>State</th><th>Projects</th></tr>" +
     (d.runs.map((r) => {

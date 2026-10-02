@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # runnerctl: manage projects on the runner control plane (same API as the admin portal).
-#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--replicas N|all]
+#   runnerctl apply <folder|compose.yml|Dockerfile> [name] [--port N] [--replicas N]
 #       add or update a project. A folder sends its compose file (if any) plus every other file in it,
 #       e.g. a Dockerfile and what it COPYs. A Dockerfile on its own becomes a one-service project.
 #       The name defaults to the folder or file name. Every machine updates at once.
@@ -33,7 +33,7 @@ case "$cmd" in
       case $1 in
         --now) ;; # every deploy goes to every machine at once now; kept so old commands still work
         --port) port=${2:?--port needs a number}; shift ;;
-        --replicas) replicas=${2:?--replicas needs a number or all}; shift ;;
+        --replicas) replicas=${2:?--replicas needs a number}; shift ;;
         *) name=$1 ;;
       esac
       shift
@@ -72,7 +72,7 @@ else:
 if port:
     body["port"] = int(port)
 if replicas:
-    body["replicas"] = "all" if replicas == "all" else int(replicas)
+    body["replicas"] = int(replicas) if replicas.isdigit() else replicas  # the control plane explains a bad value
 print(json.dumps(body))
 PY
 )

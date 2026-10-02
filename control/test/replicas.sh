@@ -3,10 +3,10 @@
 # highest go when N is lowered. The Worker's routes and the DNS names follow the numbers, not the machines.
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
-for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
+. "$HERE/stop.sh"
 rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":4}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":4}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
 A='authorization: Bearer adm'
@@ -37,9 +37,9 @@ echo "-- the new copy reports healthy: the old one is dropped and the URL follow
 m=$(machineOf 1)
 echo "== machine $m leaves for good and machine 5 joins the pool: replica 1 goes to the best machine, same number:"
 join e 5; MACHINES=$(echo 1 2 3 4 5 | tr ' ' '\n' | grep -vx "$m" | tr '\n' ' '); sync $m true; tick; tick; show; routes
-echo "== names that end like replica or machine URLs are refused:"; put web-2 '{"port":8080,"dockerfile":"FROM x"}'; put web-m3 '{"port":8080,"dockerfile":"FROM x"}'
+echo "== names that end like replica or machine URLs are refused, and replicas is only a number:"; put web-2 '{"port":8080,"dockerfile":"FROM x"}'; put web-m3 '{"port":8080,"dockerfile":"FROM x"}'; put web '{"port":8080,"dockerfile":"FROM x","replicas":"all"}'
 echo "== up to 2 again; DNS: replica names are Worker placeholders and routes, machine names are web-m<n>:"; put web '{"port":8080,"dockerfile":"FROM x","replicas":2}'; tick; sleep 4
 grep "^POST .*dns_records/batch" /tmp/runner-test-mock.log | tail -1 | jq -Rr 'sub("^POST [^ ]* "; "") | fromjson | to_entries[] | "   \(.key): \([.value[] | "\(.type) \(.name | sub("\\.billybishop4-workers\\.xyz"; ""))"] | join(", "))"'
 echo "   routes added: $(grep "^POST .*workers/routes" /tmp/runner-test-mock.log | tail -3 | grep -o '"pattern":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')"
 grep -i "error\|exception" /tmp/runner-test-dev.log | grep -v "Cloudflare API" | head -5
-for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
+. "$HERE/stop.sh"

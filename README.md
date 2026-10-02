@@ -15,7 +15,7 @@ The control plane doesn't know what a machine is, or how long it lives; it's tol
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (default 1), or `all`. It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine). Replicas are numbered from 1, and replica *k* is also at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does (`all` projects have only the shared URL). The port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (from 1 to 100, default 1). It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine). Replicas are numbered from 1, and replica *k* is also at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does. The port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
@@ -39,7 +39,7 @@ Project names are lowercase letters, digits and dashes, and can't end in `-<numb
 
 Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute, keeping its number and URL. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
 
-Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. Projects set to `all` never move. The portal lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. With `replicas: all` the project runs on every machine, placed or not. The portal shows where each replica landed and why.
+Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. The portal lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. Each replica is on a different machine, so more replicas than machines leave the extra ones waiting (their URLs answer 503 until a machine joins). The portal shows where each replica landed and why.
 
 ### Rollouts
 
@@ -53,7 +53,7 @@ The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with 
 GET    /api/status                              projects and machines (no token needed)
 GET    /api/metrics?range=1h|6h|24h|7d|30d      metrics columns per machine and app, plus live samples (no token needed)
 PUT    /api/projects/<name>                     create or update: {"compose": "...", "dockerfile": "...", "files": {"path": "text"},
-                                                "port": 8080, "replicas": 3 | "all"}  (compose or dockerfile required)
+                                                "port": 8080, "replicas": 3}  (compose or dockerfile required)
 GET    /api/projects/<name>[?version=N]         a version's compose file, files and port, plus the version list
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions

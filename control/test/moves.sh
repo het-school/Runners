@@ -1,10 +1,10 @@
 #!/bin/bash
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
-for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
+. "$HERE/stop.sh"
 rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":3}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":3}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
 A='authorization: Bearer adm'
@@ -25,4 +25,4 @@ echo "-- move while moving is refused:"; curl -s -X POST "$B/api/projects/web/mo
 echo "== evict machine 1 (web's new copy is there, not yet healthy; still moves):"; curl -s -X POST "$B/api/machines/1/evict" -H "$A" | jq -c .
 show
 echo "== portal can't move:"; curl -s -o /dev/null -w "%{http_code}\n" -X POST "$B/admin/api/machines/1/evict" -H 'origin: http://localhost:8911'
-for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
+. "$HERE/stop.sh"

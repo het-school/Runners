@@ -138,7 +138,7 @@
     <ol>
       <li>Click <b>New project</b> at the top.</li>
       <li><b>Name:</b> lowercase letters, digits and dashes, such as <code>my-app</code>.</li>
-      <li><b>Replicas:</b> how many machines should run it (default 1), or <code>all</code>. The control plane picks the machines with the most free CPU and memory.</li>
+      <li><b>Replicas:</b> how many machines should run it (default 1). The control plane picks the machines with the most free CPU and memory.</li>
       <li><b>Port:</b> the port your app listens on. You can leave it empty if the compose file sets <code>x-runner.port</code>; with no port the app runs but isn't reachable from outside.</li>
       <li>Paste a <b>Docker Compose</b> file, a <b>Dockerfile</b>, or both. Use <b>Add a file</b> for anything the Dockerfile <code>COPY</code>s (source files, configs).</li>
       <li>Click <b>Deploy</b>. The dots on the project card turn green as each machine reports healthy. A red dot shows the error; fix it and deploy again.</li>
@@ -154,7 +154,7 @@
       <tr><td><code>dockerfile</code></td><td>A Dockerfile, as text. On its own it becomes a one-service app that builds it and publishes <code>port</code>.</td></tr>
       <tr><td><code>files</code></td><td><code>{"path": "text", …}</code>: other files, next to the compose file (e.g. <code>src/main.py</code>, <code>web/Dockerfile</code>).</td></tr>
       <tr><td><code>port</code></td><td>The port the app listens on (or set <code>x-runner.port</code> in the compose file).</td></tr>
-      <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number, or <code>"all"</code>. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away. Replicas are numbered from 1, and replica <i>k</i> is at <code>https://&lt;name&gt;-<i>k</i>.&lt;domain&gt;</code> whichever machine it's on; lowering the count removes the highest numbers.</td></tr>
+      <tr><td><code>replicas</code></td><td>How many machines run it (or <code>x-runner.replicas</code>): a number from 1 to 100. Default 1. Each replica is placed on the machine with the most room and stays there until that machine goes away. Replicas are numbered from 1, and replica <i>k</i> is at <code>https://&lt;name&gt;-<i>k</i>.&lt;domain&gt;</code> whichever machine it's on; lowering the count removes the highest numbers.</td></tr>
     </table></div>
     <p class="hint">Limits: 30 files, 250 KB in all, text files only. Ports 2019 and 19080 are taken. Every <code>build:</code> needs its Dockerfile among the files.</p>
 
@@ -224,8 +224,8 @@ curl -X DELETE $B/projects/my-app        # delete it and all its versions</pre>
       <input id="ed-port" type="number" min="1" max="65535" placeholder="8080">
       <p class="hint">The port the project listens on, on the machine. Leave it empty to use <code>x-runner.port</code> from the compose file, or to keep the project offline.</p>
       <label for="ed-replicas">Replicas</label>
-      <input id="ed-replicas" placeholder="1" pattern="all|[0-9]{1,3}" autocomplete="off" style="width:90px">
-      <p class="hint">How many machines run it: a number, or <code>all</code> for every machine. Each replica goes to the machine with the most room; the shared URL spreads visitors across them.</p>
+      <input id="ed-replicas" placeholder="1" pattern="[0-9]{1,3}" inputmode="numeric" autocomplete="off" style="width:90px">
+      <p class="hint">How many machines run it, from 1 to 100. Each replica goes to the machine with the most room; the shared URL spreads visitors across them.</p>
       <label for="ed-compose">Docker Compose</label>
       <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
       <p class="hint">Optional when there's a Dockerfile: one service is made that builds it and publishes the port.</p>
@@ -306,17 +306,16 @@ function render() {
   const STATE = { live: "ok", deploying: "warn", halted: "bad", disabled: "off" };
   $("projects").innerHTML = status.projects.map((p) => {
     const label = p.state;
-    // A dot per replica, linking to its URL; for "all", a dot per machine (those have only the shared URL).
-    const copies = p.replicas === "all" ? status.slots.map((n) => ({ machine: n }))
-      : Array.from({ length: p.replicas }, (_, i) => p.placed.find((x) => x.replica === i + 1 && !x.leaving) ?? { replica: i + 1 });
+    // A dot per replica, linking to its URL.
+    const copies = Array.from({ length: p.replicas }, (_, i) => p.placed.find((x) => x.replica === i + 1 && !x.leaving) ?? { replica: i + 1 });
     const dots = copies.map((x) => {
       const n = x.machine;
       const s = n != null ? runs.get(n)?.projects[p.name] : null;
       const cls = !s ? "" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
       const where = n == null ? "not placed yet" : !s ? `machine ${n}: not running` : `machine ${n}: v${s.v} ${s.s}`;
-      const title = (x.replica ? `replica ${x.replica} · ` : "") + where + (x.reason ? ` · placed here: ${x.reason}` : "");
-      const inner = `${x.replica ?? n}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
-      return p.port && x.replica
+      const title = `replica ${x.replica} · ${where}` + (x.reason ? ` · placed here: ${x.reason}` : "");
+      const inner = `${x.replica}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
+      return p.port
         ? `<a class="dot ${cls}" title="${esc(title)}" href="https://${esc(p.name)}-${x.replica}.${esc(status.domain)}/" target="_blank" rel="noopener">${inner}</a>`
         : `<span class="dot ${cls}" title="${esc(title)}">${inner}</span>`;
     }).join("");
@@ -325,7 +324,7 @@ function render() {
         <div class="grow"><button class="name-link" data-act="details" data-name="${esc(p.name)}">${esc(p.name)}</button></div>
         <span class="badge ${STATE[p.state] || ""}">${esc(label)}</span>
       </div>
-      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed`}${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
+      <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} on the rest)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${p.staying} of ${p.replicas} replica${p.replicas === 1 ? "" : "s"} placed${p.files.length ? ` · custom image (${p.files.map(esc).join(", ")})` : ""}</div>
       ${p.enabled ? `<div class="dots">${dots}</div>` : ""}
       ${p.halted ? `<div class="err">${esc(p.halted)}</div>` : ""}
       <div class="actions">
@@ -418,17 +417,16 @@ function renderDetails() {
   const label = p.state;
   const scroll = $("dt-body").scrollTop;
 
-  // A row per copy: each replica's machine (then the old one while it moves), or every machine for "all".
-  const copies = p.replicas === "all" ? status.slots.map((n) => ({ machine: n }))
-    : Array.from({ length: p.replicas }, (_, i) => p.placed.filter((x) => x.replica === i + 1)).flatMap((xs, i) => xs.length ? xs : [{ replica: i + 1 }]);
+  // A row per copy: each replica's machine, then the old one while it moves.
+  const copies = Array.from({ length: p.replicas }, (_, i) => p.placed.filter((x) => x.replica === i + 1)).flatMap((xs, i) => xs.length ? xs : [{ replica: i + 1 }]);
   const machines = copies.map((x) => {
     const n = x.machine;
     const r = n != null ? runs.get(n) : null;
     const s = r?.projects[p.name];
     const target = !p.enabled ? null : p.halted ? p.stable : p.version;
     const cls = !s ? "off" : s.s === "healthy" ? "ok" : s.s === "failed" ? "bad" : "warn";
-    const url = x.replica && !x.leaving ? `https://${p.name}-${x.replica}.${status.domain}/` : null;
-    return `<tr><td>${x.replica ?? "–"}</td><td>${n ?? "–"}</td>
+    const url = !x.leaving ? `https://${p.name}-${x.replica}.${status.domain}/` : null;
+    return `<tr><td>${x.replica}</td><td>${n ?? "–"}</td>
       <td>${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="meta">→ v${target}</span>` : ""}</td>
       <td><span class="${cls}">${esc(n == null ? "not placed yet" : !r ? "machine down" : s ? s.s : "not running")}</span>${x.since ? `<div class="meta">${x.leaving ? `moving to machine ${x.leaving.to}` : `placed ${esc(ago(status.now - x.since))} ago: ${esc(x.reason)}`}</div>` : ""}${s?.e ? `<div class="err">${esc(s.e)}</div>` : ""}</td>
       <td>${x.since && !x.leaving ? `<button type="button" class="small" data-move="${n}">Move</button>` : ""}</td>
@@ -452,7 +450,7 @@ function renderDetails() {
       <div><dt>Latest version</dt><dd>v${p.version}</dd></div>
       <div><dt>Good version</dt><dd>${p.stable != null ? `v${p.stable}` : "none yet"}</dd></div>
       <div><dt>Port</dt><dd>${p.port ?? "none"}</dd></div>
-      <div><dt>Replicas</dt><dd>${p.replicas === "all" ? "every machine" : `${p.staying} of ${p.replicas} placed`}</dd></div>
+      <div><dt>Replicas</dt><dd>${p.staying} of ${p.replicas} placed</dd></div>
       <div><dt>Shared URL</dt><dd>${p.port ? `<a href="https://${esc(p.name)}.${esc(status.domain)}/" target="_blank" rel="noopener">${esc(p.name)}.${esc(status.domain)}</a>` : "none (no port)"}</dd></div>
       <div><dt>Image</dt><dd>${p.files.length ? "built from files" : "published images"}</dd></div>
       <div><dt>Updated</dt><dd>${esc(ago(status.now - p.updated))} ago</dd></div>
@@ -578,12 +576,12 @@ $("form").onsubmit = async (ev) => {
   if ($("ed-dockerfile").value.trim()) body.dockerfile = $("ed-dockerfile").value;
   if ($("ed-port").value) body.port = Number($("ed-port").value);
   const rep = $("ed-replicas").value.trim();
-  if (rep) body.replicas = rep === "all" ? "all" : Number(rep);
+  if (rep) body.replicas = Number(rep);
   $("ed-save").disabled = true;
   try {
     const p = await api("PUT", `/projects/${encodeURIComponent(name)}`, body);
     $("editor").close();
-    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version}${p.replicas === "all" ? " to every machine" : ` to ${p.replicas} machine${p.replicas === 1 ? "" : "s"}`}`);
+    toast(p.unchanged ? `${name} is already running that spec` : `Deploying ${name} v${p.version} to ${p.replicas} machine${p.replicas === 1 ? "" : "s"}`);
     refresh();
   } catch (e) {
     $("ed-error").textContent = e.message;
@@ -632,7 +630,7 @@ document.addEventListener("click", async (ev) => {
       toast(`Slot ${r.retired} retired`);
     }
     if (act === "evict") {
-      if (!confirm(`Move every placed app off machine ${machine}? Each goes to the machine with the most room; the new copy starts first and the old one is removed once it's healthy. Apps set to "all" stay.`)) return;
+      if (!confirm(`Move every placed app off machine ${machine}? Each goes to the machine with the most room; the new copy starts first and the old one is removed once it's healthy.`)) return;
       const r = await api("POST", `/machines/${machine}/evict`);
       toast(r.moved.length ? `Moving ${r.moved.join(", ")} off machine ${machine}` : `Nothing placed on machine ${machine}` + (r.failed.length ? `; ${r.failed.join("; ")}` : ""));
     }

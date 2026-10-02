@@ -34,7 +34,6 @@ const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const SHARED_DNS = "100::"; // <project>.DOMAIN and <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
-const REPLICAS_ALL = 0; // stored value of replicas: "all"
 const MAX_REPLICAS = 100;
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
@@ -149,9 +148,8 @@ function buildSpec(body) {
   }
   const parseReplicas = (x, where) => {
     if (x === null || x === undefined || x === "") return null;
-    if (x === "all") return REPLICAS_ALL;
     const n = Number(x);
-    if (!(Number.isInteger(n) && n >= 1 && n <= MAX_REPLICAS)) throw new HttpError(400, `${where} must be "all" or a whole number from 1 to ${MAX_REPLICAS}`);
+    if (!(Number.isInteger(n) && n >= 1 && n <= MAX_REPLICAS)) throw new HttpError(400, `${where} must be a whole number from 1 to ${MAX_REPLICAS}`);
     return n;
   };
   replicas = parseReplicas(replicas, "replicas");
@@ -161,7 +159,7 @@ function buildSpec(body) {
     compose = [
       ...(port || replicas !== null ? ["x-runner:"] : []),
       ...(port ? [`  port: ${port}`] : []),
-      ...(replicas !== null ? [`  replicas: ${replicas === REPLICAS_ALL ? "all" : replicas}`] : []),
+      ...(replicas !== null ? [`  replicas: ${replicas}`] : []),
       "services:",
       "  app:",
       "    build: .",
@@ -557,7 +555,6 @@ export class Control extends DurableObject {
 
   describe(p) {
     const latest = this.version(p.name, p.version);
-    const replicas = latest?.replicas ?? 1;
     const placed = [...(this.placements.get(p.name) ?? [])].map(([machine, x]) => ({ machine, ...x }))
       .sort((a, b) => a.replica - b.replica || Boolean(a.leaving) - Boolean(b.leaving));
     const staying = placed.filter((x) => !x.leaving).length;
@@ -566,10 +563,8 @@ export class Control extends DurableObject {
       version: p.version,
       stable: p.stable,
       port: latest?.port ?? null,
-      replicas: replicas === REPLICAS_ALL ? "all" : replicas,
-      // Each replica's machine, by replica number; a copy being moved away (leaving) comes after its new copy.
-      // Empty when replicas is "all": then it's every machine.
-      placed,
+      replicas: latest?.replicas ?? 1,
+      placed, // each replica's machine, by replica number; a copy being moved away (leaving) comes after its new copy
       staying,
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
@@ -596,9 +591,9 @@ export class Control extends DurableObject {
       compose: spec.compose,
       files: spec.files,
       port: spec.port,
-      replicas: spec.replicas === REPLICAS_ALL ? "all" : spec.replicas,
+      replicas: spec.replicas,
       versions: this.all("SELECT version, port, replicas, created FROM versions WHERE name = ? ORDER BY version", name)
-        .map((v) => ({ ...v, replicas: (v.replicas ?? 1) === REPLICAS_ALL ? "all" : v.replicas ?? 1 })),
+        .map((v) => ({ ...v, replicas: v.replicas ?? 1 })),
     };
   }
 
@@ -692,7 +687,7 @@ export class Control extends DurableObject {
     return { rolling: machine ? [Number(machine)] : "all", since: now };
   }
 
-  // What machine n should run: every enabled project placed on it (or placed everywhere), at its latest version,
+  // What machine n should run: every enabled project placed on it, at its latest version,
   // or the last good one if the latest is halted. Disabled projects run nowhere.
   desiredFor(machine) {
     const out = {};
@@ -707,9 +702,7 @@ export class Control extends DurableObject {
   }
 
   runsOn(name, machine) {
-    const p = this.projects.get(name);
-    const replicas = this.version(name, p.version)?.replicas ?? 1;
-    return replicas === REPLICAS_ALL || Boolean(this.placements.get(name)?.has(machine));
+    return Boolean(this.placements.get(name)?.has(machine));
   }
 
   // A version is good once every machine that should run it (and is up) reports it healthy, and halted as soon
@@ -777,14 +770,14 @@ export class Control extends DurableObject {
     const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> projects placed on it
     for (const [name, placed] of this.placements) {
-      // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone, nor
+      // Projects that are gone or disabled need no placements; neither do machines that have gone, nor
       // replicas numbered above the count (it was lowered), along with any copy of theirs being moved.
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
       for (const [machine, x] of placed) {
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
         const moved = x.leaving && (up.get(x.leaving.to)?.status[name]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
-        if (!p || !p.enabled || replicas === REPLICAS_ALL || x.replica > replicas || !up.has(machine) || moved) {
+        if (!p || !p.enabled || x.replica > replicas || !up.has(machine) || moved) {
           this.dropPlacement(name, machine);
           changed = true;
         } else if (!x.leaving) counts.set(machine, (counts.get(machine) ?? 0) + 1);
@@ -793,7 +786,6 @@ export class Control extends DurableObject {
     for (const p of [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name))) {
       if (!p.enabled) continue;
       const want = this.version(p.name, p.version)?.replicas ?? 1;
-      if (want === REPLICAS_ALL) continue;
       const placed = this.placements.get(p.name) ?? this.placements.set(p.name, new Map()).get(p.name);
       // Each number from 1 to the count needs a copy that's staying: a move's new copy counts, its old one doesn't.
       // Missing ones go to the machines with the most room, ready ones first.
@@ -887,7 +879,7 @@ export class Control extends DurableObject {
     return m.h.cpu < ROOM_CPU && (100 * m.h.memUsed) / m.h.memTotal < ROOM_MEM;
   }
 
-  // The placed (movable) project using the most of a machine, by its own CPU and memory there.
+  // The placed project using the most of a machine, by its own CPU and memory there.
   heaviestOn(machine, now) {
     const m = this.liveMetrics.get(machine);
     const memTotal = m?.h.memTotal || 1;
@@ -895,8 +887,6 @@ export class Control extends DurableObject {
     for (const [name, placed] of this.placements) {
       const x = placed.get(machine);
       if (!x || x.leaving) continue;
-      const spec = this.version(name, this.projects.get(name)?.version);
-      if ((spec?.replicas ?? 1) === REPLICAS_ALL) continue;
       if (now - (this.autoMoved.get(name) ?? 0) < PROJECT_COOLDOWN_MS) continue;
       const a = m?.a[name];
       const weight = a ? (a.cpu || 0) + (100 * (a.mem || 0)) / memTotal : 0;
@@ -1207,7 +1197,6 @@ export class Control extends DurableObject {
       const spec = this.version(p.name, p.version);
       if (!spec?.port) continue;
       shared[p.name] = p.enabled ? [...newest.keys()].filter((m) => this.runsOn(p.name, m) && healthy(p.name, m)) : [];
-      if (spec.replicas === REPLICAS_ALL) continue;
       for (let k = 1; k <= spec.replicas; k++) replicas[`${p.name}-${k}`] = [];
       if (!p.enabled) continue;
       const copies = [...(this.placements.get(p.name) ?? [])].sort(([, a], [, b]) => Boolean(a.leaving) - Boolean(b.leaving));
@@ -1421,7 +1410,7 @@ export class Control extends DurableObject {
       if (!port) continue;
       shared.add(`${p.name}.${domain}`);
       const replicas = spec?.replicas ?? 1;
-      for (let k = 1; replicas !== REPLICAS_ALL && k <= replicas; k++) shared.add(`${p.name}-${k}.${domain}`);
+      for (let k = 1; k <= replicas; k++) shared.add(`${p.name}-${k}.${domain}`);
       for (const [n, target] of tunnelOf) want.set(`${p.name}-m${n}.${domain}`, target);
     }
     const existing = [];
