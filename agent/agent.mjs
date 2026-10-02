@@ -1,7 +1,8 @@
 // Runner agent: keeps one machine's projects in line with the control plane.
 // It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
-// and the tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's
-// told, and restarts ones that stop answering. On GitHub Actions it also starts machines the control plane says are
+// (it serves each project at <project>-m<n>, which is how the control plane's Worker reaches this machine) and the
+// tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's told,
+// and restarts ones that stop answering. On GitHub Actions it also starts machines the control plane says are
 // missing and hands over to a fresh run before GitHub's 6-hour limit; on any other host it just keeps running.
 // No dependencies: Node's built-ins plus the docker CLI.
 import { execFile } from "node:child_process";
@@ -52,6 +53,9 @@ function sh(cmd, args, { timeout = 15 * 60_000, extraEnv = {} } = {}) {
   });
 }
 
+// How the control plane's Worker reaches a project on this machine (the public URLs name replicas, not machines).
+const machineHost = (name) => `${name}-m${machine}.${domain}`;
+
 // GET / for a hostname through the local router: { code, routed }, with code 0 if nothing answered.
 // The router's own "no such project" 404 carries X-Runner-Route: none, so it isn't mistaken for the project's.
 function probe(host) {
@@ -70,7 +74,7 @@ function probe(host) {
 async function answers(name, seconds) {
   const end = Date.now() + seconds * 1000;
   for (;;) {
-    const { code, routed } = await probe(`${name}-${machine}.${domain}`);
+    const { code, routed } = await probe(machineHost(name));
     if (code && routed && code !== 502) return true;
     if (Date.now() >= end) return false;
     await sleep(2000);
@@ -166,7 +170,8 @@ function routerJson() {
   const routes = [...projects]
     .filter(([, p]) => p.port && domain)
     .map(([name, p]) => ({
-      match: [{ host: [`${name}-${machine}.${domain}`] }],
+      // <project>-<n> was the old name, still sent by control planes from before replica URLs.
+      match: [{ host: [machineHost(name), `${name}-${machine}.${domain}`] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1 }],
     }));
   routes.push({
