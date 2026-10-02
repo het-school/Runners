@@ -503,8 +503,7 @@ const machineNums = () => {
   const d = state.data;
   const set = new Set(Object.keys(d.m).map(Number));
   for (const k of Object.keys(d.live)) set.add(Number(k));
-  for (let i = 1; i <= d.machines; i++) set.add(i);
-  return [...set].filter((m) => m <= Math.max(d.machines, 0) || d.live[m]).sort((a, b) => a - b);
+  return [...set].sort((a, b) => a - b);
 };
 const hcol = (m, k) => state.data.m[m]?.h?.[k] ?? null;
 const acol = (m, app, k) => state.data.m[m]?.a?.[app]?.[k] ?? null;
@@ -553,7 +552,7 @@ function renderFleet(main) {
   const memTotal = sumLive((r) => r.h.memTotal);
   const memUsed = sumLive((r) => r.h.memUsed);
   tiles(main, [
-    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: `${live.length} of ${d.machines} machines reporting` },
+    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: d.expected ? `${live.length} of ${d.expected} machines reporting` : `${live.length} machines reporting` },
     { label: "Memory used", value: memTotal ? F.pct((100 * memUsed) / memTotal) : "–", sub: `${bytes(memUsed)} of ${bytes(memTotal)}` },
     { label: "Disk read / write", value: F.rate(sumLive((r) => r.h.diskRead)), sub: `write ${F.rate(sumLive((r) => r.h.diskWrite))}` },
     { label: "Network in / out", value: F.rate(sumLive((r) => r.h.netRx)), sub: `out ${F.rate(sumLive((r) => r.h.netTx))}` },

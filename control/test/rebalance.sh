@@ -3,14 +3,14 @@ cd "$(dirname "$0")/.."
 for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
 rm -rf /tmp/runner-test-state
 (node "$(dirname "$0")/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var MACHINES:3 --var HOT_MS:20000 --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":3}' --var HOT_MS:20000 --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(( $(date +%s%3N) - 6*60*1000 ))   # machines "up" 6 min, so they're settled
 A='authorization: Bearer adm'
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" -H content-type:application/json -d "$2" >/dev/null; }
-join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"kind\":\"github\",\"want\":$2}" >/dev/null; }
+join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"github\",\"want\":$2}" >/dev/null; }
 # sync machine cpu mem statusjson appsjson
-sync() { curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$1,\"run\":\"r$1\",\"agent\":\"gh-r$1\",\"kind\":\"github\",\"started\":$START,\"ready\":true,\"status\":${4:-{\}},\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":$2,\"memUsed\":$3,\"memTotal\":100},\"a\":${5:-{\}}}}}" >/dev/null; }
+sync() { curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$1,\"run\":\"r$1\",\"agent\":\"gh-r$1\",\"pool\":\"github\",\"started\":$START,\"ready\":true,\"status\":${4:-{\}},\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":$2,\"memUsed\":$3,\"memTotal\":100},\"a\":${5:-{\}}}}}" >/dev/null; }
 show() { curl -s $B/api/status | jq -c '{placed:[.projects[] | "\(.name)→\([.placed[] | "\(.machine)\(if .leaving then "(leaving)" else "" end)"]|join(","))"], hot:.rebalance.hot, log:[.rebalance.log[].text]}'; }
 put a '{"port":8001,"dockerfile":"FROM x"}'; put b '{"port":8002,"dockerfile":"FROM x"}'; put c '{"port":8003,"dockerfile":"FROM x"}'
 join a 1; join b 2; join c 3

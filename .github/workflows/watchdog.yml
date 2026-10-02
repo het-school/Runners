@@ -25,7 +25,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           start=$(curl -sSf -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
-            https://control.billybishop4-workers.xyz/api/claim | jq -r '.start[]')
+            "https://control.billybishop4-workers.xyz/api/claim?pool=github" | jq -r '.start[]')
           for m in $start; do
             gh workflow run machine.yml -R "$GITHUB_REPOSITORY" -f machine="$m" && echo "started machine $m"
           done

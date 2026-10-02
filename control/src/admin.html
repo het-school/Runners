@@ -120,8 +120,7 @@
   <div class="head">
     <h2>Machines</h2>
     <div class="inline">
-      Keep <input type="number" id="count" min="0" max="18"> GitHub machines
-      <button id="save-count">Save</button>
+      <span id="pools"></span>
       <button id="roll-all">Restart all</button>
       <label class="inline" style="margin:0;font-weight:400"><input type="checkbox" id="rebalance" style="width:auto"> rebalance automatically</label>
     </div>
@@ -316,7 +315,9 @@ function render() {
   const up = [...runs.values()].filter((r) => r.ready).length;
   $("fleet").textContent = `${up} machines online`;
   document.querySelectorAll(".domain").forEach((el) => (el.textContent = status.domain));
-  if (document.activeElement !== $("count")) $("count").value = status.machines;
+  if (!document.activeElement?.classList.contains("pool-size")) {
+    $("pools").innerHTML = status.pools.map((p) => `<span class="inline">Pool <b>${esc(p.name)}</b>: keep <input type="number" class="pool-size" data-pool="${esc(p.name)}" min="0" max="50" value="${p.size}"> machines <span class="meta">(${p.live} up)</span></span>`).join(" ") || `<span class="meta">No pools: machines come and go on their own.</span>`;
+  }
   $("rebalance").checked = status.rebalance.on;
   $("rebalance-log").innerHTML = status.rebalance.log.length
     ? `<b>Rebalancing</b> · hot machines move their heaviest app off (cpu > 85% or memory > 90% for 5 min); uneven spreads even out; one move per 10 min.<br>` +
@@ -368,8 +369,7 @@ function render() {
     machines.push(`<div class="card">
       <div class="row">
         <div class="grow"><span class="name">Machine ${n}</span>
-          ${!r ? "" : r.kind === "host" ? ` <span class="meta">own host ${esc(r.label || "")}</span>`
-            : ` <a class="meta" href="https://github.com/${esc(status.repo)}/actions/runs/${esc(r.id)}" target="_blank" rel="noopener">GitHub run ${esc(r.id)}</a>`}</div>
+          ${!r ? "" : r.url ? ` <a class="meta" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : ` <span class="meta">${esc(r.label || r.id)}</span>`}${r?.pool ? ` <span class="meta">· pool ${esc(r.pool)}</span>` : r ? ` <span class="meta">· standalone</span>` : ""}${r?.expires ? ` <span class="meta">· expires in ${esc(ago(r.expires - status.now))}</span>` : ""}</div>
         ${state}
       </div>
       ${projects ? `<div class="dots">${projects}</div>` : ""}
@@ -664,7 +664,7 @@ document.addEventListener("click", async (ev) => {
       toast(`Machine ${machine} is starting a fresh run`);
     }
     if (act === "retire") {
-      if (!confirm(`Retire slot ${machine}? Its Cloudflare tunnel and <app>-${machine} names are deleted. A machine joining later gets a new slot. (Slots within the GitHub machine count can't be retired.)`)) return;
+      if (!confirm(`Retire slot ${machine}? Its Cloudflare tunnel and <app>-${machine} names are deleted. A machine joining later gets a fresh slot.`)) return;
       const r = await api("DELETE", `/slots/${machine}`);
       toast(`Slot ${r.retired} retired`);
     }
@@ -695,15 +695,15 @@ $("roll-all").onclick = async () => {
     toast(e.message);
   }
 };
-$("save-count").onclick = async () => {
+$("pools").addEventListener("change", async (ev) => {
+  const input = ev.target.closest(".pool-size");
+  if (!input) return;
   try {
-    const r = await api("PUT", "/settings", { machines: Number($("count").value) });
-    toast(`Keeping ${r.machines} GitHub machines running`);
+    const r = await api("PUT", "/settings", { pools: { [input.dataset.pool]: Number(input.value) } });
+    toast(`Keeping ${r.pools[input.dataset.pool]} machines in pool ${input.dataset.pool}`);
     refresh();
-  } catch (e) {
-    toast(e.message);
-  }
-};
+  } catch (e) { toast(e.message); }
+});
 
 document.querySelectorAll(".guide pre.code").forEach((pre) => {
   const b = document.createElement("button");

@@ -1,10 +1,15 @@
 // Control plane for hetp4401/runner.
 // Holds the project specs (a docker compose file plus any Dockerfiles and build files) and sends every change to all
-// machines. Machines find it, not the other way round: any agent (a GitHub Actions run, or any host with Docker) joins
-// at /api/join, gets the lowest free slot n and the token for tunnel runner-<n> (created through the Cloudflare API the
-// first time a slot is used), then checks in at /api/sync. It keeps the GitHub machines topped up, hands each over
-// before GitHub's 6-hour limit, and keeps DNS in line: <project>-<n> points at tunnel runner-<n>, and <project> itself
-// is served by this Worker, which passes each request on to a machine where the project is healthy.
+// machines. Machines find it, not the other way round: any agent joins at /api/join, gets the lowest free slot n and
+// the token for tunnel runner-<n> (created through the Cloudflare API the first time a slot is used), then checks in
+// at /api/sync. The agent describes its machine; this never knows what's behind it:
+//   pool     the name of a replaceable set it belongs to (members are started on request to keep the pool's size),
+//            or none for a standalone host that keeps its slot across restarts
+//   expires  when this run will be gone for certain (its handover is scheduled from that), or none
+//   url      what to link to for it, and a label
+//   leaving  on its last check-in, when it's going for good (its replicas are placed elsewhere at once)
+// It also keeps DNS in line: <project>-<n> points at tunnel runner-<n>, and <project> itself is served by this
+// Worker, which passes each request on to a machine where the project is healthy.
 //   /            public status page          /api/*        API, Bearer token (admin, or node for join/sync/claim)
 //   /admin       admin portal (open)         /admin/api/*  the project API without a token
 //   /metrics     metrics dashboard           /api/metrics  machine and app metrics (no token needed)
@@ -17,14 +22,14 @@ import { STATUS_PAGE } from "./status-page.js";
 const POLL_S = 20; // how often agents check in
 const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
-const HANDOVER_AFTER_MS = 315 * 60_000; // replace each machine after 5h15m; GitHub stops jobs at 6h
+const HANDOVER_LEAD_MS = 40 * 60_000; // a run that expires is handed over at least this long before then
+const HANDOVER_JITTER_MS = 60 * 60_000; // and up to this much earlier still (fixed by its ID), so machines drift apart
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
-const HANDOVER_JITTER_MS = 60 * 60_000; // each run hands over up to this much earlier (fixed by its ID), so machines drift apart
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
-const HOST_HOLD_MS = 30 * 60_000; // a host that drops out keeps its slot this long, so a restart gets the same one
+const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const SHARED_DNS = "100::";
 const REPLICAS_ALL = 0; // stored value of replicas: "all"
 const MAX_REPLICAS = 100;
@@ -403,8 +408,10 @@ export class Control extends DurableObject {
     if (!versionColumns.has("storage")) this.sql.exec("ALTER TABLE versions ADD COLUMN storage INTEGER");
     const runColumns = columns("runs");
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
-    if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'github'");
+    if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); // no longer used
     if (!runColumns.has("label")) this.sql.exec("ALTER TABLE runs ADD COLUMN label TEXT");
+    for (const col of ["pool TEXT", "expires INTEGER", "url TEXT"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
+    if (!columns("agents").has("pool")) this.sql.exec("ALTER TABLE agents ADD COLUMN pool TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
     // which happen whenever Cloudflare lets the object sleep.
     this.projects = new Map(this.all("SELECT * FROM projects").map((p) => [p.name, p]));
@@ -460,8 +467,21 @@ export class Control extends DurableObject {
     );
   }
 
-  machines() {
-    return Number(this.settings.get("machines") ?? this.env.MACHINES ?? 10);
+  // Pools and how many machines each should have running: the POOLS setting (JSON), with the var as the default.
+  pools() {
+    const fromEnv = typeof this.env.POOLS === "string" ? JSON.parse(this.env.POOLS || "{}") : this.env.POOLS ?? {};
+    const out = { ...fromEnv, ...JSON.parse(this.settings.get("pools") ?? "{}") };
+    for (const r of this.runs.values()) if (r.pool && !(r.pool in out)) out[r.pool] = 0; // pools that showed up on their own
+    return out;
+  }
+
+  poolSize(pool) {
+    return Number(this.pools()[pool] ?? 0);
+  }
+
+  // Machines expected to be up: every pool's size (standalone machines come and go as they please).
+  expectedMachines() {
+    return Object.values(this.pools()).reduce((a, b) => a + Number(b), 0);
   }
 
   maxSlots() {
@@ -502,11 +522,11 @@ export class Control extends DurableObject {
     this.runs.set(r.id, r);
     r.savedSeen = r.seen;
     this.sql.exec(
-      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET status = excluded.status, ready = excluded.ready,
-         handover = excluded.handover, retire = excluded.retire, seen = excluded.seen`,
-      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, r.kind, r.label,
+      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label, pool, expires, url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET status = excluded.status, ready = excluded.ready, handover = excluded.handover,
+         retire = excluded.retire, seen = excluded.seen, label = excluded.label, pool = excluded.pool, expires = excluded.expires, url = excluded.url`,
+      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, "", r.label, r.pool ?? null, r.expires ?? null, r.url ?? null,
     );
   }
 
@@ -560,7 +580,7 @@ export class Control extends DurableObject {
     if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
     if (method === "POST" && route === "/join") return need(node), json(await this.join(await body()));
     if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
-    if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts("watchdog", Date.now()) });
+    if (method === "POST" && route === "/claim") return need(node), json({ start: this.claimStarts(url.searchParams.get("pool"), "claim", Date.now()) });
     if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
     // The token a new host joins with; only with the admin token itself, never through the open portal.
     if (method === "GET" && route === "/join-token") return need(admin && !portal), json({ token: this.env.NODE_TOKEN });
@@ -645,7 +665,7 @@ export class Control extends DurableObject {
     const spec = buildSpec(body);
     if (spec.stateful && !this.storageConfigured()) throw new HttpError(400, "the fleet's storage (R2) isn't set up yet, so projects can't be stateful");
     const t = Date.now();
-    const machines = this.machines();
+    const machines = this.expectedMachines();
     const p = this.projects.get(name);
     const latest = p && this.version(name, p.version);
     const same = latest && latest.compose === spec.compose && latest.port === spec.port && latest.replicas === spec.replicas &&
@@ -694,20 +714,23 @@ export class Control extends DurableObject {
   }
 
   putSettings(body) {
-    const { machines, rebalance } = isMap(body) ? body : {};
+    const { pools, rebalance } = isMap(body) ? body : {};
     if (rebalance !== undefined) {
       if (typeof rebalance !== "boolean") throw new HttpError(400, "rebalance must be true or false");
       this.setSetting("rebalance", rebalance ? "on" : "off");
     }
-    if (machines !== undefined) {
-      const max = Math.min(18, this.maxSlots()); // GitHub Free runs 20 jobs at once, and handovers overlap briefly
-      if (!(Number.isInteger(machines) && machines >= 0 && machines <= max)) {
-        throw new HttpError(400, `machines must be 0-${max}`);
+    if (pools !== undefined) {
+      if (!isMap(pools)) throw new HttpError(400, 'pools must be an object of pool name to size, like {"name": 10}');
+      const next = { ...JSON.parse(this.settings.get("pools") ?? "{}") };
+      for (const [name, size] of Object.entries(pools)) {
+        if (!/^[a-z0-9-]{1,30}$/.test(name)) throw new HttpError(400, "a pool name is lowercase letters, digits and dashes");
+        if (!(Number.isInteger(size) && size >= 0 && size <= this.maxSlots())) throw new HttpError(400, `a pool's size is 0-${this.maxSlots()}`);
+        next[name] = size;
       }
-      this.setSetting("machines", machines);
+      this.setSetting("pools", JSON.stringify(next));
       this.scheduleDns();
     }
-    return { machines: this.machines(), rebalance: this.rebalanceOn() };
+    return { pools: this.pools(), rebalance: this.rebalanceOn() };
   }
 
   rebalanceOn() {
@@ -859,7 +882,7 @@ export class Control extends DurableObject {
     // After a (re)start the first machine to check in would get every replica, because it's the only one with
     // metrics; wait until every machine that's up has reported some (or 3 minutes).
     const measured = (machine) => now - (this.liveMetrics.get(machine)?.t ?? 0) < 3 * LIVE_MS;
-    const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.machines() && [...up.keys()].every(measured));
+    const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> projects placed on it
     for (const [name, placed] of this.placements) {
       // Projects that are gone, disabled or "all" need no placements; neither do machines that have gone.
@@ -1084,16 +1107,20 @@ export class Control extends DurableObject {
     }
     const status = isMap(body.status) ? body.status : {};
     const ready = body.ready ? 1 : 0;
+    // How the agent describes its machine (see the top of this file).
+    const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
+    const expires = Number.isFinite(Number(body.expires)) && body.expires ? Number(body.expires) : null;
+    const url = typeof body.url === "string" && /^https:\/\/[^\s"<>]{1,300}$/.test(body.url) ? body.url : null;
+    const label = String(body.label ?? "").slice(0, 80) || null;
     let r = this.runs.get(run);
     if (!r) {
-      const kind = body.kind === "host" ? "host" : "github";
-      const agent = String(body.agent ?? `gh-${run}`).slice(0, 100);
-      const label = String(body.label ?? "").slice(0, 80) || null;
-      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, kind, label };
+      const agent = String(body.agent ?? run).slice(0, 100);
+      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, expires, url };
       this.saveRun(r);
     } else {
-      const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status);
-      Object.assign(r, { status, ready, seen: now });
+      const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status) ||
+        pool !== (r.pool ?? null) || expires !== (r.expires ?? null) || url !== (r.url ?? null) || label !== (r.label ?? null);
+      Object.assign(r, { status, ready, seen: now, pool, expires, url, label });
       r.storageState = typeof body.storage === "string" ? body.storage.slice(0, 20) : undefined;
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
@@ -1106,12 +1133,12 @@ export class Control extends DurableObject {
     this.place(now);
     this.settle(now);
     this.rebalance(now);
-    if (!r.retire && (this.extraGithub(r, now) || this.superseded(r, now))) {
+    if (!r.retire && (this.surplusInPool(r, now) || this.superseded(r, now))) {
       r.retire = 1;
       this.saveRun(r);
     }
     const handover = !r.retire && this.wantsHandover(r, now);
-    const start = !r.retire && r.ready && r.kind === "github" ? this.claimStarts(run, now) : [];
+    const start = !r.retire && r.ready && r.pool ? this.claimStarts(r.pool, run, now) : []; // pool members start their peers
     this.cleanup(now);
     const desired = r.retire ? {} : this.desiredFor(r, now);
     return {
@@ -1131,11 +1158,11 @@ export class Control extends DurableObject {
       Object.entries(this.desiredFor(x, now)).every(([name, d]) => x.status[name]?.v === d.v && (x.status[name]?.s === "healthy" || (d.prepare && x.status[name]?.s === "prepared"))));
   }
 
-  // Ask a run to start its own replacement when it's near GitHub's 6-hour limit (or a roll was requested).
-  // One machine at a time, oldest first, so at most one machine is ever changing over.
+  // Ask a run to start its own replacement when its expiry is near (or a roll was requested). One machine at a
+  // time, oldest first, so at most one machine is ever changing over.
   wantsHandover(r, now) {
     const rollAll = Number(this.settings.get("roll") ?? 0);
-    const due = (x) => (x.kind === "github" && now - x.started > HANDOVER_AFTER_MS - (hash(String(x.id)) % HANDOVER_JITTER_MS)) || x.started < rollAll ||
+    const due = (x) => (x.expires && now > x.expires - HANDOVER_LEAD_MS - (hash(String(x.id)) % HANDOVER_JITTER_MS)) || x.started < rollAll ||
       x.started < Number(this.settings.get(`roll_${x.machine}`) ?? 0);
     if (!due(r)) return false;
     const live = this.liveRuns(now);
@@ -1150,14 +1177,15 @@ export class Control extends DurableObject {
     return true;
   }
 
-  // GitHub machines to start so `machines` of them run. Whoever asks (a GitHub machine or the watchdog workflow)
-  // starts them, each with the slot it should take; the slot is held for it until it shows up.
-  claimStarts(by, now) {
+  // Machines to start so a pool has its size. Whoever asks (a member of the pool, or something watching it from
+  // outside through /api/claim) starts them, each with the slot it should take; the slot is held until it shows up.
+  claimStarts(pool, by, now) {
+    if (!pool || !(pool in this.pools())) return [];
     const live = this.liveRuns(now);
-    const github = new Set(live.filter((x) => x.kind === "github").map((x) => x.machine));
+    const members = new Set(live.filter((x) => x.pool === pool).map((x) => x.machine));
     const starting = [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !live.some((x) => x.machine === n)).length;
     const out = [];
-    for (let missing = this.machines() - github.size - starting; missing > 0; missing--) {
+    for (let missing = this.poolSize(pool) - members.size - starting; missing > 0; missing--) {
       const n = this.freeSlot(now, null);
       if (!n) break;
       this.markStart(n, now, by);
@@ -1166,21 +1194,21 @@ export class Control extends DurableObject {
     return out;
   }
 
-  // GitHub runs beyond the `machines` wanted: the ones in the highest slots go.
-  extraGithub(r, now) {
-    if (r.kind !== "github") return false;
-    const slots = [...new Set(this.liveRuns(now).filter((x) => x.kind === "github").map((x) => x.machine))].sort((a, b) => a - b);
-    return slots.indexOf(r.machine) >= this.machines();
+  // A pool's runs beyond its size: the ones in the highest slots go.
+  surplusInPool(r, now) {
+    if (!r.pool) return false;
+    const slots = [...new Set(this.liveRuns(now).filter((x) => x.pool === r.pool).map((x) => x.machine))].sort((a, b) => a - b);
+    return slots.indexOf(r.machine) >= this.poolSize(r.pool);
   }
 
-  // A slot is taken while another agent runs in it, while a GitHub machine is starting for it, and for a while
-  // after a host drops out (so it gets the slot back when it restarts).
+  // A slot is taken while another agent runs in it, while a machine is starting for it, and for a while after a
+  // standalone machine drops out (so it gets the slot back when it restarts).
   slotTaken(n, now, agent) {
     if (now - (this.starts.get(n) ?? 0) < START_WAIT_MS) return true;
     const hold = this.holds.get(n);
     if (hold && hold.agent !== agent && now - hold.at < 2 * 60_000) return true;
     return [...this.runs.values()].some((x) => x.machine === n && x.agent !== agent && !x.retire &&
-      (this.live(x, now) || (x.kind === "host" && now - x.seen < HOST_HOLD_MS)));
+      (this.live(x, now) || (!x.pool && now - x.seen < STANDALONE_HOLD_MS)));
   }
 
   freeSlot(now, agent) {
@@ -1188,13 +1216,13 @@ export class Control extends DurableObject {
     return null;
   }
 
-  // An agent starting up: give it a slot and that slot's tunnel token. A GitHub machine started for a slot asks for
-  // it (`want`); a host gets the slot it had last time if that's still free, otherwise the lowest free one.
+  // An agent starting up: give it a slot and that slot's tunnel token. A machine started for a slot asks for it
+  // (`want`); otherwise it gets the slot its agent had last time if that's still free, else the lowest free one.
   async join(body) {
     const now = Date.now();
     const agent = String(body?.agent ?? "");
     if (!agent || agent.length > 100) throw new HttpError(400, "agent (an ID for this agent) is required");
-    const kind = body.kind === "host" ? "host" : "github";
+    const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
     const label = String(body.label ?? "").slice(0, 80) || null;
     const want = Number(body.want);
     const max = this.maxSlots();
@@ -1206,12 +1234,12 @@ export class Control extends DurableObject {
     }
     if (!slot) throw new HttpError(503, `all ${max} slots are taken`);
     // Recorded before the tunnel lookup, so an agent joining at the same moment doesn't get the same slot.
-    const a = { id: agent, slot, kind, label, joined: now };
+    const a = { id: agent, slot, pool, label, joined: now };
     this.agents.set(agent, a);
     this.sql.exec(
-      `INSERT INTO agents (id, slot, kind, label, joined) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET slot = excluded.slot, kind = excluded.kind, label = excluded.label, joined = excluded.joined`,
-      agent, slot, kind, label, now,
+      `INSERT INTO agents (id, slot, kind, label, joined, pool) VALUES (?, ?, '', ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET slot = excluded.slot, label = excluded.label, joined = excluded.joined, pool = excluded.pool`,
+      agent, slot, label, now, pool,
     );
     this.holds.set(slot, { agent, at: now }); // holds the slot until its first check-in
     const tunnel = await this.tunnelFor(slot);
@@ -1256,11 +1284,10 @@ export class Control extends DurableObject {
   }
 
   // Retire a slot nothing runs in any more: delete its tunnel, forget its runs and agents, and drop its DNS names.
-  // Slots within the GitHub machine count get refilled, so they can't be retired; lower the count first.
+  // (A pool that's short of machines takes the lowest free slot, so it may come back as a fresh slot.)
   async retireSlot(n) {
     const now = Date.now();
     if (!Number.isInteger(n) || n < 1) throw new HttpError(400, "slot must be a machine number");
-    if (n <= this.machines()) throw new HttpError(409, `slot ${n} is within the ${this.machines()} GitHub machines kept running; lower that first`);
     if (this.liveRuns(now).some((r) => r.machine === n)) throw new HttpError(409, `machine ${n} is still up; stop it first`);
     const slot = this.slots.get(n);
     if (slot) {
@@ -1413,7 +1440,7 @@ export class Control extends DurableObject {
       live[m] = { ...x, ready: Boolean(r.ready), status: r.status };
     }
     return {
-      now, range: rangeName, step, repo: this.env.REPO, machines: this.machines(),
+      now, range: rangeName, step, expected: this.expectedMachines(),
       projects: [...this.projects.values()].map((p) => this.describe(p)).sort((a, b) => a.name.localeCompare(b.name)),
       t, m: machines, live,
     };
@@ -1430,14 +1457,14 @@ export class Control extends DurableObject {
     const now = Date.now();
     return {
       now,
-      repo: this.env.REPO,
       domain: this.env.DOMAIN,
-      machines: this.machines(),
+      pools: Object.entries(this.pools()).map(([name, size]) => ({ name, size, live: new Set(this.liveRuns(now).filter((r) => r.pool === name).map((r) => r.machine)).size })),
+      expected: this.expectedMachines(),
       dnsError: this.dnsError,
       dnsNotes: this.dnsNotes ?? [],
       storage: this.storageConfigured() ? { bucket: this.env.FS_BUCKET, defaultMb: STORAGE_DEFAULT_MB, maxMb: STORAGE_MAX_MB, scannedAt: this.usageAt ?? null } : null,
       rebalance: { on: this.rebalanceOn(), log: this.rebalanceLog.slice(0, 10), hot: [...this.liveMachines(now).keys()].filter((m) => this.isHot(m, now)) },
-      // Slots to show: ones with a recent run, plus ones a GitHub machine is starting for.
+      // Slots to show: ones with a recent run, plus ones a machine is starting for.
       slots: [...new Set([
         ...[...this.runs.values()].filter((r) => now - r.seen < 3600_000).map((r) => r.machine),
         ...[...this.starts].filter(([, at]) => now - at < START_WAIT_MS).map(([n]) => n),
@@ -1455,7 +1482,9 @@ export class Control extends DurableObject {
           ready: Boolean(r.ready),
           handover: Boolean(r.handover),
           retiring: Boolean(r.retire),
-          kind: r.kind,
+          pool: r.pool ?? null,
+          expires: r.expires ?? null,
+          url: r.url ?? null,
           label: r.label,
           storage: r.storageState,
           projects: r.status,

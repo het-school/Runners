@@ -2,6 +2,8 @@
 
 A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
+The control plane doesn't know what a machine is; its agent says. An agent describes itself with a **pool** (the name of a replaceable set it belongs to: the control plane keeps each pool at its size by asking members to start replacements; or none, for a standalone host that keeps its slot across restarts), an **expiry** (when the run will be gone for certain, so its handover is scheduled from that; or none), a link and a label, and a **leaving** flag on its last check-in. The GitHub Actions agent is one pool member with a 6-hour expiry; anything else that runs the agent fits the same contract.
+
 - **Status page:** https://control.billybishop4-workers.xyz
 - **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 - **Admin portal:** https://control.billybishop4-workers.xyz/admin (step-by-step deploy guide for the portal and the API at [/admin#guide](https://control.billybishop4-workers.xyz/admin#guide)). It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
@@ -78,12 +80,13 @@ GET    /api/projects/<name>[?version=N]         a version's compose file, files 
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
-PUT    /api/settings                            {"machines": 10, "rebalance": true}  (GitHub machines to keep running; automatic rebalancing)
+PUT    /api/settings                            {"pools": {"github": 10}, "rebalance": true}  (machines to keep per pool; automatic rebalancing)
 POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 DELETE /api/slots/<n>                           retire an empty slot beyond the GitHub count: tunnel, records and DNS names go
 GET    /api/join-token                          the token a host joins with (admin token only)
-POST   /api/join                                an agent starting up: {"agent", "kind", "want"} -> its slot and tunnel token
+POST   /api/join                                an agent starting up: {"agent", "pool", "expires", "url", "label", "want"} -> its slot and tunnel token
+POST   /api/claim?pool=<name>                    machines to start so the pool has its size (for a watchdog outside the pool)
 ```
 
 ```sh
@@ -99,7 +102,7 @@ runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile
 runnerctl apply examples/stremio.yml         # a compose file
 runnerctl apply path/to/Dockerfile myapp --port 8000
 runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>
-runnerctl roll [n] | machines <n>
+runnerctl roll [n] | pool <name> <n>
 ```
 
 ## Your own machines
@@ -121,7 +124,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - tracks machines and hands out restarts
   - keeps the DNS for `<project>-<n>` pointed at tunnel `runner-<n>`
 - **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), run by [`machine.yml`](.github/workflows/machine.yml) on every machine. It:
-  - checks in every 20 seconds
+  - checks in every 20 seconds, describing its machine: pool `github`, expiry at the 6-hour limit, its run page
   - writes each project's files and runs `docker compose up -d --build --wait`
   - removes what's no longer wanted
   - restarts projects that stop answering
@@ -142,5 +145,5 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 - **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone. For stateful projects: `FS_ACCESS_KEY_ID` and `FS_SECRET_ACCESS_KEY` (an R2 token limited to the bucket in `FS_BUCKET`), with `FS_ENDPOINT` and the `FS` bucket binding in `wrangler.toml`.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Portal:** `/admin` and `/admin/api/*` are open, with no sign-in. Changes sent from other sites are refused.
-- **More machines:** raise the GitHub machine count in the portal (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account.
+- **More machines:** raise the `github` pool's size in the portal or with `runnerctl pool github <n>` (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

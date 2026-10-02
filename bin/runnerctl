@@ -9,13 +9,13 @@
 #   runnerctl rm <name>              delete a project and its versions
 #   runnerctl status                 projects and machines
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
-#   runnerctl machines <n>           how many GitHub machines to keep running
+#   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool github 10)
 #   runnerctl join-token             the token another host joins with (see /install.sh)
 #   runnerctl move <name> <from> [to]  move one copy of a project off a machine (new copy first, old one removed once healthy)
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 #   runnerctl wipe <name> [replica]  delete a (disabled) stateful project's data from the fleet's storage
-#   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names (not within the GitHub count)
+#   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names
 # The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
@@ -105,7 +105,7 @@ PY
            elif .ready then "online" else "starting" end)
         + "  " + ([.projects | to_entries[] | "\(.key) v\(.value.v) \(.value.s)"] | join(", ")))' ;;
   roll) api "/roll${1:+?machine=$1}" -X POST | jq . ;;
-  machines) [ $# -eq 1 ] || usage; api /settings -X PUT -d "{\"machines\": $1}" | jq . ;;
+  pool) [ $# -eq 2 ] || usage; api /settings -X PUT -d "{\"pools\": {\"$1\": $2}}" | jq . ;;
   join-token) api /join-token | jq -r .token ;;
   move) [ $# -ge 2 ] || usage; api "/projects/$1/move?from=$2${3:+&to=$3}" -X POST | jq -c '.placed' ;;
   evict) [ $# -eq 1 ] || usage; api "/machines/$1/evict" -X POST | jq . ;;

@@ -66,8 +66,8 @@ async function load() {
         : '<span class="warn">starting up</span>';
       const projects = Object.entries(r.projects).map(([name, s]) =>
         '<span class="chip"><span class="' + (STATE[s.s] || "") + '">●</span> ' + esc(name) + " v" + esc(s.v) + "</span>" + (s.e ? '<div class="err">' + esc(s.e) + "</div>" : "")).join("");
-      const run = r.kind === "host" ? esc(r.label || "host") + ' <span class="muted">(own host)</span>'
-        : '<a href="https://github.com/' + d.repo + "/actions/runs/" + esc(r.id) + '" target="_blank">' + esc(r.id) + "</a>";
+      const run = (r.url ? '<a href="' + esc(r.url) + '" target="_blank">' + esc(r.label || r.id) + "</a>" : esc(r.label || r.id)) +
+        ' <span class="muted">(' + (r.pool ? "pool " + esc(r.pool) : "standalone") + ")</span>";
       return "<tr><td>" + r.machine + "</td><td>" + run + "</td><td>" + state + "</td><td>" + (projects || '<span class="muted">none</span>') + "</td></tr>";
     }).join("") || '<tr><td colspan="4" class="muted">No machines have checked in</td></tr>');
 }

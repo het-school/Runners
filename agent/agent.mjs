@@ -15,7 +15,11 @@ import { basename, dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
+// What this agent tells the control plane about its machine. On GitHub Actions: it's one of the "github" pool
+// (interchangeable, started on request), gone for certain at the 6-hour limit, with its run page to link to.
+// Anywhere else it's a standalone host that keeps its slot across restarts and never expires.
 const github = env.GITHUB_ACTIONS === "true";
+const pool = github ? "github" : null;
 const base = github ? env.RUNNER_TEMP : (env.RUNNER_DATA ?? "/var/lib/runner");
 const started = Date.now();
 const hardStop = github ? started + 355 * 60_000 : Infinity; // leave before GitHub kills the job at 6 hours
@@ -33,6 +37,12 @@ let storage = null; // { endpoint, bucket, accessKeyId, secretAccessKey } for th
 const RCLONE = "rclone/rclone:1.75"; // mounts a replica's R2 directory (one container per stateful project)
 let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, so it gets its slot back after a restart
 let run = "";
+const describe = () => ({
+  pool,
+  expires: github ? hardStop : null,
+  url: github ? `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null,
+  label: github ? `run ${env.GITHUB_RUN_ID}` : hostname(),
+});
 // Commands run without the agent's own secrets, so a compose file can't read them.
 const cleanEnv = Object.fromEntries(
   Object.entries(env).filter(([k]) => !["TUNNEL_TOKEN", "CONTROL_TOKEN", "GH_TOKEN"].includes(k)),
@@ -412,7 +422,7 @@ async function join() {
       const res = await fetch(`${env.CONTROL_URL}/api/join`, {
         method: "POST",
         headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-        body: JSON.stringify({ agent, kind: github ? "github" : "host", label: github ? null : hostname(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
+        body: JSON.stringify({ agent, ...describe(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
         signal: AbortSignal.timeout(30_000),
       });
       const data = await res.json().catch(() => ({}));
@@ -444,7 +454,7 @@ async function sync() {
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
     headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ machine, run, agent, kind: github ? "github" : "host", label: github ? null : hostname(), started, ready, status, storage: storageState(), leaving, metrics: sent }),
+    body: JSON.stringify({ machine, run, agent, ...describe(), started, ready, status, storage: storageState(), leaving, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);

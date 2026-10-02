@@ -3,14 +3,14 @@ cd "$(dirname "$0")/.."
 for port in 8911 8790; do for p in $(ss -ltnp | grep ":$port " | grep -o 'pid=[0-9]*' | cut -d= -f2); do kill $p; done; done
 rm -rf /tmp/runner-test-state
 (node "$(dirname "$0")/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var MACHINES:2 \
+(npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":2}' \
   --var FS_BUCKET:runner-fs --var FS_ENDPOINT:https://acct.r2.example --var FS_ACCESS_KEY_ID:AK --var FS_SECRET_ACCESS_KEY:SK --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 40); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; A='authorization: Bearer adm'; START=$(( $(date +%s%3N) - 6*60*1000 ))
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" -H content-type:application/json -d "$2"; echo; }
-join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"kind\":\"github\",\"want\":$2}" | jq -c '{machine, storage: (.storage|keys)}'; }
+join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"github\",\"want\":$2}" | jq -c '{machine, storage: (.storage|keys)}'; }
 # sync machine run started status -> prints desired summary
-sync() { curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$1,\"run\":\"$2\",\"agent\":\"gh-$2\",\"kind\":\"github\",\"started\":$3,\"ready\":true,\"status\":$4,\"storage\":\"ok\",\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":5,\"memUsed\":10,\"memTotal\":100},\"a\":{}}}}" | jq -c '{run:"'$2'", retire, desired: (.desired | to_entries | map({(.key): (.value.storage // "stateless")}) | add), storage: (.storage.bucket)}'; }
+sync() { curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$1,\"run\":\"$2\",\"agent\":\"gh-$2\",\"pool\":\"github\",\"started\":$3,\"ready\":true,\"status\":$4,\"storage\":\"ok\",\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":5,\"memUsed\":10,\"memTotal\":100},\"a\":{}}}}" | jq -c '{run:"'$2'", retire, desired: (.desired | to_entries | map({(.key): (.value.storage // "stateless")}) | add), storage: (.storage.bucket)}'; }
 echo "== validation:"
 put bad1 '{"dockerfile":"FROM x","state":"stateful"}' | jq -r .error
 put bad2 '{"dockerfile":"FROM x","state":"stateful","data":"/data","storage":600}' | jq -r .error
@@ -27,7 +27,7 @@ sync 1 r1 $START '{}'; sync 2 r2 $START '{}'
 curl -s $B/api/status | jq -c '.projects[] | {name, placed:[.placed[] | "\(.machine):\(.replica)"]}'
 M=$(curl -s $B/api/status | jq -r '.projects[] | select(.name=="notes") | .placed[0].machine'); O=$([ "$M" = 1 ] && echo 2 || echo 1)
 sync $M r$M $START '{}' | jq -c .desired
-curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$M,\"run\":\"r$M\",\"agent\":\"gh-r$M\",\"kind\":\"github\",\"started\":$START,\"ready\":true,\"status\":{}}" | jq -r '.desired.notes.compose, .desired.every.compose' | grep -E "x-runner|source|target|replicas" 
+curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$M,\"run\":\"r$M\",\"agent\":\"gh-r$M\",\"pool\":\"github\",\"started\":$START,\"ready\":true,\"status\":{}}" | jq -r '.desired.notes.compose, .desired.every.compose' | grep -E "x-runner|source|target|replicas" 
 echo "== handover gating: newer run r${M}b on machine $M while r$M still reports notes -> no notes; after r$M stops it -> notes"
 H='{"notes":{"v":1,"s":"healthy"},"every":{"v":1,"s":"healthy"}}'
 sync $M r$M $START "$H" >/dev/null

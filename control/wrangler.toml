@@ -1,4 +1,4 @@
-# Control plane: project specs, rolling updates, machine health, DNS.
+# Control plane: project specs, placement, machine health, DNS. Knows nothing about what machines are; their agents say.
 # Deploy from control/: wrangler deploy (secrets: ADMIN_TOKEN, NODE_TOKEN, and CF_API_TOKEN: Cloudflare Tunnel edit
 # on the account, DNS and Workers Routes edit on the zone).
 name = "runner-control"
@@ -12,7 +12,7 @@ rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
 REPO = "hetp4401/runner"
 DOMAIN = "billybishop4-workers.xyz"
 ZONE = "44fb65648f475249f22e9d0cffdd393d"
-MACHINES = "10" # GitHub machines to keep running, until changed in the portal
+POOLS = '{"github": 10}' # pools of replaceable machines and their sizes (the portal can change them)
 CONTROL_HOST = "control.billybishop4-workers.xyz"
 ACCOUNT_ID = "8eaec409542ced2fc62e1b31228e8f85"
 SCRIPT_NAME = "runner-control"
