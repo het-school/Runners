@@ -1198,6 +1198,9 @@ export class Control extends DurableObject {
   claimStarts(pool, by, now) {
     if (!pool || !(pool in this.pools())) return [];
     const live = this.liveRuns(now);
+    // Just after a (re)start, runs loaded from storage haven't said which pool they're in yet; claiming then would
+    // start a whole pool's worth of extras. Give them a couple of check-ins (a cold start has no live runs to wait for).
+    if (now - this.bootAt < 2 * LIVE_MS && live.some((x) => now - x.seen > now - this.bootAt)) return [];
     const members = new Set(live.filter((x) => x.pool === pool).map((x) => x.machine));
     const starting = [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !live.some((x) => x.machine === n)).length;
     const out = [];
