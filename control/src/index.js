@@ -1116,6 +1116,7 @@ export class Control extends DurableObject {
     if (!r) {
       const agent = String(body.agent ?? run).slice(0, 100);
       r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, url, drain: 0 };
+      r.storageState = typeof body.storage === "string" ? body.storage.slice(0, 20) : undefined; // counts from its first check-in
       this.saveRun(r);
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status) ||
