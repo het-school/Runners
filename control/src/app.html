@@ -615,8 +615,16 @@ function machineState(n, r) {
   if (S.status.rebalance.hot.includes(n)) return { kind: "failed", text: "hot" };
   return { kind: "healthy", text: `online · ${ago(S.status.now - r.started)}` };
 }
-const APP_STATE = { live: ["healthy", "live"], deploying: ["deploying", "deploying"], halted: ["failed", "failed"], disabled: ["gone", "disabled"] };
-const appPill = (p, runs) => (p.state === "live" && runs && appFailures(p, runs).length ? pill("failed", "failing") : pill(...APP_STATE[p.state] ?? ["gone", p.state]));
+const APP_STATE = { live: ["healthy", "live"], deploying: ["deploying", "deploying"], failing: ["failed", "failing"], disabled: ["gone", "disabled"] };
+// What an app is doing, from its replicas: failing if any machine reports it failed, deploying until every replica
+// that can run is healthy on the latest version. (A failing version stays until it's fixed or rolled back by hand.)
+function appState(p, runs) {
+  if (!p.enabled) return "disabled";
+  if (!runs) return "live";
+  if (appFailures(p, runs).length) return "failing";
+  return progress(p, runs).ok < Math.min(p.replicas, placeable(p)) ? "deploying" : "live";
+}
+const appPill = (p, runs) => pill(...APP_STATE[appState(p, runs)]);
 const runKind = (s) => (!s ? "gone" : s.s === "healthy" ? "healthy" : s.s === "failed" ? "failed" : "deploying");
 // One entry per replica (its staying copy), or every copy including ones moving away.
 function copies(p, all = false) {
@@ -627,7 +635,7 @@ function copies(p, all = false) {
   }).flat();
 }
 function progress(p, runs) {
-  const target = p.halted ? p.stable : p.version;
+  const target = p.version;
   let ok = 0, busy = 0, bad = 0;
   for (const x of copies(p)) {
     const s = x.machine != null ? runs.get(x.machine)?.projects[p.name] : null;
@@ -661,13 +669,11 @@ function problems() {
   for (const n of st.dnsNotes ?? []) out.push({ kind: "deploying", text: `DNS: ${n}` });
   for (const p of st.projects) {
     const href = appHref(p.name);
-    if (p.state === "halted") out.push({ kind: "failed", href, text: `${p.name}: v${p.version} failed; running v${p.stable ?? "–"} instead` });
-    else if (p.state === "deploying") {
+    const state = appState(p, runs);
+    if (state === "failing") out.push({ kind: "failed", href, text: `${p.name}: failing on machine ${appFailures(p, runs).map((x) => x.machine).join(", ")}` });
+    else if (state === "deploying") {
       const g = progress(p, runs);
-      out.push({ kind: "deploying", href, text: `${p.name}: deploying v${p.version} (${g.ok} of ${g.total} healthy${g.bad ? `, ${g.bad} failed` : ""})` });
-    } else if (p.enabled) {
-      const f = appFailures(p, runs);
-      if (f.length) out.push({ kind: "failed", href, text: `${p.name}: failing on machine ${f.map((x) => x.machine).join(", ")}` });
+      out.push({ kind: "deploying", href, text: `${p.name}: deploying v${p.version} (${g.ok} of ${Math.min(p.replicas, placeable(p))} healthy)` });
     }
     if (p.enabled && p.staying < placeable(p)) out.push({ kind: "deploying", href, text: `${p.name}: ${plural(placeable(p) - p.staying, "replica")} waiting for a machine` });
   }
@@ -684,17 +690,17 @@ const problemList = (list) => list.length
 // The progress of a deploy, and every failing machine's error.
 function appStatusBlock(p, runs, { full = false } = {}) {
   let html = "";
-  if (p.state === "deploying" || (full && p.enabled && p.stable !== p.version)) {
-    const g = progress(p, runs);
+  const g = p.enabled ? progress(p, runs) : null;
+  if (g && g.ok < Math.min(p.replicas, placeable(p))) {
     const w = (n) => (100 * n) / Math.max(1, g.total);
     html += `<div class="progress">v${g.target}: ${g.ok} of ${g.total} healthy${g.busy ? ` · ${g.busy} starting` : ""}${g.bad ? ` · ${g.bad} failed` : ""}
       <div class="bars" aria-hidden="true"><i style="width:${w(g.ok)}%;background:var(--healthy)"></i><i style="width:${w(g.bad)}%;background:var(--failed)"></i><i style="width:${w(g.busy)}%;background:var(--deploying);opacity:.5"></i></div></div>`;
   }
   const f = p.enabled ? appFailures(p, runs) : [];
-  if (p.halted || f.length) {
-    html += `<div class="errbox">${p.halted ? `<b>v${p.version} failed.</b> Every replica is back on v${esc(p.stable ?? "–")}.` : `<b>Failing on ${plural(f.length, "machine")}.</b>`}
-      ${(f.length ? f : [{ machine: null, e: p.halted }]).map((x) => `<div class="item">${x.machine != null ? `<a href="${machineHref(x.machine)}">Machine ${x.machine}</a> (v${esc(x.v)})` : ""}<pre>${esc(x.e)}</pre></div>`).join("")}
-      ${full ? `<div class="actions"><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit v${p.version}</a><button type="button" class="small" data-act="retry">Retry</button></div>` : ""}</div>`;
+  if (f.length) {
+    html += `<div class="errbox"><b>Failing on ${plural(f.length, "machine")}.</b>${full ? " It stays on this version until it's fixed: edit it, or roll back from Versions." : ""}
+      ${f.map((x) => `<div class="item"><a href="${machineHref(x.machine)}">Machine ${x.machine}</a> (v${esc(x.v)})<pre>${esc(x.e)}</pre></div>`).join("")}
+      ${full ? `<div class="actions"><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit v${p.version}${appLockmark(p.name)}</a></div>` : ""}</div>`;
   }
   return html;
 }
@@ -1160,17 +1166,6 @@ async function showDiff(name, version) {
     await sheet({ title: `${name}: v${version} → v${p.version} (latest)`, ok: null, cancel: "Close", wide: true, html: `<div class="diff">${d.html}</div>` });
   } catch (e) { fail(e); }
 }
-async function retry(name) {
-  const p = S.status.projects.find((x) => x.name === name);
-  try {
-    const spec = await getSpec(name, p.version);
-    const body = { compose: spec.compose, files: spec.files, port: spec.port, replicas: spec.replicas };
-    if (!(await owned(name, () => api("PUT", `/projects/${enc(name)}`, body, { app: name })))) return;
-    fast();
-    toast(`Retrying ${name} v${p.version}`);
-    loadStatus();
-  } catch (e) { fail(e); }
-}
 async function setEnabled(name, on) {
   if (!(await ensureApp(name))) return;
   if (!on && !(await confirmSheet(`Disable ${name}?`, `Its containers stop on every machine and its URLs stop answering. Its spec and versions are kept, so you can enable it again.`, "Disable", "danger"))) return;
@@ -1380,7 +1375,7 @@ function vApps() {
       const list = st.projects.filter((p) => p.name.includes(S.filter.trim().toLowerCase()));
       $("#apps-list").innerHTML = list.map((p) => `<div class="card">
           <div class="row"><a class="name grow" href="${appHref(p.name)}">${esc(p.name)}</a>${appPill(p, runs)}</div>
-          <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} still running)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${placedText(p)} · ${p.files.length ? "built from files" : "published images"}</div>
+          <div class="meta">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · ${placedText(p)} · ${p.files.length ? "built from files" : "published images"}</div>
           ${p.port ? `<div class="meta url" style="margin-top:4px">${appUrls(p)}</div>` : ""}
           ${appStatusBlock(p, runs)}${replicaChips(p, runs)}
           <div class="actions"><a class="btn small" href="${appHref(p.name)}">Open</a><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit</a></div>
@@ -1409,7 +1404,7 @@ function vApp(name) {
     const cur = files.find(([path]) => path === st.tab);
     $("#ad-spec").innerHTML = `<div class="row" style="margin-bottom:8px">
         <select id="ad-version" aria-label="Version" style="width:auto">${[...st.spec.versions].reverse().map((v) =>
-          `<option value="${v.version}"${v.version === st.shown ? " selected" : ""}>v${v.version}${v.version === p.version ? " (latest)" : ""}${v.version === p.stable ? " (good)" : ""}</option>`).join("")}</select>
+          `<option value="${v.version}"${v.version === st.shown ? " selected" : ""}>v${v.version}${v.version === p.version ? " (latest)" : ""}</option>`).join("")}</select>
         <span class="meta grow">${plural(files.length, "file")} · port ${st.spec.port ?? "none"}</span>
         <button type="button" class="small" data-act="copyfile"${cur ? "" : " disabled"}>Copy</button></div>
       ${files.length ? `<div class="ftabs" role="tablist">${files.map(([path]) => `<button type="button" class="ftab" role="tab" aria-selected="${path === st.tab}" data-tab="${esc(path)}">${esc(path)}</button>`).join("")}</div><pre class="code" id="ad-code"></pre>` : `<div class="card empty">No files</div>`}`;
@@ -1447,7 +1442,6 @@ function vApp(name) {
         <div class="sub">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · updated ${ago(S.status.now - p.updated)} ago · ${p.files.length ? "built from files" : "published images"}</div>
         ${p.port ? `<div class="url" style="margin-top:4px">${appUrls(p, true)}</div>` : ""}
         <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit${appLockmark(name)}</a>
-          ${p.halted ? `<button type="button" data-act="retry">Retry v${p.version}${appLockmark(name)}</button>` : ""}
           <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}${appLockmark(name)}</button>
           <button type="button" class="danger" data-act="delete">Delete${appLockmark(name)}</button>
           <button type="button" data-act="password">${p.hasPassword ? "Change password" : "Set a password"}${appLockmark(name)}</button></div>
@@ -1460,7 +1454,7 @@ function vApp(name) {
       const rows = copies(p, true).map((x) => {
         const r = x.machine != null ? runs.get(x.machine) : null;
         const s = r?.projects[p.name];
-        const target = !p.enabled ? null : p.halted ? p.stable : p.version;
+        const target = !p.enabled ? null : p.version;
         const kind = x.leaving ? "leaving" : x.machine == null ? "gone" : !r ? "gone" : runKind(s);
         const text = x.leaving ? `moving to machine ${x.leaving.to}` : x.machine == null ? (x.replica > up ? "no machine free (starts when one joins)" : "waiting for a machine") : !r ? "machine down" : s ? s.s : "not running yet";
         return { cells: [
@@ -1482,7 +1476,7 @@ function vApp(name) {
       const versions = st.spec?.versions ?? [];
       $("#ad-versions").innerHTML = table(["Version", "", "Port", "Replicas", "Created", ""], [...versions].reverse().map((v) => ({
         cls: v.version === st.shown ? "shown" : "",
-        cells: [`<b>v${v.version}</b>`, `${v.version === p.version ? `<span class="pill gone">latest</span>` : ""} ${v.version === p.stable ? pill("healthy", "good") : ""}`,
+        cells: [`<b>v${v.version}</b>`, `${v.version === p.version ? `<span class="pill gone">latest</span>` : ""}`,
           esc(v.port ?? "–"), esc(v.replicas), `<span class="s">${esc(new Date(v.created).toLocaleString())}</span>`,
           `<span class="row"><button type="button" class="small" data-act="view" data-v="${v.version}">View</button>${v.version !== p.version ? `<button type="button" class="small" data-act="diff" data-v="${v.version}">Changes</button><button type="button" class="small" data-act="rollback" data-v="${v.version}">Roll back</button>` : ""}</span>`],
       })), { empty: "Loading…" });
@@ -1518,7 +1512,6 @@ function vApp(name) {
       if (b.dataset.tab) { st.tab = b.dataset.tab; return renderSpec(); }
       const p = S.status.projects.find((x) => x.name === name);
       const act = b.dataset.act, v = Number(b.dataset.v);
-      if (act === "retry") return retry(name);
       if (act === "disable") return setEnabled(name, false);
       if (act === "enable") return setEnabled(name, true);
       if (act === "delete") return deleteApp(name);
@@ -1613,7 +1606,7 @@ function vEditor(name, sample) {
     title: name ? `Edit ${name}` : "New app",
     html: `<a class="back" href="${name ? appHref(name) : "#/apps"}">← ${name ? esc(name) : "Apps"}</a>
       <h1>${name ? `Edit ${esc(name)}` : "New app"}</h1>
-      <div class="sub">${name ? `Deploying makes a new version; the replicas switch to it, and if it fails they go back to the last good one.${canChange(name) ? "" : " It needs the app's password (or the fleet password): you'll be asked."}` : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
+      <div class="sub">${name ? `Deploying makes a new version, and every replica switches to it. If it fails, its page shows each machine's error; edit it again, or roll back from Versions.${canChange(name) ? "" : " It needs the app's password (or the fleet password): you'll be asked."}` : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
       ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button></div>`}
       <div class="errbox" id="ed-error" role="alert" hidden></div>
       <form id="ed-form" novalidate>
@@ -1926,7 +1919,7 @@ function vGuide() {
       $("#guide").innerHTML = `
       <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 10, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
         Each replica has its own URL: replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code>, whichever machine it's on. There's no shared URL that spreads visitors across replicas, so hand out the replica URL you want people on.
-        Each deploy is a new version; if it fails, the replicas go back to the last good one.</p>
+        Each deploy is a new version, and every replica switches to it at once. If it fails, it stays failing (the app's page shows each machine's error) until you deploy a fix or roll back.</p>
       <h3>From this site</h3>
       <ol><li>Open <a href="#/apps/new">New app</a>, or start from one of its examples.</li>
         <li><b>Name:</b> lowercase letters, digits and dashes, like <code>my-app</code>.</li>

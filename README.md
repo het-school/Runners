@@ -40,7 +40,7 @@ Rebalancing is automatic (switch it off on the Fleet page or with `runnerctl reb
 
 ### Rollouts
 
-Each change is a new version, and every machine switches to it at once. If the new version fails on a machine, every replica goes back to the last good version, and the app's page shows each failing machine's error until you deploy a fix or roll back from the Versions list. A disabled project keeps its spec and versions but runs nowhere.
+Each change is a new version, and every machine switches to it at once. Nothing is rolled back automatically (dropped on purpose): a failing version stays failing, and the app's page shows each failing machine's error until you deploy a fix or roll back from the Versions list. A disabled project keeps its spec and versions but runs nowhere.
 
 ## API
 
