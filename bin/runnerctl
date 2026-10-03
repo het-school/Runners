@@ -100,7 +100,7 @@ PY
         + (if .hasPassword == false then "  (no app password)" else "" end)
         + (if .halted then "\n    \(.halted)" else "" end)),
       "Machines: \([.runs[] | select(.live and (.retiring | not)) | .machine] | unique | length) of \(.expected) up",
-      (.runs[] | select(.live) | "  #\(.machine)  run \(.id)  "
+      (.runs[] | select(.live) | "  #\(.machine)  \(.label // "")  "
         + (if .retiring then "leaving" elif .handover then "starting its replacement"
            elif .ready then "online" else "starting" end)
         + "  " + ([.projects | to_entries[] | "\(.key) v\(.value.v) \(.value.s)"] | join(", ")))' ;;

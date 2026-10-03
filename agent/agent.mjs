@@ -9,7 +9,7 @@
 //   AGENT_ID      this agent's ID (default: one made up once and kept in RUNNER_DATA, so a restart gets its slot back)
 //   POOL, POOL_SIZE   the pool this machine belongs to and how many machines it should have (none: a standalone host)
 //   MACHINE       the slot to take, when the machine was started for one
-//   LABEL, LINK   what the status page calls it (default: the hostname) and links to
+//   LABEL         what the pages call it (default: the hostname)
 //   START_CMD     a shell command that starts a new machine for slot $SLOT. With it, the agent starts the pool members
 //                 the control plane says are missing, and its own replacement when it's handed over; without it, a
 //                 handover restarts the agent (where it runs under a supervisor, it comes back with the latest code)
@@ -37,7 +37,6 @@ let run = ""; // this start of the agent
 const describe = () => ({
   pool,
   poolSize: pool && env.POOL_SIZE ? Number(env.POOL_SIZE) : undefined, // how many machines the pool should have
-  url: env.LINK || null,
   label: env.LABEL || hostname(),
   starts: Boolean(env.START_CMD),
 });

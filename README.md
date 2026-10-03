@@ -2,7 +2,7 @@
 
 A self-healing fleet of machines that join a control plane: pools of GitHub Actions machines plus any of your own hosts, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
-Neither the control plane nor the agent knows what a machine is, or how long it lives; they're told. An agent describes its machine with a **pool** (the name of a replaceable set it belongs to, which the control plane keeps at its size; or none, for a standalone host that keeps its slot across restarts), whether it **starts** machines (it has a `START_CMD`), a link and a label, and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). Everything about GitHub Actions lives in [`machine.yml`](.github/workflows/machine.yml): the job's 6-hour lifetime, a timer that drains the machine 4h15m-5h15m in at random, and the command that starts another machine.
+Neither the control plane nor the agent knows what a machine is, or how long it lives; they're told. An agent describes its machine with a **pool** (the name of a replaceable set it belongs to, which the control plane keeps at its size; or none, for a standalone host that keeps its slot across restarts), whether it **starts** machines (it has a `START_CMD`), a label (a name; it defaults to the hostname), and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). Everything about GitHub Actions lives in [`machine.yml`](.github/workflows/machine.yml): the job's 6-hour lifetime, a timer that drains the machine 4h15m-5h15m in at random, and the command that starts another machine.
 
 - **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and deploying a new app.
@@ -102,7 +102,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - tracks machines and hands out restarts
   - keeps the DNS in line: `<project>` and `<project>-<k>` are answered by the Worker, which reaches machine *n* at `<project>-m<n>`, pointed at tunnel `runner-<n>`
 - **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), on every machine (run by [`machine.yml`](.github/workflows/machine.yml) on GitHub Actions, by `install.sh` on a host). It's configured by environment variables (listed at the top of the file) and:
-  - checks in every 20 seconds, describing its machine: pool, label, link, whether it starts machines
+  - checks in every 20 seconds, describing its machine: pool, label, whether it starts machines
   - writes each project's files and runs `docker compose up -d --build --wait`
   - removes what's no longer wanted
   - restarts projects that stop answering

@@ -1357,7 +1357,7 @@ function machineCards(compact = false) {
     const errs = r ? Object.entries(r.projects).filter(([, s]) => s.s === "failed") : [];
     return `<a class="card" href="${machineHref(n)}">
       <div class="row"><span class="name grow">Machine ${n}</span>${pill(ms.kind, ms.text)}</div>
-      <div class="meta">${r ? esc(r.label || r.id) : ms.kind === "deploying" ? "a replacement is starting" : "not checking in"}</div>
+      <div class="meta">${r ? esc(r.label || "") : ms.kind === "deploying" ? "a replacement is starting" : "not checking in"}</div>
       ${h ? `<div class="meta" style="margin-top:6px">CPU ${F.pct(h.cpu)}${meter(h.cpu)} &nbsp; memory ${F.pct(pctOf(h.memUsed, h.memTotal))}${meter(pctOf(h.memUsed, h.memTotal))} ${compact ? "" : spark(hcol(n, "cpu"))}</div>` : ""}
       ${chips ? `<div class="chips">${chips}</div>` : compact ? "" : `<div class="meta" style="margin-top:6px">No apps placed here</div>`}
       ${!compact && errs.length ? `<div class="errbox">${errs.map(([name, s]) => `<div class="item"><b>${esc(name)}</b> v${esc(s.v)}<pre>${esc(s.e || "failed")}</pre></div>`).join("")}</div>` : ""}
@@ -1744,7 +1744,7 @@ function vMachine(n) {
       const st = S.status, runs = runsBy(), r = runs.get(n), ms = machineState(n, r);
       const known = st.slots.includes(n) || r;
       $("#md-head").innerHTML = `<div class="row"><h1 class="grow">Machine ${n}</h1>${pill(ms.kind, ms.text)}</div>
-        <div class="sub">${r ? `${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : esc(r.label || r.id)} · up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
+        <div class="sub">${r ? `${r.label ? `${esc(r.label)} · ` : ""}up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
       const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
       $("#md-apps").innerHTML = table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
         const s = r?.projects[p.name];
@@ -1869,7 +1869,7 @@ function joinBlock() {
   const st = S.status;
   const newcomers = joinInfo ? st.runs.filter((r) => !joinInfo.slots.has(r.id) && r.live) : [];
   if (joinInfo) return `${codebox(joinInfo.command)}<p class="hint">The token in it is a secret: anyone who has it can add a machine to the fleet.</p>
-    <div style="margin-top:10px">${newcomers.length ? newcomers.map((r) => `<div class="ok-line">✓ Machine ${r.machine} joined (${esc(r.label || r.id)}) <a href="${machineHref(r.machine)}">Open</a></div>`).join("") : `<span class="meta">${pill("deploying", "waiting")} for a new machine to check in…</span>`}</div>`;
+    <div style="margin-top:10px">${newcomers.length ? newcomers.map((r) => `<div class="ok-line">✓ Machine ${r.machine} joined${r.label ? ` (${esc(r.label)})` : ""} <a href="${machineHref(r.machine)}">Open</a></div>`).join("") : `<span class="meta">${pill("deploying", "waiting")} for a new machine to check in…</span>`}</div>`;
   return `<div class="row" style="align-items:flex-end">
       <div><label class="f" for="cj-label">Name (optional)</label><input id="cj-label" placeholder="its hostname" style="width:180px"></div>
       <button type="button" class="primary" data-act="join">Show the join command${lockmark()}</button></div>

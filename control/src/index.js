@@ -7,7 +7,7 @@
 //            for a standalone host that keeps its slot across restarts
 //   starts   whether it can start machines: pool members that can are asked to start missing peers and their own
 //            replacements; for the rest, whatever watches the pool asks /api/claim
-//   url      what to link to for it, and a label
+//   label    a name for it, shown on the pages
 //   leaving  on its last check-in, when it's going for good (its replicas are placed elsewhere at once)
 // and whatever runs the machine pings POST /api/drain when it's going down soon (a timer, a cron before
 // maintenance, a cloud termination notice): the control plane then hands the machine over, one at a time, the same
@@ -346,7 +346,7 @@ export class Control extends DurableObject {
     if (!runColumns.has("agent")) this.sql.exec("ALTER TABLE runs ADD COLUMN agent TEXT");
     if (!runColumns.has("kind")) this.sql.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); // no longer used
     if (!runColumns.has("label")) this.sql.exec("ALTER TABLE runs ADD COLUMN label TEXT");
-    for (const col of ["pool TEXT", "url TEXT", "drain INTEGER"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
+    for (const col of ["pool TEXT", "drain INTEGER"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
     if (!columns("agents").has("pool")) this.sql.exec("ALTER TABLE agents ADD COLUMN pool TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
     // which happen whenever Cloudflare lets the object sleep.
@@ -470,11 +470,11 @@ export class Control extends DurableObject {
     this.runs.set(r.id, r);
     r.savedSeen = r.seen;
     this.sql.exec(
-      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label, pool, url, drain)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO runs (id, machine, started, status, ready, handover, retire, seen, agent, kind, label, pool, drain)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET status = excluded.status, ready = excluded.ready, handover = excluded.handover,
-         retire = excluded.retire, seen = excluded.seen, label = excluded.label, pool = excluded.pool, url = excluded.url, drain = excluded.drain`,
-      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, "", r.label, r.pool ?? null, r.url ?? null, r.drain ?? 0,
+         retire = excluded.retire, seen = excluded.seen, label = excluded.label, pool = excluded.pool, drain = excluded.drain`,
+      r.id, r.machine, r.started, JSON.stringify(r.status), r.ready, r.handover, r.retire, r.seen, r.agent, "", r.label, r.pool ?? null, r.drain ?? 0,
     );
   }
 
@@ -1085,19 +1085,18 @@ export class Control extends DurableObject {
     const ready = body.ready ? 1 : 0;
     // How the agent describes its machine (see the top of this file).
     const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
-    const url = typeof body.url === "string" && /^https:\/\/[^\s"<>]{1,300}$/.test(body.url) ? body.url : null;
     const label = String(body.label ?? "").slice(0, 80) || null;
     const starts = body.starts !== false; // agents from before this field could all start machines
     this.askPoolSize(pool, body.poolSize);
     let r = this.runs.get(run);
     if (!r) {
       const agent = String(body.agent ?? run).slice(0, 100);
-      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, url, drain: 0, starts };
+      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, drain: 0, starts };
       this.saveRun(r);
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status) ||
-        pool !== (r.pool ?? null) || url !== (r.url ?? null) || label !== (r.label ?? null);
-      Object.assign(r, { status, ready, seen: now, pool, url, label });
+        pool !== (r.pool ?? null) || label !== (r.label ?? null);
+      Object.assign(r, { status, ready, seen: now, pool, label });
       r.starts = starts; // sent with every check-in, so it's kept in memory only
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
@@ -1440,7 +1439,7 @@ export class Control extends DurableObject {
     for (const [m, x] of this.liveMetrics) {
       const r = this.runs.get(x.run);
       if (now - x.t > LIVE_MS || !r) continue;
-      live[m] = { ...x, ready: Boolean(r.ready), status: r.status, url: r.url ?? null, label: r.label };
+      live[m] = { ...x, ready: Boolean(r.ready), status: r.status, label: r.label };
     }
     return {
       now, range: rangeName, step, expected: this.expectedMachines(),
@@ -1487,7 +1486,6 @@ export class Control extends DurableObject {
           retiring: Boolean(r.retire),
           pool: r.pool ?? null,
           draining: Boolean(r.drain),
-          url: r.url ?? null,
           label: r.label,
           projects: r.status,
         })),

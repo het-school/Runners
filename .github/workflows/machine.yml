@@ -3,7 +3,7 @@ run-name: machine ${{ inputs.machine }}
 
 # One machine of the fleet. Its agent joins the control plane (https://control.billybishop4-workers.xyz), which
 # gives it slot n and the token for tunnel runner-n, and keeps the projects in line. Everything about GitHub is
-# here, not in the agent: this job's lifetime, how a machine is started (START_CMD), and its run page (LINK).
+# here, not in the agent: this job's lifetime and how a machine is started (START_CMD).
 # Machines are started by the other machines and by the watchdog workflow; start one here to add it right away.
 on:
   workflow_dispatch:
@@ -31,21 +31,18 @@ jobs:
           CONTROL_URL: https://control.billybishop4-workers.xyz
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-          # How the agent sees this machine: a member of pool POOL, in slot MACHINE, with this run's page as its link.
+          # How the agent sees this machine: a member of pool POOL, in slot MACHINE. It names itself (its hostname) and makes up its own ID.
           RUNNER_DATA: ${{ runner.temp }}
-          AGENT_ID: gh-${{ github.run_id }}
           POOL: ${{ vars.POOL || 'github' }} # this repo's pool on the control plane (set the POOL variable in a second account's copy)
           POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
           MACHINE: ${{ inputs.machine }}
-          LABEL: run ${{ github.run_id }}
-          LINK: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # How a machine of this pool starts another: a run of this workflow for slot $SLOT.
           START_CMD: gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
         run: |
           # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down
           # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved.
           ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --retry 5 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
-              -H 'Content-Type: application/json' -d "{\"agent\": \"$AGENT_ID\"}" "$CONTROL_URL/api/drain" ) &
+              -H 'Content-Type: application/json' -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
           # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
           # exec: the agent is the step's own process, so a cancelled run's signal reaches it too (timeout passes it on and keeps its exit status).
           exec timeout --preserve-status 355m node agent/agent.mjs
