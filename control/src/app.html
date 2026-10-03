@@ -123,6 +123,7 @@
   label.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: var(--fs-sm); }
   .hint { color: var(--muted); font-size: var(--fs-xs); margin: 5px 0 0; }
   .hint.bad { color: var(--failed); font-weight: 600; }
+  button.link { background: none; border: 0; padding: 6px 0; min-height: 0; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
   .stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface); }
   .stepper button { border: 0; border-radius: 0; min-width: 44px; font-size: 18px; }
   .stepper b { min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -187,7 +188,7 @@
   details.more > summary { cursor: pointer; font-size: var(--fs-sm); font-weight: 600; color: var(--fg-2); padding: 10px 0; }
   .spark { display: inline-block; vertical-align: middle; margin-right: 6px; }
   .log { font-size: var(--fs-sm); margin-top: 8px; }
-  .lockic { width: 12px; height: 12px; vertical-align: -1px; }
+  .lockic { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; }
   .mob { display: none; }
   @media (max-width: 640px) { .mob { display: inline; } }
 
@@ -310,6 +311,7 @@ function ago(ms) {
 const pctOf = (a, b) => (isNum(a) && b > 0 ? (100 * a) / b : null);
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const MAX_REPLICAS = 10;
+const MIN_APP_PASSWORD = 6;
 
 // ======================================================================== state
 const S = {
@@ -342,10 +344,10 @@ function forgetPw() {
 const LOCK = (open) => `<svg class="lockic" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="8" rx="1.5" fill="currentColor"/><path d="${open ? "M5 7V4.5a3 3 0 0 1 5.8-1" : "M5 7V5a3 3 0 0 1 6 0v2"}" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
 const lockmark = () => (pw ? "" : ` <span class="lockmark" title="needs the fleet password">${LOCK(false)}<span class="mob"> </span></span>`);
 
-async function unlock() {
+async function unlock(intro) {
   const ok = await sheet({
     title: "Fleet password", ok: "Unlock",
-    html: `<p class="meta">Changing the fleet (pool sizes, rebalancing, restarting machines, moving apps off a machine, retiring slots, the join command) needs the password. Apps don't.</p>
+    html: `${intro ? `<p>${esc(intro)}</p>` : ""}<p class="meta">Changing the fleet (pool sizes, rebalancing, restarting machines, moving apps off a machine, retiring slots, the join command) needs the fleet password. It can also change every app.</p>
       <label class="f" for="pw-in">Password</label><input id="pw-in" type="password" autocomplete="current-password" required>
       <label class="check"><input type="checkbox" id="pw-remember"> Remember on this device</label>`,
     onOpen: (d) => $("#pw-in", d).focus(),
@@ -379,12 +381,95 @@ async function fleet(fn) {
   }
 }
 
+// ======================================================================== app passwords
+// An app's password is set when it's deployed; changing the app needs it, or the fleet password. Once given here it's
+// kept for this tab, or on this device if asked.
+const appKey = (name) => `app-password:${name}`;
+const appPw = (name) => sessionStorage.getItem(appKey(name)) || localStorage.getItem(appKey(name)) || "";
+function saveAppPw(name, v, remember) {
+  sessionStorage.setItem(appKey(name), v);
+  if (remember) localStorage.setItem(appKey(name), v); else localStorage.removeItem(appKey(name));
+}
+function forgetAppPw(name) {
+  sessionStorage.removeItem(appKey(name));
+  localStorage.removeItem(appKey(name));
+}
+const canChange = (name) => Boolean(pw || appPw(name));
+const appLockmark = (name) => (canChange(name) ? "" : ` <span class="lockmark" title="needs the app's password">${LOCK(false)}<span class="mob"> </span></span>`);
+// Forgets whichever password a refused change was sent with (api() sends the app's if it has it, else the fleet's).
+const forgetUsed = (name) => (appPw(name) ? forgetAppPw(name) : forgetPw());
+
+// Asks for an app's password, checked before it's kept. An app without one can only be changed with the fleet
+// password, so that's asked for instead, and any app's sheet offers it too.
+async function unlockApp(name) {
+  const p = S.status?.projects.find((x) => x.name === name);
+  if (p && !p.hasPassword) return unlock(`${name} has no app password, so changing it needs the fleet password.`);
+  let useFleet = false;
+  const ok = await sheet({
+    title: `Password for ${name}`, ok: "Unlock",
+    html: `<p class="meta">Changing ${esc(name)} needs the password it was deployed with.</p>
+      <label class="f" for="apw-in">Password</label><input id="apw-in" type="password" autocomplete="current-password" required>
+      <label class="check"><input type="checkbox" id="apw-remember"> Remember on this device</label>
+      <p class="hint"><button type="button" class="link" id="apw-fleet">Use the fleet password instead</button></p>`,
+    onOpen: (d) => {
+      $("#apw-in", d).focus();
+      $("#apw-fleet", d).onclick = () => { useFleet = true; d.close(); };
+    },
+    onOk: async (d) => {
+      const v = $("#apw-in", d).value;
+      const res = await fetch(`/admin/api/projects/${enc(name)}/unlock`, { method: "POST", headers: { "x-app-password": v } }).catch(() => null);
+      if (!res) throw new Error("Can't reach the control plane");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        $("#apw-in", d).select();
+        throw new Error(res.status === 401 ? "Wrong password" : data.error || `HTTP ${res.status}`);
+      }
+      saveAppPw(name, v, $("#apw-remember", d).checked);
+      return true;
+    },
+  });
+  if (useFleet) return unlock();
+  if (ok) { toast(`${name} unlocked`); draw(); }
+  return Boolean(ok);
+}
+const ensureApp = async (name) => canChange(name) || unlockApp(name);
+
+// Runs a change to an app, asking for its password first if there's none here (and again if the one kept stopped
+// working, say because the password was changed somewhere else).
+async function owned(name, fn) {
+  for (let i = 0; i < 3; i++) {
+    if (!(await ensureApp(name))) return null;
+    try {
+      return await fn();
+    } catch (e) {
+      if (e.status !== 401) throw e;
+      forgetUsed(name);
+    }
+  }
+  return null;
+}
+// The same for a change made from inside a sheet, where another sheet can't open: the password is asked for before the
+// sheet opens, and if it stops working meanwhile, it's forgotten and the sheet says so.
+async function inSheet(name, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e.status !== 401) throw e;
+    forgetUsed(name);
+    throw new Error("That password doesn't work any more. Close this and try again.");
+  }
+}
+
 // ======================================================================== API
 class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
-async function api(method, path, body, { fleet: isFleet = false } = {}) {
+async function api(method, path, body, { fleet: isFleet = false, app = null } = {}) {
   const headers = {};
   if (body) headers["content-type"] = "application/json";
   if (isFleet && pw) headers["x-fleet-password"] = pw;
+  // A change to an app: its own password if it's known here, else the fleet's (just one, so a stale one can't count
+  // against the other).
+  if (app && appPw(app)) headers["x-app-password"] = appPw(app);
+  else if (app && pw) headers["x-fleet-password"] = pw;
   let res;
   try {
     res = await fetch(`/admin/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
@@ -1034,8 +1119,10 @@ function specChanges(from, to) {
 }
 
 // ======================================================================== app actions
+// Changes to an app go through owned(): they need its password or the fleet's. Each returns null if none was given.
 async function deploySpec(name, body, message) {
-  const p = await api("PUT", `/projects/${enc(name)}`, body);
+  const p = await owned(name, () => api("PUT", `/projects/${enc(name)}`, body, { app: name }));
+  if (!p) return null;
   fast();
   toast(p.unchanged ? `${name} is already running that` : message ?? `Deploying ${name} v${p.version}`);
   loadStatus();
@@ -1052,6 +1139,7 @@ async function rollback(name, version) {
   if (!ok) return;
   try {
     const res = await deploySpec(name, { compose: old.compose, files: old.files, port: old.port, replicas: p.replicas }, null);
+    if (!res) return;
     if (res.unchanged) return toast(`${name} is already running v${version}'s files`);
     toast(`${name} v${res.version} is v${version} again`, {
       action: { label: "Undo", fn: () => deploySpec(name, { compose: latest.compose, files: latest.files, port: latest.port, replicas: p.replicas }, `Back to v${p.version}'s files`).catch(fail) },
@@ -1070,16 +1158,18 @@ async function retry(name) {
   const p = S.status.projects.find((x) => x.name === name);
   try {
     const spec = await getSpec(name, p.version);
-    await api("PUT", `/projects/${enc(name)}`, { compose: spec.compose, files: spec.files, port: spec.port, replicas: spec.replicas });
+    const body = { compose: spec.compose, files: spec.files, port: spec.port, replicas: spec.replicas };
+    if (!(await owned(name, () => api("PUT", `/projects/${enc(name)}`, body, { app: name })))) return;
     fast();
     toast(`Retrying ${name} v${p.version}`);
     loadStatus();
   } catch (e) { fail(e); }
 }
 async function setEnabled(name, on) {
+  if (!(await ensureApp(name))) return;
   if (!on && !(await confirmSheet(`Disable ${name}?`, `Its containers stop on every machine and its URLs stop answering. Its spec and versions are kept, so you can enable it again.`, "Disable", "danger"))) return;
   try {
-    await api("POST", `/projects/${enc(name)}/${on ? "enable" : "disable"}`);
+    if (!(await owned(name, () => api("POST", `/projects/${enc(name)}/${on ? "enable" : "disable"}`, null, { app: name })))) return;
     fast();
     toast(on ? `${name} is starting` : `${name} is stopping`, on ? {} : { action: { label: "Undo", fn: () => setEnabled(name, true) } });
     loadStatus();
@@ -1087,6 +1177,7 @@ async function setEnabled(name, on) {
 }
 async function deleteApp(name) {
   const p = S.status.projects.find((x) => x.name === name);
+  if (!(await ensureApp(name))) return;
   const ok = await sheet({
     title: `Delete ${name}?`, ok: "Delete for good", okKind: "primary danger",
     html: `<p>It stops on every machine, ${p.port ? "its URLs stop answering, " : ""}and all ${plural(p.version, "version")} are deleted. This can't be undone.</p>
@@ -1094,17 +1185,43 @@ async function deleteApp(name) {
     onOpen: (d) => $("#del-name", d).focus(),
     onOk: async (d) => {
       if ($("#del-name", d).value.trim() !== name) throw new Error(`Type ${name} exactly`);
-      await api("DELETE", `/projects/${enc(name)}`);
+      await inSheet(name, () => api("DELETE", `/projects/${enc(name)}`, null, { app: name }));
       return true;
     },
   });
   if (!ok) return;
+  forgetAppPw(name);
   toast(`${name} deleted`);
   location.hash = "#/apps";
   loadStatus();
 }
+async function changeAppPassword(name) {
+  const p = S.status.projects.find((x) => x.name === name);
+  if (!(await ensureApp(name))) return;
+  const ok = await sheet({
+    title: p.hasPassword ? `New password for ${name}` : `Set a password for ${name}`, ok: "Save",
+    html: `<p class="meta">${p.hasPassword ? "The old password stops working." : "Then whoever has it can change this app (the fleet password still can too)."}</p>
+      <label class="f" for="np-1">New password</label><input id="np-1" type="password" autocomplete="new-password" maxlength="200" required>
+      <label class="f" for="np-2">New password again</label><input id="np-2" type="password" autocomplete="new-password" maxlength="200" required>
+      <label class="check"><input type="checkbox" id="np-remember"> Remember on this device</label>
+      <p class="hint">${MIN_APP_PASSWORD} characters or more.</p>`,
+    onOpen: (d) => $("#np-1", d).focus(),
+    onOk: async (d) => {
+      const v = $("#np-1", d).value;
+      if (v.length < MIN_APP_PASSWORD) throw new Error(`Use ${MIN_APP_PASSWORD} characters or more`);
+      if (v !== $("#np-2", d).value) throw new Error("The two passwords don't match");
+      await inSheet(name, () => api("PUT", `/projects/${enc(name)}/password`, { password: v }, { app: name }));
+      saveAppPw(name, v, $("#np-remember", d).checked);
+      return true;
+    },
+  });
+  if (!ok) return;
+  toast(p.hasPassword ? `${name}'s password is changed` : `${name} has a password now`);
+  loadStatus();
+}
 async function moveSheet(name, from) {
   const p = S.status.projects.find((x) => x.name === name);
+  if (!(await ensureApp(name))) return;
   const runs = runsBy(), live = S.metrics?.live ?? {};
   const on = new Set(p.placed.map((x) => x.machine));
   const opts = [...runs.values()].filter((r) => r.ready).sort((a, b) => a.machine - b.machine).map((r) => {
@@ -1120,7 +1237,7 @@ async function moveSheet(name, from) {
       <label class="opt"><input type="radio" name="to" value="" checked><span><b>The machine with the most room</b></span></label>${opts}`,
     onOk: async (d) => {
       const to = $("input[name=to]:checked", d).value;
-      await api("POST", `/projects/${enc(name)}/move?from=${from}${to ? `&to=${to}` : ""}`);
+      await inSheet(name, () => api("POST", `/projects/${enc(name)}/move?from=${from}${to ? `&to=${to}` : ""}`, null, { app: name }));
       return { to };
     },
   });
@@ -1134,8 +1251,7 @@ async function saveReplicas(name) {
   const want = pending.replicas[name];
   try {
     const spec = await getSpec(name, p.version);
-    await deploySpec(name, { compose: spec.compose, files: spec.files, port: spec.port, replicas: want }, `${name}: ${p.replicas} → ${want} replicas`);
-    delete pending.replicas[name];
+    if (await deploySpec(name, { compose: spec.compose, files: spec.files, port: spec.port, replicas: want }, `${name}: ${p.replicas} → ${want} replicas`)) delete pending.replicas[name];
   } catch (e) { fail(e); }
 }
 
@@ -1258,7 +1374,7 @@ function vApps() {
   return {
     title: "Apps",
     html: `<div class="row"><h1 class="grow">Apps</h1><a class="btn primary" href="#/apps/new">New app</a></div>
-      <div class="sub">Anyone can deploy, edit and remove apps. Each app runs as many replicas as it asks for, on the machines with the most room.</div>
+      <div class="sub">Anyone can deploy an app; changing or removing one needs the password it was deployed with, or the fleet password. Each app runs as many replicas as it asks for, on the machines with the most room.</div>
       <div id="apps-filter"></div><div class="cards" id="apps-list" style="margin-top:14px"></div>`,
     status() {
       const st = S.status, runs = runsBy();
@@ -1335,10 +1451,14 @@ function vApp(name) {
       $("#ad-head").innerHTML = `<div class="row"><h1 class="grow">${esc(name)}</h1>${appPill(p, runs)}</div>
         <div class="sub">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · updated ${ago(S.status.now - p.updated)} ago · ${p.files.length ? "built from files" : "published images"}</div>
         ${p.port ? `<div class="url" style="margin-top:4px"><a href="${esc(sharedUrl(p))}" target="_blank" rel="noopener"><b>${esc(sharedUrl(p).slice(8, -1))}</b></a> <span class="meta">sends each visitor to one healthy replica</span></div>` : ""}
-        <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit</a>
-          ${p.halted ? `<button type="button" data-act="retry">Retry v${p.version}</button>` : ""}
-          <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}</button>
-          <button type="button" class="danger" data-act="delete">Delete</button></div>`;
+        <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit${appLockmark(name)}</a>
+          ${p.halted ? `<button type="button" data-act="retry">Retry v${p.version}${appLockmark(name)}</button>` : ""}
+          <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}${appLockmark(name)}</button>
+          <button type="button" class="danger" data-act="delete">Delete${appLockmark(name)}</button>
+          <button type="button" data-act="password">${p.hasPassword ? "Change password" : "Set a password"}${appLockmark(name)}</button></div>
+        <p class="hint">${LOCK(canChange(name))} ${!p.hasPassword ? "No app password: only the fleet password can change this app."
+          : appPw(name) ? `Unlocked here with its password. <button type="button" class="link" data-act="forgetpw">Forget it on this device</button>`
+          : pw ? "Unlocked here with the fleet password." : "Changing this app needs its password, or the fleet password."}</p>`;
       $("#ad-status").innerHTML = appStatusBlock(p, runs, { full: true });
       const want = pending.replicas[name] ?? p.replicas;
       const up = [...runs.values()].filter((r) => r.ready).length;
@@ -1407,6 +1527,8 @@ function vApp(name) {
       if (act === "disable") return setEnabled(name, false);
       if (act === "enable") return setEnabled(name, true);
       if (act === "delete") return deleteApp(name);
+      if (act === "password") return changeAppPassword(name);
+      if (act === "forgetpw") { forgetAppPw(name); toast(`${name}'s password is forgotten on this device`); return this.status(); }
       if (act === "move") return moveSheet(name, Number(b.dataset.machine));
       if (act === "rep") { pending.replicas[name] = Math.max(1, Math.min(MAX_REPLICAS, (pending.replicas[name] ?? p.replicas) + Number(b.dataset.d))); if (pending.replicas[name] === p.replicas) delete pending.replicas[name]; return this.status(); }
       if (act === "cancelrep") { delete pending.replicas[name]; return this.status(); }
@@ -1496,7 +1618,7 @@ function vEditor(name, sample) {
     title: name ? `Edit ${name}` : "New app",
     html: `<a class="back" href="${name ? appHref(name) : "#/apps"}">← ${name ? esc(name) : "Apps"}</a>
       <h1>${name ? `Edit ${esc(name)}` : "New app"}</h1>
-      <div class="sub">${name ? "Deploying makes a new version; the replicas switch to it, and if it fails they go back to the last good one." : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
+      <div class="sub">${name ? `Deploying makes a new version; the replicas switch to it, and if it fails they go back to the last good one.${canChange(name) ? "" : " It needs the app's password (or the fleet password): you'll be asked."}` : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
       ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button></div>`}
       <div class="errbox" id="ed-error" role="alert" hidden></div>
       <form id="ed-form" novalidate>
@@ -1520,7 +1642,12 @@ function vEditor(name, sample) {
           <input type="file" id="ed-up" multiple hidden><input type="file" id="ed-updir" webkitdirectory hidden>
         </div>
         <p class="hint">Anything the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>, with paths relative to the compose file. A compose file and a top-level Dockerfile from an upload go in their boxes. Text only: 30 files, 250 KB in all.</p>
-        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : ""}
+        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : `<label class="f" for="ed-pw">Password</label>
+        <input id="ed-pw" type="password" autocomplete="new-password" maxlength="200">
+        <label class="f" for="ed-pw2">Password again</label>
+        <input id="ed-pw2" type="password" autocomplete="new-password" maxlength="200">
+        <label class="check"><input type="checkbox" id="ed-pw-remember"> Remember on this device</label>
+        <p class="hint" id="ed-pw-hint"></p>`}
         <div class="formfoot">${name ? `<button type="button" data-act="changes">Show changes</button><span class="spacer"></span>` : ""}<a class="btn" href="${name ? appHref(name) : "#/apps"}">Cancel</a><button type="submit" class="primary" id="ed-save">Deploy</button></div>
       </form>`,
     async mount() {
@@ -1535,10 +1662,24 @@ function vEditor(name, sample) {
         err.hidden = true;
         const n = name || $("#ed-name").value.trim();
         if (!name && !checkName()) { $("#ed-name").focus(); $("#ed-name-hint").className = "hint bad"; if (!n) $("#ed-name-hint").textContent = "Give the app a name"; return; }
+        const body = formSpec();
+        if (!name) {
+          // A new app's password: needed to change it later. With the fleet unlocked it's optional.
+          const p1 = $("#ed-pw").value, p2 = $("#ed-pw2").value;
+          if (p1 || p2 || !pw) {
+            const bad = p1.length < MIN_APP_PASSWORD ? ["#ed-pw", `Give the app a password of ${MIN_APP_PASSWORD} characters or more`]
+              : p1 !== p2 ? ["#ed-pw2", "The two passwords don't match"] : null;
+            if (bad) { $(bad[0]).focus(); $("#ed-pw-hint").textContent = bad[1]; $("#ed-pw-hint").className = "hint bad"; return; }
+            body.password = p1;
+          }
+        }
         $("#ed-save").disabled = true;
         $("#ed-save").textContent = "Deploying…";
         try {
-          const p = await api("PUT", `/projects/${enc(n)}`, formSpec());
+          const put = () => api("PUT", `/projects/${enc(n)}`, body, { app: n });
+          const p = name ? await owned(n, put) : await put();
+          if (!p) return;
+          if (body.password) saveAppPw(n, body.password, $("#ed-pw-remember").checked);
           dirty = false;
           fast();
           toast(p.unchanged ? `${n} is already running that` : `Deploying ${n} v${p.version}`);
@@ -1561,6 +1702,9 @@ function vEditor(name, sample) {
         } catch (e) { fail(e); }
       } else if (sample && SAMPLES[sample]) fill(SAMPLES[sample]);
       else checkName();
+      if (!name) $("#ed-pw-hint").textContent = pw
+        ? "Optional while the fleet is unlocked: without one, only the fleet password can change the app."
+        : `Changing, disabling or deleting the app later needs it. ${MIN_APP_PASSWORD} characters or more; if it's lost, only the fleet's owner can set a new one.`;
     },
     async click(e) {
       const b = e.target.closest("[data-act]");
@@ -1807,15 +1951,17 @@ function vGuide() {
         <li><b>Name:</b> lowercase letters, digits and dashes, like <code>my-app</code>.</li>
         <li><b>Port:</b> what the app listens on (or <code>x-runner.port</code> in the compose file).</li>
         <li>Paste a compose file and/or a Dockerfile, and add (or upload) anything the build <code>COPY</code>s.</li>
+        <li><b>Password:</b> changing, disabling or deleting the app later needs it (or the fleet password). If it's lost, only the fleet's owner can set a new one.</li>
         <li><b>Deploy.</b> The app's page shows each replica come up, and every machine's error if one fails.</li></ol>
-      <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count.</p>
+      <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count. The app's page also has <b>Change password</b>.</p>
       <h3>With the API</h3>
-      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>; no token is needed for apps. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–10, default 1; with fewer machines than replicas, it runs on every machine).
-        Fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need the header <code>x-fleet-password</code>.</p>
-      ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
-      <p class="hint">Files on disk: let <code>jq</code> build the body.</p>
-      ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}}' |\ncurl -X PUT ${o}/admin/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
-      ${codebox(`B=${o}/admin/api\ncurl $B/status                          # every app and machine\ncurl $B/projects/my-app                 # the current spec and its versions\ncurl $B/projects/my-app?version=2       # an earlier version\ncurl -X POST $B/projects/my-app/disable # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable\ncurl -X DELETE $B/projects/my-app       # delete it and its versions`)}
+      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–10, default 1; with fewer machines than replicas, it runs on every machine), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more).
+        After that, every change to the app (<code>PUT</code>, <code>/disable</code>, <code>/enable</code>, <code>/move</code>, <code>DELETE</code>) needs the header <code>x-app-password</code>; <code>PUT …/projects/&lt;name&gt;/password</code> with <code>{"password": "new"}</code> changes it.
+        The fleet password, in <code>x-fleet-password</code>, can change any app, and fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need it.</p>
+      ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "password": "choose-one", "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
+      <p class="hint">Files on disk: let <code>jq</code> build the body. Updating an app that exists: drop <code>password</code> and send <code>-H "x-app-password: $PW"</code>.</p>
+      ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py --arg pw "$PW" \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}, password: $pw}' |\ncurl -X PUT ${o}/admin/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
+      ${codebox(`B=${o}/admin/api; P="x-app-password: $PW"\ncurl $B/status                                  # every app and machine\ncurl $B/projects/my-app                         # the current spec and its versions\ncurl $B/projects/my-app?version=2               # an earlier version\ncurl -X POST $B/projects/my-app/disable -H "$P" # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable -H "$P"\ncurl -X DELETE $B/projects/my-app -H "$P"       # delete it and its versions`)}
       <p class="hint">With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does this for you. Limits: 30 files, 250 KB, text only; ports 2019 and 19080 are taken.</p>
       <h3>Add a machine</h3>
       <p>Any Linux machine with Docker can join: see <a href="#/contribute">Contribute a machine</a>.</p>`;

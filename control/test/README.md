@@ -10,7 +10,7 @@ control/test/moves.sh       # moving replicas, evicting a machine
 control/test/rebalance.sh   # automatic rebalancing (uses a 20-second hot window)
 control/test/replicas.sh    # replica numbers, their routes and DNS names
 control/test/pools.sh       # pool sizes, who starts machines, draining by agent ID
-control/test/auth.sh        # what the UI can do without the fleet password, and what needs it
+control/test/auth.sh        # what needs an app's password, the fleet password, or nothing (prints ok/WRONG)
 ```
 
 They need Node, `npx wrangler`, `jq` and `curl`, and use ports 8911 (control plane) and 8790 (mock).

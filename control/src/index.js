@@ -17,16 +17,21 @@
 // their number when they move, so these URLs only change with the replica count). The Worker reaches machine n at
 // <project>-m<n>, which points at tunnel runner-<n>.
 //   /            the UI (everything public)  /api/*        API, Bearer token (admin, or node for join/sync/claim)
-//                                            /admin/api/*  the UI's API: projects open to anyone, fleet changes
-//                                                          need the password (x-fleet-password)
+//                                            /admin/api/*  the UI's API: anyone can see everything and deploy a new
+//                                                          app, which sets that app's password; changing an app needs
+//                                                          its password (x-app-password) or the fleet password
+//                                                          (x-fleet-password), and fleet changes need the fleet password
 //   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
 import { DurableObject } from "cloudflare:workers";
 import YAML from "yaml";
 import APP_PAGE from "./app.html";
 
 const POLL_S = 20; // how often agents check in
-const PASSWORD_TRIES = 5; // wrong fleet passwords from one address before it's refused for PASSWORD_LOCKOUT_MS
+const PASSWORD_TRIES = 5; // wrong passwords from one address (per app, and for the fleet) before it's refused for PASSWORD_LOCKOUT_MS
 const PASSWORD_LOCKOUT_MS = 15 * 60_000;
+const APP_PASSWORD_MIN = 6;
+const APP_PASSWORD_MAX = 200;
+const PBKDF2_ITERATIONS = 10_000; // app passwords are stored as salted PBKDF2-SHA256 (kept light for the CPU limit)
 const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
@@ -110,6 +115,10 @@ class HttpError extends Error {
 const json = (data, status = 200) => Response.json(data, { status });
 const html = (body) => new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
 const isMap = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+const fromHex = (hex) => new Uint8Array(hex.match(/../g).map((h) => parseInt(h, 16)));
+// Two hex digests compared in constant time.
+const sameHex = (a, b) => typeof a === "string" && a.length === b.length && crypto.subtle.timingSafeEqual(fromHex(a), fromHex(b));
 
 // "./web/" + "Dockerfile" -> "web/Dockerfile"; null if it climbs out of the project folder.
 function joinPath(...parts) {
@@ -332,6 +341,7 @@ export class Control extends DurableObject {
       `CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, slot INTEGER NOT NULL, kind TEXT NOT NULL, label TEXT, joined INTEGER NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_1m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_10m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS app_passwords (name TEXT PRIMARY KEY, salt TEXT NOT NULL, hash TEXT NOT NULL, updated INTEGER NOT NULL)`,
     ]) {
       this.sql.exec(query);
     }
@@ -379,7 +389,8 @@ export class Control extends DurableObject {
     this.bootAt = Date.now();
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
     this.lastRebalance = 0;
-    this.failures = new Map(); // address -> { n, at }: wrong fleet passwords
+    this.failures = new Map(); // "address|fleet" or "address|app:<name>" -> { n, at }: wrong passwords
+    this.appPasswords = new Map(this.all("SELECT name, salt, hash FROM app_passwords").map((x) => [x.name, x])); // never sent out
     this.autoMoved = new Map(); // project -> when it was last moved automatically
     this.rebalanceLog = JSON.parse(this.settings.get("rebalance_log") ?? "[]");
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
@@ -500,20 +511,26 @@ export class Control extends DurableObject {
       if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
       if (request.method === "GET" && path === "/internal/routes") return json(this.healthyRoutes(Date.now()));
       if (path.startsWith("/admin/api/")) {
-        // The UI: anyone can see everything and deploy; fleet changes need the password. Changes sent from other
-        // sites are refused. No machine powers here (joining, checking in): those hand out tunnel tokens.
+        // The UI: anyone can see everything and deploy a new app; changing an app needs its password or the fleet
+        // password, and fleet changes need the fleet password. Changes sent from other sites are refused. No machine
+        // powers here (joining, checking in): those hand out tunnel tokens.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
         const route = path.slice("/admin/api".length);
-        // Only fleet routes look at the password, so a refused address can still see and deploy.
+        const ip = request.headers.get("cf-connecting-ip") ?? "";
+        // Passwords are only looked at where they count (fleet changes, changes to apps), so an address refused for
+        // wrong guesses can still see everything.
         const fleet = /^\/(unlock|settings|roll|join-token|machines\/\d+\/evict|slots\/\d+)$/.test(route);
+        const appChange = request.method !== "GET" && route.startsWith("/projects/");
         const password = request.headers.get("x-fleet-password");
-        const admin = fleet && password != null && await this.checkPassword(password, request.headers.get("cf-connecting-ip") ?? "");
+        const admin = (fleet || appChange) && password != null && await this.checkPassword(password, ip);
         if (request.method === "POST" && route === "/unlock") {
           if (!admin) throw new HttpError(401, "wrong password");
           return json({ ok: true });
         }
-        return await this.api(request, url, route, { admin, deploy: true, node: false });
+        return await this.api(request, url, route, {
+          admin, deploy: true, node: false, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
+        });
       }
       if (path.startsWith("/api/")) {
         const auth = request.headers.get("authorization") ?? "";
@@ -527,25 +544,62 @@ export class Control extends DurableObject {
     }
   }
 
-  // The fleet password: ADMIN_PASSWORD, or the admin token if there's none. Compared in constant time, and an address
-  // that gets it wrong too often is refused for a while.
-  async checkPassword(given, ip) {
-    const expected = this.env.ADMIN_PASSWORD || this.env.ADMIN_TOKEN;
-    if (!expected) return false;
-    const now = Date.now();
-    const f = this.failures.get(ip);
+  // Wrong passwords are counted per address and per thing guessed at (key "address|fleet" or "address|app:<name>"), so
+  // getting one app's password right doesn't reset the count for another app or the fleet. Too many, and that address
+  // is refused for a while.
+  refuseIfLocked(key, now) {
+    const f = this.failures.get(key);
     if (f && f.n >= PASSWORD_TRIES && now - f.at < PASSWORD_LOCKOUT_MS) {
       throw new HttpError(429, `too many wrong passwords; try again in ${Math.ceil((PASSWORD_LOCKOUT_MS - (now - f.at)) / 60_000)} min`);
     }
+  }
+
+  noteTry(key, ok, now) {
+    const f = this.failures.get(key);
+    if (ok) return void this.failures.delete(key);
+    this.failures.set(key, { n: (f && now - f.at < PASSWORD_LOCKOUT_MS ? f.n : 0) + 1, at: now });
+    if (this.failures.size > 10_000) for (const [k, x] of this.failures) if (now - x.at >= PASSWORD_LOCKOUT_MS) this.failures.delete(k);
+  }
+
+  // The fleet password: ADMIN_PASSWORD, or the admin token if there's none. Compared in constant time.
+  async checkPassword(given, ip) {
+    const expected = this.env.ADMIN_PASSWORD || this.env.ADMIN_TOKEN;
+    if (!expected) return false;
+    const key = `${ip}|fleet`;
+    this.refuseIfLocked(key, Date.now());
     const digest = async (x) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(x));
     const ok = crypto.subtle.timingSafeEqual(await digest(given), await digest(expected));
-    if (ok) this.failures.delete(ip);
-    else this.failures.set(ip, { n: (f && now - f.at < PASSWORD_LOCKOUT_MS ? f.n : 0) + 1, at: now });
+    this.noteTry(key, ok, Date.now());
     return ok;
   }
 
-  // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token); deploy: projects.
-  async api(request, url, route, { admin, deploy, node }) {
+  // App passwords are kept as salted PBKDF2-SHA256 (hex), never the password itself.
+  async passwordHash(password, salt) {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: fromHex(salt), iterations: PBKDF2_ITERATIONS }, key, 256);
+    return toHex(new Uint8Array(bits));
+  }
+
+  async newAppSecret(password) {
+    if (typeof password !== "string" || password.length < APP_PASSWORD_MIN || password.length > APP_PASSWORD_MAX) {
+      throw new HttpError(400, `give the app a password ("password", ${APP_PASSWORD_MIN} to ${APP_PASSWORD_MAX} characters): changing it later needs it`);
+    }
+    const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+    return { salt, hash: await this.passwordHash(password, salt) };
+  }
+
+  saveAppPassword(name, secret) {
+    this.appPasswords.set(name, { name, ...secret });
+    this.sql.exec(
+      `INSERT INTO app_passwords (name, salt, hash, updated) VALUES (?, ?, ?, ?)
+       ON CONFLICT (name) DO UPDATE SET salt = excluded.salt, hash = excluded.hash, updated = excluded.updated`,
+      name, secret.salt, secret.hash, Date.now(),
+    );
+  }
+
+  // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token), and any app;
+  // deploy: new apps, and changes to an app given its password (appPassword); node: machines.
+  async api(request, url, route, { admin, deploy, node, ip = "", fleetWrong = false, appPassword = null }) {
     const { method } = request;
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
@@ -571,14 +625,56 @@ export class Control extends DurableObject {
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
     const sl = route.match(/^\/slots\/(\d+)$/);
     if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
-    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move))?$/);
+    // Apps: anyone can look. Deploying a new one sets its password ("password" in the body; optional with admin rights);
+    // after that, changing it needs that password (x-app-password) or admin rights. An app with no password (from
+    // before app passwords, or deployed with admin rights and none) can only be changed with admin rights.
+    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password))?$/);
     if (m) {
-      need(deploy);
       const [, name, action] = m;
-      if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
-      if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
-      if (!action && method === "PUT") return json(this.putProject(name, await body()));
+      need(deploy);
+      const input = method === "PUT" ? await body() : null;
+      const key = `${ip}|app:${name}`;
+      // The hashing comes first, so the checks and the change below run with no await between them and no other
+      // request can slip in (deploying the same new name, say).
+      const stored = this.appPasswords.get(name);
+      let given = null;
+      if (!admin && appPassword != null && stored) {
+        this.refuseIfLocked(key, Date.now());
+        given = { salt: stored.salt, hash: await this.passwordHash(appPassword, stored.salt) };
+      }
+      const wasNew = !action && method === "PUT" && !this.projects.has(name);
+      const secret = action === "password" || (wasNew && (input?.password != null || !admin)) ? await this.newAppSecret(input?.password) : null;
+      // No awaits from here on.
+      const creating = !action && method === "PUT" && !this.projects.has(name);
+      if (creating && !admin && !secret) throw new HttpError(409, `${name} was just deleted; try again`);
+      if (!creating && !admin) {
+        this.project(name); // 404 if there's no such app
+        const current = this.appPasswords.get(name);
+        if (!current) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `${name} has no app password, so changing it needs the fleet password`);
+        if (appPassword == null) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `changing ${name} needs its password or the fleet password`);
+        const now = Date.now();
+        this.refuseIfLocked(key, now);
+        const ok = given?.salt === current.salt && sameHex(given.hash, current.hash);
+        this.noteTry(key, ok, now);
+        if (!ok) throw new HttpError(401, `wrong password for ${name}`);
+      }
+      if (action === "unlock" && method === "POST") return json({ ok: true });
+      if (action === "password" && method === "PUT") {
+        this.project(name);
+        this.saveAppPassword(name, secret);
+        return json({ ok: true });
+      }
+      if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
+      if ((action === "enable" || action === "disable") && method === "POST") return json(this.setEnabled(name, action === "enable"));
+      if (!action && method === "PUT") {
+        const out = this.putProject(name, input);
+        if (creating && secret) {
+          this.saveAppPassword(name, secret);
+          out.hasPassword = true;
+        }
+        return json(out);
+      }
       if (!action && method === "DELETE") return json(this.deleteProject(name));
     }
     throw new HttpError(404, "not found");
@@ -602,6 +698,7 @@ export class Control extends DurableObject {
       staying,
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
+      hasPassword: this.appPasswords.has(p.name), // false: only the fleet password can change it
       state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
       halted: p.halted,
       updated: p.updated,
@@ -680,7 +777,9 @@ export class Control extends DurableObject {
     this.sql.exec("DELETE FROM projects WHERE name = ?", name);
     this.sql.exec("DELETE FROM versions WHERE name = ?", name);
     this.sql.exec("DELETE FROM placements WHERE name = ?", name);
+    this.sql.exec("DELETE FROM app_passwords WHERE name = ?", name);
     this.placements.delete(name);
+    this.appPasswords.delete(name);
     for (const key of this.versions.keys()) if (key.startsWith(`${name}@`)) this.versions.delete(key);
     this.scheduleDns();
     return { deleted: name };
