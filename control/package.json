@@ -5,5 +5,9 @@
   "dependencies": {
     "yaml": "^2.9.1"
   },
-  "private": true
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "description": "runner control plane: one Node process with SQLite"
 }

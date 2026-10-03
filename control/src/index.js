@@ -1,4 +1,5 @@
-// Control plane for hetp4401/runner.
+// Control plane for hetp4401/runner: one Node process with a SQLite file (see ../server.mjs), reached through its own
+// Cloudflare tunnel at control.<domain>. Cloudflare provides nothing else: the machines' tunnels and the DNS names.
 // Holds the project specs (a docker compose file plus any Dockerfiles and build files) and sends every change to all
 // machines. Machines find it, not the other way round: any agent joins at /api/join, gets the lowest free slot n and
 // the token for tunnel runner-<n> (created through the Cloudflare API the first time a slot is used), then checks in
@@ -12,11 +13,10 @@
 // and whatever runs the machine pings POST /api/drain when it's going down soon (a timer, a cron before
 // maintenance, a cloud termination notice): the control plane then hands the machine over, one at a time, the same
 // way as for a requested roll. Nothing here predicts lifetimes.
-// It also keeps DNS in line. The public URLs are this Worker's, one per replica: <project>-<k> passes each request on
-// to the machine running replica k (replicas are numbered 1 to N and keep their number when they move, so these URLs
-// only change with the replica count). There's no shared URL in front of a project's replicas. The Worker reaches
-// machine n at <project>-m<n>, which points at tunnel runner-<n>, and says which replica it wants in a header, since
-// a machine may run more than one copy of a project (with more replicas than machines).
+// It also keeps DNS in line: the public URL of replica k, <project>-<k>.<domain>, is a CNAME to the tunnel of the
+// machine running that copy, moved when the copy moves (replicas are numbered 1 to N and keep their number, so these
+// URLs only change with the replica count). There's no shared URL in front of a project's replicas, and nothing in
+// between: the machine's router answers the replica's name itself.
 //   /            the UI (everything public)  /api/*        API: the fleet password (x-fleet-password) for everything, or
 //                                                          the join token (Bearer) for machines: join/sync/claim/drain/roll
 //                                            /admin/api/*  the UI's API: anyone can see everything and deploy a new
@@ -24,16 +24,14 @@
 //                                                          its password (x-app-password) or the fleet password
 //                                                          (x-fleet-password), and fleet changes need the fleet password
 //   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
-import { DurableObject } from "cloudflare:workers";
+import { timingSafeEqual } from "node:crypto";
 import YAML from "yaml";
-import APP_PAGE from "./app.html";
 
-// How often agents check in. Every check-in is a request to this Worker and to its Durable Object, and the free plan
-// allows 100,000 a day of each (shared with the web app and with every visit to the apps), so the whole fleet together
-// gets CHECKINS_PER_DAY and the interval grows with the number of machines: 20 machines check in every 58 s. Never
-// under MIN_POLL_S or over MAX_POLL_S; the POLL_S var fixes it instead.
-const CHECKINS_PER_DAY = 30_000;
-const MIN_POLL_S = 30;
+// How often agents check in: the whole fleet together makes about CHECKINS_PER_DAY check-ins a day, so the interval
+// grows with the number of machines (20 machines: every 20 s; 50: every 43 s). Never under MIN_POLL_S or over
+// MAX_POLL_S; the POLL_S var fixes it instead.
+const CHECKINS_PER_DAY = 100_000; // on its own server this is comfortable; it was 30,000 under the Workers free plan
+const MIN_POLL_S = 20;
 const MAX_POLL_S = 300;
 const PASSWORD_TRIES = 5; // wrong passwords from one address (per app, and for the fleet) before it's refused for PASSWORD_LOCKOUT_MS
 const PASSWORD_LOCKOUT_MS = 15 * 60_000;
@@ -48,10 +46,11 @@ const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
-const REPLICA_DNS = "100::"; // <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
+const REPLICA_DNS = "100::"; // the placeholder records the Worker of before used for <project>-<k>; deleted when seen
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
 const MAX_REPLICAS = 50; // as many as the fleet can have machines; with more replicas than machines, machines run two or more copies
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
+const SETTLE_MS = 5 * 60_000; // after a (re)start, machines that haven't checked in yet aren't gone, and pools aren't short or oversized, for this long
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
 // Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
 // projects than the emptiest machine has one project moved off it, to a machine with room, at most one move per
@@ -129,7 +128,7 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const fromHex = (hex) => new Uint8Array(hex.match(/../g).map((h) => parseInt(h, 16)));
 // Two hex digests compared in constant time.
-const sameHex = (a, b) => typeof a === "string" && a.length === b.length && crypto.subtle.timingSafeEqual(fromHex(a), fromHex(b));
+const sameHex = (a, b) => typeof a === "string" && a.length === b.length && timingSafeEqual(fromHex(a), fromHex(b));
 
 // "./web/" + "Dockerfile" -> "web/Dockerfile"; null if it climbs out of the project folder.
 function joinPath(...parts) {
@@ -415,65 +414,6 @@ function buildSpec(body, { trusted = false } = {}) {
   return { compose, port, replicas, files: sorted };
 }
 
-// ---- public URLs: <project>-<k>.DOMAIN goes to the machine running replica k ----
-
-let routeCache = { at: 0, data: null, pending: null };
-function healthyRoutes(env) {
-  if (routeCache.data && Date.now() - routeCache.at < 5_000) return routeCache.data;
-  routeCache.pending ??= env.CONTROL.get(env.CONTROL.idFromName("main")).fetch("https://control/internal/routes")
-    .then((r) => r.json())
-    .then((data) => {
-      routeCache = { at: Date.now(), data, pending: null };
-      return data;
-    })
-    .catch((e) => {
-      routeCache.pending = null;
-      if (routeCache.data) return routeCache.data;
-      throw e;
-    });
-  return routeCache.pending;
-}
-
-async function proxy(request, env, label) {
-  const routes = await healthyRoutes(env);
-  // A replica's machine: one, or two while the replica moves (the new copy first, then the old one).
-  const slots = routes.replicas[label];
-  if (!slots) return new Response(`nothing is served at ${label}\n`, { status: 404 });
-  if (!slots.length) {
-    return new Response(`${label} isn't healthy on any machine right now\n`, { status: 503, headers: { "retry-after": "10" } });
-  }
-  const project = label.replace(/-\d+$/, "");
-  // Requests without a body can try the other copy when one doesn't answer.
-  const retry = request.method === "GET" || request.method === "HEAD";
-  const host = new URL(request.url).hostname;
-  let res = null;
-  for (const n of slots.slice(0, retry ? 3 : 1)) {
-    const url = new URL(request.url);
-    url.hostname = `${project}-m${n}.${env.DOMAIN}`;
-    const req = new Request(url, request);
-    req.headers.set("x-forwarded-host", host);
-    req.headers.set("x-runner-replica", label.slice(label.lastIndexOf("-") + 1)); // the machine may run more than one copy
-    try {
-      res = await fetch(req, { redirect: "manual" });
-    } catch {
-      res = null;
-      continue;
-    }
-    // The machine's router answers 404 with this header when it no longer has the project (it's being removed
-    // there); the app never saw the request, so another machine can take it whatever the method.
-    if (res.status === 404 && res.headers.get("x-runner-route") === "none") continue;
-    if (retry && [502, 503, 504, 530].includes(res.status)) continue;
-    // Keep visitors on the replica's URL when the app redirects to the machine's own hostname.
-    const location = res.headers.get("location");
-    if (location?.includes(url.hostname)) {
-      res = new Response(res.body, res);
-      res.headers.set("location", location.replace(url.hostname, host));
-    }
-    break;
-  }
-  return res ?? new Response("no machine answered\n", { status: 502 });
-}
-
 // Served at /install.sh: runs the agent in a container on any machine with Docker. The token isn't in it.
 function installScript(origin) {
   return `#!/bin/sh
@@ -504,31 +444,17 @@ echo "Joined. Follow it with: docker logs -f runner-agent"
 `;
 }
 
-const MAX_BODY = 1_000_000; // bytes; a spec is at most MAX_SPEC_BYTES, plus JSON quoting
+const EXPORT_TABLES = ["projects", "versions", "copies", "runs", "starts", "settings", "slots", "agents", "app_passwords", "metrics_1m", "metrics_10m", "metrics_1h"];
 
-export default {
-  async fetch(request, env) {
-    const host = new URL(request.url).hostname;
-    const suffix = `.${env.DOMAIN}`;
-    if (host !== env.CONTROL_HOST && host.endsWith(suffix) && !host.slice(0, -suffix.length).includes(".")) {
-      return proxy(request, env, host.slice(0, -suffix.length));
-    }
-    // The object gets the whole body up front: a body still streaming in after the object has replied (a refused
-    // change, say) fails the stream, and that resets the object.
-    let body;
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY) return json({ error: "the request is too big" }, 413);
-      body = await request.arrayBuffer();
-      if (body.byteLength > MAX_BODY) return json({ error: "the request is too big" }, 413);
-    }
-    return env.CONTROL.get(env.CONTROL.idFromName("main")).fetch(new Request(request, { body }));
-  },
-};
-
-export class Control extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.sql = ctx.storage.sql;
+export class Control {
+  // sql: { exec(query, ...args) -> { toArray() } } over SQLite; env: settings and secrets; alarm(at): call this.alarm()
+  // at that time (replacing any earlier call); page: the web app's HTML; restart(): exit so the process is started again.
+  constructor({ sql, env, alarm, page, restart }) {
+    this.sql = sql;
+    this.env = env;
+    this.setAlarm = alarm;
+    this.page = page;
+    this.restart = restart;
     for (const query of [
       `CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, version INTEGER NOT NULL, stable INTEGER,
          rollout INTEGER NOT NULL, halted TEXT, updated INTEGER NOT NULL)`,
@@ -606,9 +532,9 @@ export class Control extends DurableObject {
     this.pendingMetrics = new Map(); // minute -> { machine: { h, a } }, not yet written
     this.lastRollup = 0;
     this.metricsCache = new Map(); // range -> { at, body }
-    // A deploy of this Worker resets its routes to the ones in wrangler.toml, so put the replica URLs' back.
-    this.scheduleDns();
     this.dnsError = null;
+    this.dnsTargetsSeen = "";
+    this.scheduleDns(); // DNS may have drifted while this wasn't running
   }
 
   all(query, ...args) {
@@ -653,10 +579,11 @@ export class Control extends DurableObject {
     this.setSetting("pool_asks", JSON.stringify(Object.fromEntries(this.poolAsks)));
   }
 
-  // Just after a (re)start, runs loaded from storage haven't checked in yet to say which pool they're in. Until they
-  // have (or 150 s have passed), a pool looks smaller than it is, so nothing is started or retired on that account.
+  // Just after a (re)start, runs loaded from storage haven't checked in yet to say which pool they're in (and they may
+  // be on a slower cadence than this now asks for). Until every one of them has (or SETTLE_MS have passed), a pool
+  // looks smaller than it is, so nothing is started or retired on that account.
   settling(now) {
-    return now - this.bootAt < 2 * this.liveMs && this.liveRuns(now).some((x) => now - x.seen > now - this.bootAt);
+    return now - this.bootAt < SETTLE_MS && [...this.runs.values()].some((x) => !x.retire && now - x.seen < SETTLE_MS && x.seen < this.bootAt);
   }
 
   poolSize(pool) {
@@ -730,13 +657,13 @@ export class Control extends DurableObject {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     this.setPace(Date.now());
     try {
-      if (request.method === "GET" && path === "/") return html(APP_PAGE);
+      if (request.method === "GET" && path === "/") return html(this.page);
       // The old pages are views of the app now; the app turns their #fragments into its own routes.
       if (request.method === "GET" && (path === "/admin" || path === "/metrics")) {
         return new Response(null, { status: 302, headers: { location: `/?from=${path.slice(1)}` } });
       }
       if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
-      if (request.method === "GET" && path === "/internal/routes") return json(this.healthyRoutes(Date.now()));
+      if (request.method === "GET" && path === "/internal/dns") return json({ names: Object.fromEntries(this.dnsTargets(Date.now())) }); // where each replica's name points (tests)
       if (path.startsWith("/admin/api/")) {
         // The UI: anyone can see everything and deploy a new app; changing an app needs its password or the fleet
         // password, and fleet changes need the fleet password. Changes sent from other sites are refused. No machine
@@ -796,7 +723,7 @@ export class Control extends DurableObject {
     const key = `${ip}|fleet`;
     this.refuseIfLocked(key, Date.now());
     const digest = async (x) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(x));
-    const ok = crypto.subtle.timingSafeEqual(await digest(given), await digest(expected));
+    const ok = timingSafeEqual(Buffer.from(await digest(given)), Buffer.from(await digest(expected)));
     this.noteTry(key, ok, Date.now());
     return ok;
   }
@@ -848,6 +775,30 @@ export class Control extends DurableObject {
     if (method === "POST" && route === "/drain") return need(node, "the join token"), json(this.drain(await body()));
     if (method === "POST" && route === "/roll") return need(admin || node, "the fleet password or the join token"), json(this.roll(url.searchParams.get("machine")));
     if (method === "GET" && route === "/join-token") return need(admin), json({ token: this.env.JOIN_TOKEN });
+    if (method === "GET" && route === "/export") { // everything stored, a table at a time, for moving the control plane
+      need(admin);
+      const table = url.searchParams.get("table");
+      if (!EXPORT_TABLES.includes(table)) throw new HttpError(400, `table is one of ${EXPORT_TABLES.join(", ")}`);
+      const after = Number(url.searchParams.get("after") ?? 0);
+      const limit = Math.min(2000, Number(url.searchParams.get("limit") ?? 500));
+      const rows = this.all(`SELECT rowid AS _rowid, * FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT ?`, after, limit);
+      return json({ rows, next: rows.length === limit ? rows[rows.length - 1]._rowid : null });
+    }
+    if (method === "POST" && route === "/import") { // moving the control plane in: rows of one table at a time, then ?done=1 to start again on them
+      need(admin);
+      if (url.searchParams.get("done")) {
+        setTimeout(() => this.restart?.(), 300);
+        return json({ restarting: true });
+      }
+      const { table, rows } = await body();
+      if (!EXPORT_TABLES.includes(table) || !Array.isArray(rows)) throw new HttpError(400, "send {table, rows}");
+      const known = new Set(this.all(`PRAGMA table_info(${table})`).map((c) => c.name)); // columns from features since dropped are skipped
+      for (const row of rows) {
+        const cols = Object.keys(row).filter((c) => known.has(c));
+        this.sql.exec(`INSERT OR REPLACE INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, ...cols.map((c) => row[c]));
+      }
+      return json({ imported: rows.length });
+    }
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const ev = route.match(/^\/machines\/(\d+)\/evict$/);
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
@@ -1178,10 +1129,13 @@ export class Control extends DurableObject {
       // numbered above the count (it was lowered), along with any copy of theirs being moved.
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
+      // Just after a (re)start every machine looks down until it has checked in again: a copy's machine counts as gone
+      // only once the control plane has been up long enough for that.
+      const gone = (machine) => !up.has(machine) && now - this.bootAt > Math.max(this.liveMs, SETTLE_MS);
       for (const x of [...list]) {
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
         const moved = x.leaving && (up.get(x.leaving.to)?.status[this.keyOn(name, x.leaving.to, x.replica)]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
-        if (!p || !p.enabled || x.replica > replicas || !up.has(x.machine) || moved) {
+        if (!p || !p.enabled || x.replica > replicas || gone(x.machine) || moved) {
           this.dropCopy(name, x.machine, x.replica);
           changed = true;
         } else if (!x.leaving) counts.set(x.machine, (counts.get(x.machine) ?? 0) + 1);
@@ -1491,6 +1445,7 @@ export class Control extends DurableObject {
     }
     const handover = !r.retire && this.wantsHandover(r, now);
     const start = !r.retire && r.ready && r.pool && r.starts ? this.claimStarts(r.pool, run, now) : []; // pool members start their peers
+    this.followCopies(now);
     this.cleanup(now);
     return {
       domain: this.env.DOMAIN,
@@ -1624,9 +1579,11 @@ export class Control extends DurableObject {
   }
 
   async cf(path, init = {}) {
+    const auth = this.env.CF_API_TOKEN ? { authorization: `Bearer ${this.env.CF_API_TOKEN}` }
+      : { "x-auth-email": this.env.CF_API_EMAIL, "x-auth-key": this.env.CF_API_KEY };
     const res = await fetch(`${this.env.CF_API_BASE ?? "https://api.cloudflare.com/client/v4"}${path}`, {
       ...init,
-      headers: { authorization: `Bearer ${this.env.CF_API_TOKEN}`, "content-type": "application/json" },
+      headers: { ...auth, "content-type": "application/json" },
     });
     const data = await res.json().catch(() => ({ success: false, errors: [{ message: `HTTP ${res.status}` }] }));
     if (!data.success) throw new HttpError(502, `Cloudflare API ${path.split("?")[0]}: ${JSON.stringify(data.errors)}`);
@@ -1688,25 +1645,33 @@ export class Control extends DurableObject {
     return { retired: n, tunnel: slot?.tunnel ?? null };
   }
 
-  // For the public URLs, the machines each may go to: "<project>-<k>" -> replica k's machine if its current run is
-  // online and has the project healthy, plus the old copy while it's being moved, after the new one. Disabled projects
-  // are there with no machines. (A machine keeps reporting a project healthy for a moment after it's told to remove it.)
-  healthyRoutes(now) {
-    const newest = new Map();
-    for (const r of this.liveRuns(now)) {
-      if (r.ready && (newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
-    }
-    const healthy = (key, machine) => newest.get(machine)?.status[key]?.s === "healthy";
-    const replicas = {};
+  // Where each replica's public name should point: the tunnel of the machine running that copy. While a replica is
+  // being moved (two copies), the new one once it's healthy, else the old one. Replicas with no copy yet have no
+  // target (their names are left as they are).
+  dnsTargets(now) {
+    const want = new Map(); // "<project>-<k>" -> tunnel id
+    const newest = this.liveMachines(now);
+    const healthy = (name, x) => newest.get(x.machine)?.status[this.keyOn(name, x.machine, x.replica)]?.s === "healthy";
     for (const p of this.projects.values()) {
       const spec = this.version(p.name, p.version);
       if (!spec?.port) continue;
-      for (let k = 1; k <= spec.replicas; k++) replicas[`${p.name}-${k}`] = [];
-      if (!p.enabled) continue;
-      const copies = [...this.copiesOf(p.name)].sort((a, b) => Boolean(a.leaving) - Boolean(b.leaving));
-      for (const x of copies) if (healthy(this.keyOn(p.name, x.machine, x.replica), x.machine)) replicas[`${p.name}-${x.replica}`]?.push(x.machine);
+      for (let k = 1; k <= spec.replicas; k++) {
+        const copies = this.copiesOf(p.name).filter((x) => x.replica === k);
+        const pick = copies.find((x) => !x.leaving && healthy(p.name, x)) ?? copies.find((x) => x.leaving && healthy(p.name, x))
+          ?? copies.find((x) => !x.leaving) ?? copies[0];
+        const tunnel = pick && this.slots.get(pick.machine)?.tunnel;
+        if (tunnel) want.set(`${p.name}-${k}`, tunnel);
+      }
     }
-    return { replicas };
+    return want;
+  }
+
+  // A DNS sync whenever a replica's name should point somewhere else than it did.
+  followCopies(now) {
+    const seen = JSON.stringify([...this.dnsTargets(now)].sort());
+    if (seen === this.dnsTargetsSeen) return;
+    this.dnsTargetsSeen = seen;
+    this.scheduleDns();
   }
 
   cleanup(now) {
@@ -1901,16 +1866,16 @@ export class Control extends DurableObject {
     };
   }
 
-  // ---- DNS and routes ----
-  // For every project with a port: <project>-<k>.DOMAIN (k from 1 to its replica count) -> this Worker (a proxied
-  // placeholder record plus a Worker route), and <project>-m<n>.DOMAIN -> tunnel runner-<n> for every slot that has a
-  // tunnel, which is how the Worker reaches machine n. Disabled projects keep theirs, so turning one back on is
-  // instant. Names already used by records that aren't ours are left alone; placeholders and routes of ours for names
-  // no longer served (a removed replica, the shared <project>.DOMAIN of before) are deleted.
+  // ---- DNS ----
+  // For every project with a port: <project>-<k>.DOMAIN (k from 1 to its replica count) is a proxied CNAME to the tunnel
+  // of the machine running replica k, moved when the copy moves. Names whose replica has no copy yet keep their record,
+  // if any. Our records are the CNAMEs pointing at our tunnels: the ones no longer wanted (a removed replica, the
+  // <project>-m<n> machine names of before) are deleted, and so are the placeholder records the Worker of before left
+  // behind. Records that aren't ours are left alone and noted.
 
   scheduleDns() {
     this.dnsDue = Date.now() + 2_000;
-    this.ctx.storage.setAlarm(this.dnsDue);
+    this.setAlarm(this.dnsDue);
   }
 
   // The alarm keeps DNS in line: hourly, or 2s after a change.
@@ -1919,7 +1884,8 @@ export class Control extends DurableObject {
     if (now >= (this.dnsDue ?? 0)) {
       const due = this.dnsDue; // a change during the sync asks for another one (scheduleDns), which must stand
       try {
-        await this.syncDns();
+        if (this.env.DNS === "off") this.dnsNotes = ["DNS sync is switched off (DNS=off)"];
+        else await this.syncDns();
         this.dnsError = null;
         if (this.dnsDue === due) this.dnsDue = now + 3600_000; // re-check hourly in case something drifted
       } catch (e) {
@@ -1928,23 +1894,20 @@ export class Control extends DurableObject {
         if (this.dnsDue === due) this.dnsDue = now + 60_000;
       }
     }
-    await this.ctx.storage.setAlarm(this.dnsDue);
+    this.setAlarm(this.dnsDue);
   }
 
   async syncDns() {
     const domain = this.env.DOMAIN;
     const zone = this.env.ZONE;
-    const tunnelOf = new Map([...this.slots.values()].map((x) => [x.n, `${x.tunnel}.cfargotunnel.com`]));
-    const ours = new Set(tunnelOf.values());
-    const want = new Map(); // name -> CNAME target
-    const served = new Set(); // names this Worker answers: <project>-<k>.DOMAIN
+    const now = Date.now();
+    const ours = new Set([...this.slots.values()].map((x) => `${x.tunnel}.cfargotunnel.com`));
+    const want = new Map([...this.dnsTargets(now)].map(([label, tunnel]) => [`${label}.${domain}`, `${tunnel}.cfargotunnel.com`]));
+    const names = new Set(); // every replica name, with a target or not
     for (const p of this.projects.values()) {
       const spec = this.version(p.name, p.version);
-      const port = spec?.port ?? (p.stable != null ? this.version(p.name, p.stable)?.port : null);
-      if (!port) continue;
-      const replicas = spec?.replicas ?? 1;
-      for (let k = 1; k <= replicas; k++) served.add(`${p.name}-${k}.${domain}`);
-      for (const [n, target] of tunnelOf) want.set(`${p.name}-m${n}.${domain}`, target);
+      if (!spec?.port) continue;
+      for (let k = 1; k <= spec.replicas; k++) names.add(`${p.name}-${k}.${domain}`);
     }
     const existing = [];
     for (let page = 1; ; page++) {
@@ -1952,9 +1915,8 @@ export class Control extends DurableObject {
       existing.push(...data.result);
       if (page >= (data.result_info?.total_pages ?? 1)) break;
     }
-    const isPlaceholder = (r) => r.type === "AAAA" && r.content === REPLICA_DNS && r.comment === "hetp4401/runner";
-    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isPlaceholder(r) && !served.has(r.name)));
-    // Records on their way out don't keep a name from being used (machine n's old <project>-<n> becomes replica n's).
+    const isOldPlaceholder = (r) => r.type === "AAAA" && r.content === REPLICA_DNS && r.comment === "hetp4401/runner";
+    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !names.has(r.name)) || isOldPlaceholder(r));
     const gone = new Set(deletes.map((r) => r.id));
     const byName = new Map();
     for (const r of existing) if (!gone.has(r.id)) (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(r);
@@ -1966,16 +1928,7 @@ export class Control extends DurableObject {
       const r = rs.find((x) => x.type === "CNAME");
       if (!rs.length) posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
       else if (r && r.content !== content && ours.has(r.content)) patches.push({ id: r.id, content });
-    }
-    const servable = new Set(); // names this Worker may answer
-    for (const name of served) {
-      const rs = byName.get(name) ?? [];
-      if (!rs.length) posts.push({ type: "AAAA", name, content: REPLICA_DNS, proxied: true, comment: "hetp4401/runner" });
-      else if (!rs.every(isPlaceholder)) {
-        notes.push(`${name} is already used by another DNS record, so this Worker doesn't answer it`);
-        continue;
-      }
-      servable.add(name);
+      else if (!r || !ours.has(r.content)) notes.push(`${name} is already used by another DNS record, so it can't point at its machine`);
     }
     // At most 100 changes per batch (the free plan's limit is 200), deletes first; a batch applies its own deletes
     // before its posts, and nothing at all if one change fails.
@@ -1985,22 +1938,7 @@ export class Control extends DurableObject {
       for (const [kind, x] of ops.slice(i, i + 100)) (batch[kind] ??= []).push(x);
       await this.cf(`/zones/${zone}/dns_records/batch`, { method: "POST", body: JSON.stringify(batch) });
     }
-    // Worker routes for the names it answers.
-    const script = this.env.SCRIPT_NAME ?? "runner-control";
-    const routes = (await this.cf(`/zones/${zone}/workers/routes`)).result;
-    const mine = new RegExp(`^[a-z0-9-]+\\.${domain.replace(/\./g, "\\.")}/\\*$`);
-    for (const r of routes) {
-      const name = r.pattern.slice(0, -2);
-      if (r.script === script && mine.test(r.pattern) && !servable.has(name)) {
-        await this.cf(`/zones/${zone}/workers/routes/${r.id}`, { method: "DELETE" });
-      }
-    }
-    for (const name of servable) {
-      const r = routes.find((x) => x.pattern === `${name}/*`);
-      if (!r) await this.cf(`/zones/${zone}/workers/routes`, { method: "POST", body: JSON.stringify({ pattern: `${name}/*`, script }) });
-      else if (r.script !== script) notes.push(`${name}/* already routes to Worker ${r.script}`);
-    }
+    if (ops.length) console.log(`DNS: ${deletes.length} deleted, ${patches.length} moved, ${posts.length} added`);
     this.dnsNotes = notes;
   }
-
 }

@@ -4,9 +4,8 @@
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
 . "$HERE/stop.sh"
-rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var FLEET_PASSWORD:adm --var JOIN_TOKEN:node --var 'POOLS:{"main":4}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+. "$HERE/start.sh" FLEET_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":4}'
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
 A='x-fleet-password: adm'
@@ -23,7 +22,7 @@ sync() { # machine [leaving]
 }
 tick() { for m in $MACHINES; do sync $m; done; }
 show() { curl -s $B/api/status | jq -c '.projects[] | {name, replicas, placed:[.placed[] | "r\(.replica)@m\(.machine)\(if .leaving then " (leaving→m\(.leaving.to))" else "" end)"]}'; }
-routes() { echo "   routes: $(curl -s $B/internal/routes | jq -c .replicas)"; }
+routes() { echo "   names: $(curl -s $B/internal/dns | jq -c '.names | with_entries(.value |= sub("tun-runner-"; "m"))')"; }
 machineOf() { curl -s $B/api/status | jq -r ".projects[0].placed[] | select(.replica == $1 and (.leaving | not)) | .machine"; }
 
 join a 1; join b 2; join c 3; join d 4
