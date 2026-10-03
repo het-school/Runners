@@ -1,7 +1,8 @@
 #!/bin/bash
-# The UI's API: anyone can see everything and deploy a new app, which sets that app's password; changing an app needs
-# its password or the fleet password; fleet changes need the fleet password. An address that gets a password wrong 5
-# times is refused for a while (counted per app, and for the fleet). Each line says ok, or WRONG with what came back.
+# Apps are open: anyone can deploy, change or remove one, through the UI's API and /api alike, unless it was locked
+# with a password; then changing it needs that password or the fleet password. Fleet changes need the fleet password.
+# An address that gets a password wrong 5 times is refused for a while (counted per app, and for the fleet). Each line
+# says ok, or WRONG with what came back.
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
 . "$HERE/stop.sh"
@@ -21,8 +22,20 @@ has() { curl -s $U/status | jq -r ".projects[] | select(.name == \"$1\") | \"  $
 echo "== anyone: status and metrics"
 want 200 $U/status
 want 200 "$A/metrics?range=1h"
-echo "== a new app needs a password of 6 or more characters"
-want 400 -X PUT $U/projects/web "${J[@]}" -d '{"port":8080,"dockerfile":"FROM x"}'
+echo "== an open app: deployed, changed, removed by anyone, with no credentials"
+want 200 -X PUT $U/projects/open "${J[@]}" -d '{"port":8070,"dockerfile":"FROM x"}'
+has open
+want 200 -X PUT $U/projects/open "${J[@]}" -d '{"port":8070,"dockerfile":"FROM y"}'
+want 200 -X POST $U/projects/open/disable
+want 200 -X POST $A/projects/open/enable
+want 200 -X PUT $A/projects/open "${J[@]}" -d '{"port":8070,"dockerfile":"FROM z","replicas":2}'
+want 401 -X POST $U/projects/open/disable -H 'x-fleet-password: nope'
+want 200 -X DELETE $A/projects/open
+echo "== without the fleet password an app gets an ordinary container only (the sandbox)"
+want 400 -X PUT $A/projects/privileged "${J[@]}" -d '{"port":8071,"compose":"services:\n  p:\n    image: x\n    privileged: true\n"}'
+want 200 -X PUT $A/projects/privileged -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"port":8071,"compose":"services:\n  p:\n    image: x\n    privileged: true\n"}'
+want 200 -X DELETE $A/projects/privileged -H 'x-fleet-password: hunter2'
+echo "== a password locks a new app; it's 6 or more characters"
 want 400 -X PUT $U/projects/web "${J[@]}" -d '{"port":8080,"dockerfile":"FROM x","password":"short"}'
 want 200 -X PUT $U/projects/web "${J[@]}" -d '{"port":8080,"dockerfile":"FROM x","password":"web-secret"}'
 has web
@@ -54,16 +67,15 @@ want 400 -X PUT $U/projects/web/password -H 'x-app-password: web-secret' "${J[@]
 want 200 -X PUT $U/projects/web/password -H 'x-app-password: web-secret' "${J[@]}" -d '{"password":"web-secret-2"}'
 want 401 -X POST $U/projects/web/unlock -H 'x-app-password: web-secret'
 want 200 -X POST $U/projects/web/unlock -H 'x-app-password: web-secret-2'
-echo "== an app a script deploys with the fleet password and no app password: only the fleet password changes it, until it gets one"
+echo "== an open app can be locked later (by anyone, or the fleet password); from then on it's locked"
 want 200 -X PUT $A/projects/legacy -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"port":7070,"dockerfile":"FROM x"}'
 has legacy
-want 401 -X POST $U/projects/legacy/disable
-want 401 -X POST $U/projects/legacy/disable -H 'x-app-password: anything'
-want 200 -X POST $U/projects/legacy/disable -H 'x-fleet-password: hunter2'
+want 200 -X POST $U/projects/legacy/disable
 want 200 -X PUT $U/projects/legacy/password -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"password":"legacy-pass"}'
-want 200 -X POST $U/projects/legacy/enable -H 'x-app-password: legacy-pass'
 has legacy
-echo "== scripts: the fleet password on /api changes any app; without it /api refuses, and the join token only does machine things"
+want 401 -X POST $U/projects/legacy/enable
+want 200 -X POST $U/projects/legacy/enable -H 'x-app-password: legacy-pass'
+echo "== scripts: the fleet password on /api changes any app; a locked app refuses /api without it, and the join token only does machine things"
 want 200 -X POST $A/projects/web/disable -H 'x-fleet-password: hunter2'
 want 401 -X POST $A/projects/web/enable
 want 401 -X POST $A/projects/web/enable -H 'authorization: Bearer node'

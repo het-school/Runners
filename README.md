@@ -5,8 +5,8 @@ A self-healing fleet of machines that join a control plane: pools of GitHub Acti
 Neither the control plane nor the agent knows what a machine is, or how long it lives; they're told. An agent describes its machine with a **pool** (the name of a replaceable set it belongs to, which the control plane keeps at its size; or none, for a standalone host that keeps its slot across restarts), whether it **starts** machines (it has a `START_CMD`), an optional label (a name for the pages; `install.sh` uses the host's hostname), and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). Everything about GitHub Actions lives in [`machine.yml`](.github/workflows/machine.yml): the job's 6-hour lifetime, a timer that drains the machine 4h15m-5h15m in at random, and the command that starts another machine.
 
 - **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
-  - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and deploying a new app.
-  - **Needs the app's password:** changing an app: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name), and changing its password. Whoever deploys an app sets its password; the browser keeps it for the session (or on that device if you tick the box). The fleet password works for every app too. Apps with no password (deployed by a script with the fleet password and none, or from before app passwords) can only be changed with the fleet password until one is set from the app's page or with `runnerctl password <name>`.
+  - **Open to everyone:** seeing everything (apps, machines, metrics, deployments), deploying an app, and changing or removing any app that isn't locked: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name). No account, no token.
+  - **A locked app needs its password:** whoever deploys an app can give it a password (optional), or lock it later from its page or with `runnerctl password <name>`; changing it then needs that password, which the browser keeps for the session (or on that device if you tick the box). The fleet password works for every app too.
   - **Needs the fleet password:** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
   - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours, 10-minute resolution for 3 days and hourly for 30 days.
 
@@ -46,7 +46,7 @@ Each change is a new version, and every machine switches to it at once. Nothing 
 
 ## API
 
-The web app uses `/admin/api/*`. Reading is open. Deploying a new app (`PUT /projects/<name>`) needs `"password"` (6+ characters) in the body; after that, changing the app (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`) needs the header `x-app-password` or `x-fleet-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-fleet-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Scripts can use `/api/*` with the fleet password (`x-fleet-password`, with the same lockout) for everything, without app passwords; machines use it with the join token (`Authorization: Bearer <join token>`).
+The web app uses `/admin/api/*`; scripts use `/api/*`; they're the same API. Reading and deploying are open: `PUT /projects/<name>` creates or updates an app with no credentials. A `"password"` (6+ characters) in a new app's body locks it; from then on changing it (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`, which also locks an open app) needs the header `x-app-password` or `x-fleet-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-fleet-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Deploys without the fleet password get an ordinary container only (see Projects). Machines use `/api/*` with the join token (`Authorization: Bearer <join token>`).
 
 ```
 GET    /api/status                              projects and machines (no token needed)
@@ -68,12 +68,11 @@ POST   /api/drain                               {"agent": id}, {"run": id} or {"
 ```
 
 ```sh
-curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello -H 'Content-Type: application/json' \
   -d '{"dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]", "port": 9000}'
 ```
 
-[`bin/runnerctl`](bin/runnerctl) wraps the API. It sends the fleet password, from `$FLEET_PASSWORD` or `~/.config/runnerctl/fleet-password`.
+[`bin/runnerctl`](bin/runnerctl) wraps the API. It sends the fleet password if it has one (`$FLEET_PASSWORD` or `~/.config/runnerctl/fleet-password`), which locked apps and fleet changes need; everything else works without.
 
 ```
 runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
@@ -130,7 +129,7 @@ The live one runs on the owner's VPS as systemd user units `runner-control.servi
 ## Setup notes
 
 - **Repo secrets:** `JOIN_TOKEN` (the same value as the control plane's `JOIN_TOKEN`). Tunnel tokens come from the control plane.
-- **Control plane secrets:** two you use, `FLEET_PASSWORD` (the owner's: the web app asks for it, and `runnerctl` and scripts send it) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the control plane uses: a Cloudflare token with Tunnel edit on the account and DNS edit on the zone. App passwords are kept by the control plane.
+- **Control plane secrets:** two you use, `FLEET_PASSWORD` (the owner's: for fleet changes and locked apps; the web app asks for it, and `runnerctl` sends it) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the control plane uses: a Cloudflare token with Tunnel edit on the account and DNS edit on the zone. App passwords are kept by the control plane.
 - **Web app:** changes sent from other sites are refused.
 - **History:** until 2026-10-03 the control plane was a Cloudflare Worker with a Durable Object, and the replica URLs went through the Worker. The Workers free plan's 100,000 requests a day (the machines' check-ins alone were 86,400) is why it moved.
 - **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). Change sizes there rather than through the repos' `POOL_SIZE` variable: machines keep re-sending the size they started with, so a change there only takes hold as they're replaced. GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.

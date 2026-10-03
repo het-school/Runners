@@ -410,8 +410,8 @@ async function fleet(fn) {
 }
 
 // ======================================================================== app passwords
-// An app's password is set when it's deployed; changing the app needs it, or the fleet password. Once given here it's
-// kept for this tab, or on this device if asked.
+// Apps are open unless locked: an app deployed with a password can only be changed with it, or the fleet password.
+// Once given here it's kept for this tab, or on this device if asked.
 const appKey = (name) => `app-password:${name}`;
 const appPw = (name) => sessionStorage.getItem(appKey(name)) || localStorage.getItem(appKey(name)) || "";
 function saveAppPw(name, v, remember) {
@@ -422,20 +422,19 @@ function forgetAppPw(name) {
   sessionStorage.removeItem(appKey(name));
   localStorage.removeItem(appKey(name));
 }
-const canChange = (name) => Boolean(pw || appPw(name));
+const locked = (name) => S.status?.projects.find((x) => x.name === name)?.hasPassword === true;
+const canChange = (name) => !locked(name) || Boolean(pw || appPw(name));
 const appLockmark = (name) => (canChange(name) ? "" : ` <span class="lockmark" title="needs the app's password">${LOCK(false)}<span class="mob"> </span></span>`);
 // Forgets whichever password a refused change was sent with (api() sends the app's if it has it, else the fleet's).
 const forgetUsed = (name) => (appPw(name) ? forgetAppPw(name) : forgetPw());
 
-// Asks for an app's password, checked before it's kept. An app without one can only be changed with the fleet
-// password, so that's asked for instead, and any app's sheet offers it too.
+// Asks for a locked app's password, checked before it's kept. The sheet offers the fleet password too.
 async function unlockApp(name) {
-  const p = S.status?.projects.find((x) => x.name === name);
-  if (p && !p.hasPassword) return unlock(`${name} has no app password, so changing it needs the fleet password.`);
+  if (!locked(name)) return true;
   let useFleet = false;
   const ok = await sheet({
     title: `Password for ${name}`, ok: "Unlock",
-    html: `<p class="meta">Changing ${esc(name)} needs its app password.</p>
+    html: `<p class="meta">${esc(name)} is locked: changing it needs its password.</p>
       <label class="f" for="apw-in">Password</label><input id="apw-in" type="password" autocomplete="current-password" required>
       <label class="check"><input type="checkbox" id="apw-remember"> Remember on this device</label>
       <p class="hint"><button type="button" class="link" id="apw-fleet">Use the fleet password instead</button></p>`,
@@ -1263,8 +1262,8 @@ async function changeAppPassword(name) {
   const p = S.status.projects.find((x) => x.name === name);
   if (!(await ensureApp(name))) return;
   const ok = await sheet({
-    title: p.hasPassword ? `New password for ${name}` : `Set a password for ${name}`, ok: "Save",
-    html: `<p class="meta">${p.hasPassword ? "The old password stops working." : "Then whoever has it can change this app (the fleet password still can too)."}</p>
+    title: p.hasPassword ? `New password for ${name}` : `Lock ${name} with a password`, ok: "Save",
+    html: `<p class="meta">${p.hasPassword ? "The old password stops working." : "Then only whoever has it can change this app (and the fleet password)."}</p>
       <label class="f" for="np-1">New password</label><input id="np-1" type="password" autocomplete="new-password" maxlength="200" required>
       <label class="f" for="np-2">New password again</label><input id="np-2" type="password" autocomplete="new-password" maxlength="200" required>
       <label class="check"><input type="checkbox" id="np-remember"> Remember on this device</label>
@@ -1280,7 +1279,7 @@ async function changeAppPassword(name) {
     },
   });
   if (!ok) return;
-  toast(p.hasPassword ? `${name}'s password is changed` : `${name} has a password now`);
+  toast(p.hasPassword ? `${name}'s password is changed` : `${name} is locked now`);
   loadStatus();
 }
 async function moveSheet(name, from, replica) {
@@ -1435,7 +1434,7 @@ function vApps() {
   return {
     title: "Apps",
     html: `<div class="row"><h1 class="grow">Apps</h1><a class="btn primary" href="#/apps/new">New app</a></div>
-      <div class="sub">Anyone can deploy an app; changing or removing one needs the password it was deployed with, or the fleet password. Each app runs as many replicas as it asks for, on the machines with the most room (two on one machine when there are more replicas than machines).</div>
+      <div class="sub">Anyone can deploy, change or remove an app, unless it was locked with a password; then changing it needs that password (or the fleet password). Each app runs as many replicas as it asks for, on the machines with the most room (two on one machine when there are more replicas than machines).</div>
       <div id="apps-filter"></div><div class="cards" id="apps-list" style="margin-top:14px"></div>`,
     status() {
       const st = S.status, runs = runsBy();
@@ -1515,10 +1514,10 @@ function vApp(name) {
         <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit${appLockmark(name)}</a>
           <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}${appLockmark(name)}</button>
           <button type="button" class="danger" data-act="delete">Delete${appLockmark(name)}</button>
-          <button type="button" data-act="password">${p.hasPassword ? "Change password" : "Set a password"}${appLockmark(name)}</button></div>
-        <p class="hint">${LOCK(canChange(name))} ${!p.hasPassword ? "No app password: only the fleet password can change this app."
-          : appPw(name) ? `Unlocked here with its app password. <button type="button" class="link" data-act="forgetpw">Forget it on this device</button>`
-          : pw ? "Unlocked here with the fleet password." : "Changing this app needs its app password, or the fleet password."}</p>`);
+          <button type="button" data-act="password">${p.hasPassword ? "Change password" : "Lock with a password"}${appLockmark(name)}</button></div>
+        <p class="hint">${LOCK(canChange(name))} ${!p.hasPassword ? "Open: anyone can change this app. Lock it with a password to keep that to yourself."
+          : appPw(name) ? `Locked; unlocked here with its password. <button type="button" class="link" data-act="forgetpw">Forget it on this device</button>`
+          : pw ? "Locked; unlocked here with the fleet password." : "Locked: changing this app needs its password, or the fleet password."}</p>`);
       setHtml($("#ad-status"), appStatusBlock(p, runs, { full: true }));
       const want = pending.replicas[name] ?? p.replicas;
       const up = [...runs.values()].filter((r) => r.ready).length;
@@ -1699,7 +1698,7 @@ function vEditor(name, sample) {
     html: `<a class="back" href="${name ? appHref(name) : "#/apps"}">← ${name ? esc(name) : "Apps"}</a>
       <h1>${name ? `Edit ${esc(name)}` : "New app"}</h1>
       <div class="sub">${name ? `Deploying makes a new version, and every replica switches to it. If it fails, its page shows each machine's error; edit it again, or roll back from Versions.${canChange(name) ? ""
-          : S.status?.projects.find((x) => x.name === name)?.hasPassword === false ? " It needs the fleet password: you'll be asked." : " It needs the app's password (or the fleet password): you'll be asked."}`
+          : " It's locked: you'll be asked for its password (or the fleet password)."}`
         : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
       ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button><a class="meta" href="#/guide">Deploy guide →</a></div>`}
       <div class="errbox" id="ed-error" role="alert" hidden></div>
@@ -1725,9 +1724,9 @@ function vEditor(name, sample) {
           <input type="file" id="ed-up" multiple hidden><input type="file" id="ed-updir" webkitdirectory hidden>
         </div>
         <p class="hint">Anything the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>, with paths relative to the compose file. A compose file and a top-level Dockerfile from an upload go in their boxes. Text only: 30 files, 250 KB in all.</p>
-        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : `<label class="f" for="ed-pw">App password (new)</label>
+        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : `<label class="f" for="ed-pw">Password (optional: locks the app)</label>
         <input id="ed-pw" type="password" autocomplete="new-password" maxlength="200" aria-describedby="ed-pw-hint">
-        <label class="f" for="ed-pw2">App password again</label>
+        <label class="f" for="ed-pw2">Password again</label>
         <input id="ed-pw2" type="password" autocomplete="new-password" maxlength="200" aria-describedby="ed-pw-hint">
         <label class="check"><input type="checkbox" id="ed-pw-remember"> Remember on this device</label>
         <p class="hint" id="ed-pw-hint" aria-live="polite"></p>`}
@@ -1753,9 +1752,9 @@ function vEditor(name, sample) {
         if (!checkReplicas()) { $("#ed-replicas").focus(); return; }
         const body = formSpec();
         if (!name) {
-          // A new app's password: needed to change it later. With the fleet unlocked it's optional.
+          // A new app's password is optional: with one, only whoever has it (or the fleet password) can change the app.
           const p1 = $("#ed-pw").value, p2 = $("#ed-pw2").value;
-          if (p1 || p2 || !pw) {
+          if (p1 || p2) {
             const bad = p1.length < MIN_APP_PASSWORD ? ["#ed-pw", `Give the app a password of ${MIN_APP_PASSWORD} characters or more`]
               : p1 !== p2 ? ["#ed-pw2", "The two passwords don't match"] : null;
             if (bad) { $(bad[0]).focus(); badPw(bad[1]); return; }
@@ -1803,8 +1802,7 @@ function vEditor(name, sample) {
       } else if (sample && SAMPLES[sample]) fill(SAMPLES[sample]);
       else checkName();
       if (!name) {
-        pwHint = pw ? "Optional while the fleet is unlocked: without one, only the fleet password can change the app."
-          : `Changing, disabling or deleting the app later needs it. ${MIN_APP_PASSWORD} characters or more; if it's lost, only the fleet's owner can set a new one.`;
+        pwHint = `Leave it empty and anyone can change or remove the app. With a password (${MIN_APP_PASSWORD} characters or more) only whoever has it can; if it's lost, the fleet's owner can set a new one.`;
         $("#ed-pw-hint").textContent = pwHint;
       }
     },
@@ -2053,17 +2051,17 @@ function vGuide() {
         <li><b>Name:</b> lowercase letters, digits and dashes, like <code>my-app</code>.</li>
         <li><b>Port:</b> what the app listens on (or <code>x-runner.port</code> in the compose file).</li>
         <li>Paste a compose file and/or a Dockerfile, and add (or upload) anything the build <code>COPY</code>s.</li>
-        <li><b>Password:</b> changing, disabling or deleting the app later needs it (or the fleet password). If it's lost, only the fleet's owner can set a new one.</li>
+        <li><b>Password</b> (optional): leave it empty and anyone can change or remove the app; with one, changing it needs that password (or the fleet password). If it's lost, the fleet's owner can set a new one.</li>
         <li><b>Deploy.</b> The app's page shows each replica come up, and every machine's error if one fails.</li></ol>
-      <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count. The app's page also has <b>Change password</b>.</p>
+      <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count. The app's page also locks an app with a password, or changes it.</p>
       <h3>With the API</h3>
-      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–${MAX_REPLICAS}, default 1), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more). Sending only <code>{"replicas": N}</code> to an existing app changes the count and keeps its files.
-        After that, every change to the app (<code>PUT</code>, <code>/disable</code>, <code>/enable</code>, <code>/move</code>, <code>DELETE</code>) needs the header <code>x-app-password</code>; <code>PUT …/projects/&lt;name&gt;/password</code> with <code>{"password": "new"}</code> changes it.
+      <p>Send JSON to <code>PUT ${esc(o)}/api/projects/&lt;name&gt;</code>, no credentials needed. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–${MAX_REPLICAS}, default 1), and optionally <code>password</code> (${MIN_APP_PASSWORD} characters or more), which locks the app. Sending only <code>{"replicas": N}</code> to an existing app changes the count and keeps its files.
+        Changes to a locked app (<code>PUT</code>, <code>/disable</code>, <code>/enable</code>, <code>/move</code>, <code>DELETE</code>) need the header <code>x-app-password</code>; <code>PUT …/projects/&lt;name&gt;/password</code> with <code>{"password": "new"}</code> locks an open app or changes the password.
         The fleet password, in <code>x-fleet-password</code>, can change any app, and fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need it.</p>
-      ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "password": "choose-one", "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
-      <p class="hint">Files on disk: let <code>jq</code> build the body. Updating an app that exists: drop <code>password</code> and send <code>-H "x-app-password: $PW"</code>.</p>
-      ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py --arg pw "$PW" \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}, password: $pw}' |\ncurl -X PUT ${o}/admin/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
-      ${codebox(`B=${o}/admin/api; P="x-app-password: $PW"\ncurl $B/status                                  # every app and machine\ncurl $B/projects/my-app                         # the current spec and its versions\ncurl $B/projects/my-app?version=2               # an earlier version\ncurl -X POST $B/projects/my-app/disable -H "$P" # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable -H "$P"\ncurl -X DELETE $B/projects/my-app -H "$P"       # delete it and its versions`)}
+      ${codebox(`curl -X PUT ${o}/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
+      <p class="hint">Files on disk: let <code>jq</code> build the body. Add <code>password: $pw</code> to lock the app; updating a locked app then takes <code>-H "x-app-password: $PW"</code>.</p>
+      ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}}' |\ncurl -X PUT ${o}/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
+      ${codebox(`B=${o}/api\ncurl $B/status                            # every app and machine\ncurl $B/projects/my-app                   # the current spec and its versions\ncurl $B/projects/my-app?version=2         # an earlier version\ncurl -X POST $B/projects/my-app/disable   # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable\ncurl -X DELETE $B/projects/my-app         # delete it and its versions`)}
       <p class="hint">With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does this for you. Limits: 30 files, 250 KB, text only; ports 2019 and 19080 are taken. Two apps that publish the same host port are never placed on the same machine.</p>
       <h3>Add a machine</h3>
       <p>Any Linux machine with Docker can join: see <a href="#/contribute">Contribute a machine</a>.</p>`;

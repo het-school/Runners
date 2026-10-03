@@ -17,12 +17,12 @@
 // machine running that copy, moved when the copy moves (replicas are numbered 1 to N and keep their number, so these
 // URLs only change with the replica count). There's no shared URL in front of a project's replicas, and nothing in
 // between: the machine's router answers the replica's name itself.
-//   /            the UI (everything public)  /api/*        API: the fleet password (x-fleet-password) for everything, or
-//                                                          the join token (Bearer) for machines: join/sync/claim/drain/roll
-//                                            /admin/api/*  the UI's API: anyone can see everything and deploy a new
-//                                                          app, which sets that app's password; changing an app needs
-//                                                          its password (x-app-password) or the fleet password
-//                                                          (x-fleet-password), and fleet changes need the fleet password
+//   /            the UI (everything public)  /api/*        API: apps are open to everyone (deploying, changing, removing),
+//                                                          unless an app was locked with a password, which its changes
+//                                                          then need (x-app-password) or the fleet password
+//                                                          (x-fleet-password); fleet changes need the fleet password;
+//                                                          machines send the join token (Bearer): join/sync/claim/drain/roll
+//                                            /admin/api/*  the same, for the UI (changes from other sites are refused)
 //   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
 import { timingSafeEqual } from "node:crypto";
 import YAML from "yaml";
@@ -665,9 +665,8 @@ export class Control {
       if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
       if (request.method === "GET" && path === "/internal/dns") return json({ names: Object.fromEntries(this.dnsTargets(Date.now())) }); // where each replica's name points (tests)
       if (path.startsWith("/admin/api/")) {
-        // The UI: anyone can see everything and deploy a new app; changing an app needs its password or the fleet
-        // password, and fleet changes need the fleet password. Changes sent from other sites are refused. No machine
-        // powers here (joining, checking in): those hand out tunnel tokens.
+        // The UI: apps are open unless locked with a password; fleet changes need the fleet password. Changes sent
+        // from other sites are refused. No machine powers here (joining, checking in): those hand out tunnel tokens.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
         const route = path.slice("/admin/api".length);
@@ -683,15 +682,19 @@ export class Control {
           return json({ ok: true });
         }
         return await this.api(request, url, route, {
-          admin, deploy: true, node: false, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
+          admin, node: false, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
         });
       }
       if (path.startsWith("/api/")) {
-        // Scripts send the fleet password, as the UI does; machines send the join token.
+        // Scripts: the same as the UI (apps are open; the fleet password for fleet changes and locked apps); machines
+        // send the join token.
         const password = request.headers.get("x-fleet-password");
-        const admin = password != null && await this.checkPassword(password, request.headers.get("cf-connecting-ip") ?? "");
+        const ip = request.headers.get("cf-connecting-ip") ?? "";
+        const admin = password != null && await this.checkPassword(password, ip);
         const node = admin || (Boolean(this.env.JOIN_TOKEN) && request.headers.get("authorization") === `Bearer ${this.env.JOIN_TOKEN}`);
-        return await this.api(request, url, path.slice("/api".length), { admin, deploy: admin, node });
+        return await this.api(request, url, path.slice("/api".length), {
+          admin, node, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
+        });
       }
       throw new HttpError(404, "not found");
     } catch (e) {
@@ -737,7 +740,7 @@ export class Control {
 
   async newAppSecret(password) {
     if (typeof password !== "string" || password.length < APP_PASSWORD_MIN || password.length > APP_PASSWORD_MAX) {
-      throw new HttpError(400, `give the app a password ("password", ${APP_PASSWORD_MIN} to ${APP_PASSWORD_MAX} characters): changing it later needs it`);
+      throw new HttpError(400, `an app's password ("password") is ${APP_PASSWORD_MIN} to ${APP_PASSWORD_MAX} characters`);
     }
     const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
     return { salt, hash: await this.passwordHash(password, salt) };
@@ -752,9 +755,9 @@ export class Control {
     );
   }
 
-  // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token), and any app;
-  // deploy: new apps, and changes to an app given its password (appPassword); node: machines.
-  async api(request, url, route, { admin, deploy, node, ip = "", fleetWrong = false, appPassword = null }) {
+  // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token), and any app, locked or not;
+  // node: machines. Apps are open to everyone otherwise, unless locked with a password (appPassword then).
+  async api(request, url, route, { admin, node, ip = "", fleetWrong = false, appPassword = null }) {
     const { method } = request;
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
@@ -804,14 +807,13 @@ export class Control {
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
     const sl = route.match(/^\/slots\/(\d+)$/);
     if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
-    // Apps: anyone can look. Deploying a new one sets its password ("password" in the body; optional with the fleet
-    // password); after that, changing it needs that password (x-app-password) or the fleet password. An app with no
-    // password (from before app passwords, or deployed with the fleet password and none) needs the fleet password.
+    // Apps are open: anyone can look, deploy a new one, change or remove one. Unless it's locked: a "password" sent
+    // with a new app (or set later at /password) locks it, and changing it then needs that password (x-app-password)
+    // or the fleet password.
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password))?$/);
     if (m) {
       const [, name, action] = m;
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
-      need(deploy);
       const input = method === "PUT" ? await body() : null;
       const key = `${ip}|app:${name}`;
       // The hashing comes first, so the checks and the change below run with no await between them and no other
@@ -823,20 +825,20 @@ export class Control {
         given = { salt: stored.salt, hash: await this.passwordHash(appPassword, stored.salt) };
       }
       const wasNew = !action && method === "PUT" && !this.projects.has(name);
-      const secret = action === "password" || (wasNew && (input?.password != null || !admin)) ? await this.newAppSecret(input?.password) : null;
+      const secret = action === "password" || (wasNew && input?.password != null) ? await this.newAppSecret(input?.password) : null;
       // No awaits from here on.
       const creating = !action && method === "PUT" && !this.projects.has(name);
-      if (creating && !admin && !secret) throw new HttpError(409, `${name} was just deleted; try again`);
       if (!creating && !admin) {
         this.project(name); // 404 if there's no such app
         const current = this.appPasswords.get(name);
-        if (!current) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `${name} has no app password, so changing it needs the fleet password`);
-        if (appPassword == null) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `changing ${name} needs its password or the fleet password`);
-        const now = Date.now();
-        this.refuseIfLocked(key, now);
-        const ok = given?.salt === current.salt && sameHex(given.hash, current.hash);
-        this.noteTry(key, ok, now);
-        if (!ok) throw new HttpError(401, `wrong password for ${name}`);
+        if (current) { // locked
+          if (appPassword == null) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `${name} is locked: changing it needs its password or the fleet password`);
+          const now = Date.now();
+          this.refuseIfLocked(key, now);
+          const ok = given?.salt === current.salt && sameHex(given.hash, current.hash);
+          this.noteTry(key, ok, now);
+          if (!ok) throw new HttpError(401, `wrong password for ${name}`);
+        } else if (fleetWrong) throw new HttpError(401, "wrong fleet password");
       }
       if (action === "unlock" && method === "POST") return json({ ok: true });
       if (action === "password" && method === "PUT") {
@@ -878,7 +880,7 @@ export class Control {
       blocked: this.blocked.get(p.name) ?? null, // why a replica has no machine, when it's a clash rather than a shortage
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
-      hasPassword: this.appPasswords.has(p.name), // false: only the fleet password can change it
+      hasPassword: this.appPasswords.has(p.name), // locked: changing it needs that password (or the fleet's); else anyone can
       state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
       halted: p.halted,
       updated: p.updated,
