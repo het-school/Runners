@@ -43,7 +43,7 @@ const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const REPLICA_DNS = "100::"; // <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
-const MAX_REPLICAS = 10; // each replica on a different machine; with fewer machines, it runs on all of them
+const MAX_REPLICAS = 20; // each replica on a different machine; with fewer machines, it runs on all of them
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
 // Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
@@ -134,10 +134,94 @@ function joinPath(...parts) {
   return out.join("/");
 }
 
+// Apps deployed without the fleet password get an ordinary container and nothing more: no way out to the machine
+// (its files, its processes, its network, Docker itself), which is where the join token and the machine's other
+// secrets are. So their compose files may only use what's listed here; anything else needs the fleet password. It's
+// a list of what's allowed, so whatever compose adds later is refused until someone has looked at it.
+const SAFE_TOP = new Set(["services", "volumes", "networks", "name", "version"]);
+const SAFE_SERVICE = new Set(["image", "build", "command", "entrypoint", "environment", "env_file", "ports", "expose",
+  "restart", "healthcheck", "depends_on", "working_dir", "user", "labels", "networks", "volumes", "tmpfs", "init",
+  "stop_signal", "stop_grace_period", "mem_limit", "mem_reservation", "memswap_limit", "cpus", "cpu_shares", "shm_size",
+  "pids_limit", "ulimits", "read_only", "stdin_open", "tty", "hostname", "domainname", "dns", "dns_search", "dns_opt",
+  "extra_hosts", "platform", "pull_policy", "logging", "deploy", "network_mode", "cap_drop", "links", "profiles", "scale"]);
+const SAFE_BUILD = new Set(["context", "dockerfile", "dockerfile_inline", "args", "target", "labels", "no_cache", "pull",
+  "shm_size", "tags", "platforms"]);
+const RESERVED_PORTS = new Set([2019, 19080]); // the machine's router and its admin API
+
+// What an untrusted compose file asks for that it may not have (empty if nothing).
+function sandboxProblems(doc) {
+  const out = [];
+  const no = (where, why) => out.push(why ? `${where} (${why})` : where);
+  const ext = (k) => k.startsWith("x-");
+  // A path on the machine is fine only inside the app's own folder, written plainly: no variables, which compose
+  // fills in on the machine (from .env too), so what's checked here is what it uses.
+  const inside = (p) => typeof p === "string" && !p.includes("$") && !/^[/~\\]|^[a-z]:/i.test(p) && joinPath(p) !== null;
+  for (const k of Object.keys(doc)) if (!SAFE_TOP.has(k) && !ext(k)) no(k);
+  for (const [k, v] of Object.entries(isMap(doc.volumes) ? doc.volumes : {})) {
+    // driver_opts can bind any folder of the machine, external/name reach volumes that aren't this app's
+    if (isMap(v) && Object.keys(v).some((x) => !["labels", "driver"].includes(x) && !ext(x)) || (isMap(v) && v.driver && v.driver !== "local")) {
+      no(`volumes.${k}`, "only plain named volumes");
+    }
+  }
+  for (const [k, v] of Object.entries(isMap(doc.networks) ? doc.networks : {})) {
+    if (isMap(v) && (Object.keys(v).some((x) => !["labels", "internal", "attachable", "driver", "enable_ipv6"].includes(x) && !ext(x)) || (v.driver && v.driver !== "bridge"))) {
+      no(`networks.${k}`, "only plain bridge networks");
+    }
+  }
+  const services = Object.keys(doc.services);
+  for (const [name, s] of Object.entries(doc.services)) {
+    if (!isMap(s)) continue;
+    const at = `services.${name}`;
+    for (const k of Object.keys(s)) if (!SAFE_SERVICE.has(k) && !ext(k)) no(`${at}.${k}`);
+    if (s.build != null) {
+      const b = isMap(s.build) ? s.build : { context: s.build };
+      for (const k of Object.keys(b)) if (!SAFE_BUILD.has(k) && !ext(k)) no(`${at}.build.${k}`);
+      const context = String(b.context ?? ".");
+      const remote = /^(https?|git):\/\//i.test(context) || context.startsWith("git@");
+      if (!remote && !inside(context)) no(`${at}.build.context`, "it must be a folder of the app's own files");
+      if (b.dockerfile != null && !inside(String(b.dockerfile))) no(`${at}.build.dockerfile`, "it must be one of the app's own files");
+    }
+    for (const v of [s.volumes ?? []].flat()) {
+      const m = typeof v === "string" ? v : isMap(v) ? v : null;
+      if (typeof m === "string") {
+        const parts = m.split(":");
+        if (m.includes("$")) no(`${at}.volumes`, `${m}: no variables`);
+        else if (parts.length > 1 && /^[./~\\]|^[a-z]:$/i.test(parts[0]) && !inside(parts[0])) no(`${at}.volumes`, `${parts[0]} is outside the app's folder`);
+      } else if (m) {
+        const type = m.type ?? "volume";
+        if (!["volume", "bind", "tmpfs"].includes(type)) no(`${at}.volumes`, `type ${type}`);
+        else if (type === "bind" && !inside(m.source)) no(`${at}.volumes`, `${m.source} is outside the app's folder`);
+        else if (type === "volume" && typeof m.source === "string" && m.source.includes("$")) no(`${at}.volumes`, `${m.source}: no variables`);
+        if (isMap(m.bind) && Object.keys(m.bind).some((x) => x !== "propagation" && x !== "create_host_path")) no(`${at}.volumes`, "bind options");
+      }
+    }
+    for (const f of [s.env_file ?? []].flat()) {
+      const path = isMap(f) ? f.path : f;
+      if (!inside(path)) no(`${at}.env_file`, `${path} must be one of the app's own files`);
+    }
+    if (s.network_mode != null && !["bridge", "none"].includes(s.network_mode) &&
+      !(typeof s.network_mode === "string" && s.network_mode.startsWith("service:") && services.includes(s.network_mode.slice(8)))) {
+      no(`${at}.network_mode`, `${s.network_mode}`);
+    }
+    for (const h of [s.extra_hosts ?? []].flat()) if (JSON.stringify(h).includes("host-gateway")) no(`${at}.extra_hosts`, "host-gateway reaches the machine");
+    for (const p of [s.ports ?? []].flat()) {
+      const host = isMap(p) ? p.published : String(p).split("/")[0].split(":").slice(-2, -1)[0];
+      if (String(host ?? "").includes("$") || RESERVED_PORTS.has(Number(host))) no(`${at}.ports`, `${JSON.stringify(p)}: that port is the machine's`);
+    }
+    if (isMap(s.logging) && s.logging.driver && !["json-file", "local", "none"].includes(s.logging.driver)) no(`${at}.logging.driver`);
+    if (isMap(s.deploy)) {
+      for (const k of Object.keys(s.deploy)) if (!["resources", "restart_policy", "replicas", "mode"].includes(k)) no(`${at}.deploy.${k}`);
+      if (JSON.stringify(s.deploy.resources ?? {}).includes("devices")) no(`${at}.deploy.resources`, "devices");
+    }
+  }
+  return out;
+}
+
 // Turns what was submitted into a spec the machines can run: { compose, port, files }.
 // Accepts a compose file, a Dockerfile, extra build files, or a mix; a Dockerfile on its own becomes a
-// one-service compose file. Rejects anything that would only fail later on a machine.
-function buildSpec(body) {
+// one-service compose file. Rejects anything that would only fail later on a machine, and, unless the deploy comes
+// with the fleet password (trusted), anything that would reach outside the app's container (sandboxProblems).
+function buildSpec(body, { trusted = false } = {}) {
   if (!isMap(body)) throw new HttpError(400, "send a JSON object");
   let { compose = "", dockerfile = null, files = {}, port = null, replicas = null } = body;
   if (typeof compose !== "string") throw new HttpError(400, "compose must be the compose file as text");
@@ -195,6 +279,14 @@ function buildSpec(body) {
     throw new HttpError(400, "x-runner.port must be a whole number from 1 to 65535");
   }
   replicas ??= parseReplicas(doc["x-runner"]?.replicas, "x-runner.replicas") ?? 1;
+  if (!trusted) {
+    // Checked as compose reads it: with YAML merge keys (<<) applied.
+    const merged = YAML.parse(compose, { merge: true });
+    const problems = isMap(merged) && isMap(merged.services) ? sandboxProblems(merged) : ["the compose file"];
+    if (problems.length) {
+      throw new HttpError(400, `without the fleet password, an app gets an ordinary container only, so its compose file can't use: ${problems.slice(0, 6).join("; ")}${problems.length > 6 ? `; and ${problems.length - 6} more` : ""}`);
+    }
+  }
   // Every service that builds from a local folder needs its Dockerfile among the files.
   for (const [service, def] of Object.entries(doc.services)) {
     if (!isMap(def) || def.build == null) continue;
@@ -670,7 +762,7 @@ export class Control extends DurableObject {
       if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
       if ((action === "enable" || action === "disable") && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "PUT") {
-        const out = this.putProject(name, input);
+        const out = this.putProject(name, input, { trusted: admin });
         if (creating && secret) {
           this.saveAppPassword(name, secret);
           out.hasPassword = true;
@@ -731,12 +823,12 @@ export class Control extends DurableObject {
   }
 
   // A new spec becomes a new version, which goes to every machine at once.
-  putProject(name, body) {
+  putProject(name, body, { trusted = false } = {}) {
     if (!NAME.test(name)) throw new HttpError(400, "project names are lowercase letters, digits and dashes");
     if (!this.projects.has(name) && NUMBERED.test(name)) {
       throw new HttpError(400, "a project name can't end in -<number> or -m<number>: those are the URLs of its replicas and machines");
     }
-    const spec = buildSpec(body);
+    const spec = buildSpec(body, { trusted });
     const t = Date.now();
     const machines = this.expectedMachines();
     const p = this.projects.get(name);

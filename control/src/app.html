@@ -310,7 +310,7 @@ function ago(ms) {
 }
 const pctOf = (a, b) => (isNum(a) && b > 0 ? (100 * a) / b : null);
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-const MAX_REPLICAS = 10;
+const MAX_REPLICAS = 20;
 const MIN_APP_PASSWORD = 6;
 
 // ======================================================================== state
@@ -1615,7 +1615,7 @@ function vEditor(name, sample) {
           <div><label class="f" for="ed-port">Port</label><input id="ed-port" type="number" min="1" max="65535" placeholder="8080" style="width:130px" inputmode="numeric"></div>
           <div><label class="f" for="ed-replicas">Replicas</label><input id="ed-replicas" inputmode="numeric" placeholder="1" style="width:100px" autocomplete="off"></div>
         </div>
-        <p class="hint">Port: what the app listens on (or <code>x-runner.port</code> in the compose file; none keeps it offline). Replicas: 1–10 (default 1), each on a different machine; with fewer machines than that, it runs on all of them.</p>
+        <p class="hint">Port: what the app listens on (or <code>x-runner.port</code> in the compose file; none keeps it offline). Replicas: 1–20 (default 1), each on a different machine; with fewer machines than that, it runs on all of them.</p>
         <label class="f" for="ed-compose">Docker Compose</label>
         <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
         <p class="hint">Optional with a Dockerfile: then one service is made that builds it and publishes the port.</p>
@@ -1917,7 +1917,7 @@ function vGuide() {
       if ($("#guide").childElementCount) return;
       const d = esc(dom());
       $("#guide").innerHTML = `
-      <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 10, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
+      <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 20, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
         Each replica has its own URL: replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code>, whichever machine it's on. There's no shared URL that spreads visitors across replicas, so hand out the replica URL you want people on.
         Each deploy is a new version, and every replica switches to it at once. If it fails, it stays failing (the app's page shows each machine's error) until you deploy a fix or roll back.</p>
       <h3>From this site</h3>
@@ -1929,7 +1929,7 @@ function vGuide() {
         <li><b>Deploy.</b> The app's page shows each replica come up, and every machine's error if one fails.</li></ol>
       <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count. The app's page also has <b>Change password</b>.</p>
       <h3>With the API</h3>
-      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–10, default 1; with fewer machines than replicas, it runs on every machine), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more).
+      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–20, default 1; with fewer machines than replicas, it runs on every machine), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more).
         After that, every change to the app (<code>PUT</code>, <code>/disable</code>, <code>/enable</code>, <code>/move</code>, <code>DELETE</code>) needs the header <code>x-app-password</code>; <code>PUT …/projects/&lt;name&gt;/password</code> with <code>{"password": "new"}</code> changes it.
         The fleet password, in <code>x-fleet-password</code>, can change any app, and fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need it.</p>
       ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "password": "choose-one", "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
