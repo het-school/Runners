@@ -1,6 +1,6 @@
 #!/bin/bash
 # Starts the control plane for a test on 127.0.0.1:8911 with a fresh database, the fake Cloudflare API at :8790 and
-# whatever VAR=value settings follow (FLEET_PASSWORD, JOIN_TOKEN, POOLS, HOT_MS...). Logs to /tmp/runner-test-dev.log.
+# whatever VAR=value settings follow (ADMIN_PASSWORD, JOIN_TOKEN, POOLS, HOT_MS...). Logs to /tmp/runner-test-dev.log.
 # Sourced by the tests after stop.sh; stop.sh ends it (by its port).
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 rm -rf /tmp/runner-test-state

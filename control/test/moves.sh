@@ -3,10 +3,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
 . "$HERE/stop.sh"
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-. "$HERE/start.sh" FLEET_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":3}'
+. "$HERE/start.sh" ADMIN_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":3}'
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
-A='x-fleet-password: adm'
+A='x-admin-password: adm'
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" -H content-type:application/json -d "$2" >/dev/null; }
 join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"main\",\"want\":$2}" >/dev/null; }
 # sync machine run cpu mem [statusjson]

@@ -6,8 +6,8 @@ Neither the control plane nor the agent knows what a machine is, or how long it 
 
 - **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments), deploying an app, and changing or removing any app that isn't locked: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name). No account, no token.
-  - **A locked app needs its password:** whoever deploys an app can give it a password (optional), or lock it later from its page or with `runnerctl password <name>`; changing it then needs that password, which the browser keeps for the session (or on that device if you tick the box). The fleet password works for every app too.
-  - **Needs the fleet password:** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
+  - **A locked app needs its app password:** whoever deploys an app can give it an app password (optional), or lock it later from its page or with `runnerctl password <name>`; changing it then needs that app password, which the browser keeps for the session (or on that device if you tick the box). The admin password works for every app too.
+  - **Needs the admin password (the fleet owner's):** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
   - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours, 10-minute resolution for 3 days and hourly for 30 days.
 
 ## Projects
@@ -30,7 +30,7 @@ A project is a docker compose file, optionally with Dockerfiles and other files 
 - **Dockerfile only:** a custom image. The control plane wraps it in a one-service compose file (`build: .`) that publishes the port. The app should listen on that port.
 - **Compose plus files:** files sit next to the compose file, so `build: .` or `build: ./web` (with `web/Dockerfile`) find them. You can also include whatever the Dockerfiles `COPY`, as long as it's text. Every machine builds the image when the version changes.
 
-Project names are lowercase letters, digits and dashes, and can't end in `-<number>` or `-m<number>` (those are replica and machine URLs). The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, file paths must stay inside the project, and a `port` given alongside the compose file must agree with its `x-runner.port`. Ports 2019 and 19080 are taken by the router. Apps deployed without the fleet password get an ordinary container only: their compose files can't reach the machine itself (host folders, the Docker socket, privileged mode, host networking and so on are refused with a message naming the setting).
+Project names are lowercase letters, digits and dashes, and can't end in `-<number>` or `-m<number>` (those are replica and machine URLs). The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, file paths must stay inside the project, and a `port` given alongside the compose file must agree with its `x-runner.port`. Ports 2019 and 19080 are taken by the router. Apps deployed without the admin password get an ordinary container only: their compose files can't reach the machine itself (host folders, the Docker socket, privileged mode, host networking and so on are refused with a message naming the setting).
 
 Sending only `{"replicas": N}` (or only a port) for an existing project makes a new version with the latest version's files, so a replica change never puts back files someone else has changed since.
 
@@ -46,7 +46,7 @@ Each change is a new version, and every machine switches to it at once. Nothing 
 
 ## API
 
-The web app uses `/admin/api/*`; scripts use `/api/*`; they're the same API. Reading and deploying are open: `PUT /projects/<name>` creates or updates an app with no credentials. A `"password"` (6+ characters) in a new app's body locks it; from then on changing it (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`, which also locks an open app) needs the header `x-app-password` or `x-fleet-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-fleet-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Deploys without the fleet password get an ordinary container only (see Projects). Machines use `/api/*` with the join token (`Authorization: Bearer <join token>`).
+The web app uses `/admin/api/*`; scripts use `/api/*`; they're the same API. Reading and deploying are open: `PUT /projects/<name>` creates or updates an app with no credentials. A `"password"` (6+ characters) in a new app's body locks it; from then on changing it (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`, which also locks an open app) needs the header `x-app-password` or `x-admin-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-admin-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Deploys without the admin password get an ordinary container only (see Projects). Machines use `/api/*` with the join token (`Authorization: Bearer <join token>`).
 
 ```
 GET    /api/status                              projects and machines (no token needed)
@@ -61,7 +61,7 @@ PUT    /api/settings                            {"pools": {"<pool>": 10}, "rebal
 POST   /api/projects/<name>/move?from=N[&to=M][&replica=K]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 DELETE /api/slots/<n>                           retire an empty slot: tunnel, records and DNS names go
-GET    /api/join-token                          the join token (needs the fleet password)
+GET    /api/join-token                          the join token (needs the admin password)
 POST   /api/join                                an agent starting up: {"agent", "pool", "url", "label", "want"} -> its slot and tunnel token
 POST   /api/claim?pool=<name>                    machines to start so the pool has its size (for a watchdog outside the pool)
 POST   /api/drain                               {"agent": id}, {"run": id} or {"machine": n}: it's going down soon, hand it over
@@ -72,7 +72,7 @@ curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello -H 'Cont
   -d '{"dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]", "port": 9000}'
 ```
 
-[`bin/runnerctl`](bin/runnerctl) wraps the API. It sends the fleet password if it has one (`$FLEET_PASSWORD` or `~/.config/runnerctl/fleet-password`), which locked apps and fleet changes need; everything else works without.
+[`bin/runnerctl`](bin/runnerctl) wraps the API. It sends the admin password if it has one (`$ADMIN_PASSWORD` or `~/.config/runnerctl/admin-password`), which locked apps and fleet changes need; everything else works without.
 
 ```
 runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
@@ -118,9 +118,9 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 
 ## Running the control plane
 
-`control/server.mjs` needs Node 24 (for `node:sqlite`) and `npm install` in `control/` (the `yaml` package). Settings and secrets come from the environment: `PORT` (8920), `DATA_DIR` (where `control.db` lives), `DOMAIN`, `CONTROL_HOST`, `ZONE`, `ACCOUNT_ID`, `POOLS` (default pool sizes, JSON), `MAX_SLOTS`, `FLEET_PASSWORD`, `JOIN_TOKEN`, and `CF_API_TOKEN` (a token with DNS edit on the zone and Cloudflare Tunnel edit on the account; or `CF_API_KEY` plus `CF_API_EMAIL`). `DNS=off` stops it touching DNS (for a copy you're trying things on). It listens on 127.0.0.1 only; a Cloudflare tunnel (`cloudflared tunnel run`, ingress `control.<domain>` → `http://127.0.0.1:8920`) gives it its name.
+`control/server.mjs` needs Node 24 (for `node:sqlite`) and `npm install` in `control/` (the `yaml` package). Settings and secrets come from the environment: `PORT` (8920), `DATA_DIR` (where `control.db` lives), `DOMAIN`, `CONTROL_HOST`, `ZONE`, `ACCOUNT_ID`, `POOLS` (default pool sizes, JSON), `MAX_SLOTS`, `ADMIN_PASSWORD`, `JOIN_TOKEN`, and `CF_API_TOKEN` (a token with DNS edit on the zone and Cloudflare Tunnel edit on the account; or `CF_API_KEY` plus `CF_API_EMAIL`). `DNS=off` stops it touching DNS (for a copy you're trying things on). It listens on 127.0.0.1 only; a Cloudflare tunnel (`cloudflared tunnel run`, ingress `control.<domain>` → `http://127.0.0.1:8920`) gives it its name.
 
-The live one runs on the owner's VPS as systemd user units `runner-control.service` (the server, from this repo's checkout) and `runner-control-tunnel.service` (cloudflared), with the settings in `~/.config/runner-control/env`. To deploy a change: pull, then `systemctl --user restart runner-control.service`; the agents keep what's running while it's down for the second that takes. `GET /api/export` and `POST /api/import` (fleet password) move the whole state to another server.
+The live one runs on the owner's VPS as systemd user units `runner-control.service` (the server, from this repo's checkout) and `runner-control-tunnel.service` (cloudflared), with the settings in `~/.config/runner-control/env`. To deploy a change: pull, then `systemctl --user restart runner-control.service`; the agents keep what's running while it's down for the second that takes. `GET /api/export` and `POST /api/import` (admin password) move the whole state to another server.
 
 ## Tests
 
@@ -129,7 +129,7 @@ The live one runs on the owner's VPS as systemd user units `runner-control.servi
 ## Setup notes
 
 - **Repo secrets:** `JOIN_TOKEN` (the same value as the control plane's `JOIN_TOKEN`). Tunnel tokens come from the control plane.
-- **Control plane secrets:** two you use, `FLEET_PASSWORD` (the owner's: for fleet changes and locked apps; the web app asks for it, and `runnerctl` sends it) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the control plane uses: a Cloudflare token with Tunnel edit on the account and DNS edit on the zone. App passwords are kept by the control plane.
+- **Control plane secrets:** two you use, `ADMIN_PASSWORD` (the fleet owner's master password: locked apps and fleet changes need it; the web app asks for it, and `runnerctl` sends it; `FLEET_PASSWORD` and the header `x-fleet-password`, its old names, still work) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the control plane uses: a Cloudflare token with Tunnel edit on the account and DNS edit on the zone. App passwords are kept by the control plane.
 - **Web app:** changes sent from other sites are refused.
 - **History:** until 2026-10-03 the control plane was a Cloudflare Worker with a Durable Object, and the replica URLs went through the Worker. The Workers free plan's 100,000 requests a day (the machines' check-ins alone were 86,400) is why it moved.
 - **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). Change sizes there rather than through the repos' `POOL_SIZE` variable: machines keep re-sending the size they started with, so a change there only takes hold as they're replaced. GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.

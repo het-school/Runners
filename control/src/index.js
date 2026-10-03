@@ -18,9 +18,9 @@
 // URLs only change with the replica count). There's no shared URL in front of a project's replicas, and nothing in
 // between: the machine's router answers the replica's name itself.
 //   /            the UI (everything public)  /api/*        API: apps are open to everyone (deploying, changing, removing),
-//                                                          unless an app was locked with a password, which its changes
-//                                                          then need (x-app-password) or the fleet password
-//                                                          (x-fleet-password); fleet changes need the fleet password;
+//                                                          unless an app was locked with its app password, which its
+//                                                          changes then need (x-app-password) or the admin password
+//                                                          (x-admin-password); fleet changes need the admin password;
 //                                                          machines send the join token (Bearer): join/sync/claim/drain/roll
 //                                            /admin/api/*  the same, for the UI (changes from other sites are refused)
 //   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
@@ -122,6 +122,8 @@ class HttpError extends Error {
 }
 
 const json = (data, status = 200) => Response.json(data, { status });
+// The admin password a request carries (x-admin-password, or x-fleet-password, its old name).
+const adminPassword = (request) => request.headers.get("x-admin-password") ?? request.headers.get("x-fleet-password");
 const html = (body) => new Response(body, { headers: { "content-type": "text/html; charset=utf-8" } });
 const isMap = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -143,9 +145,9 @@ function joinPath(...parts) {
   return out.join("/");
 }
 
-// Apps deployed without the fleet password get an ordinary container and nothing more: no way out to the machine
+// Apps deployed without the admin password get an ordinary container and nothing more: no way out to the machine
 // (its files, its processes, its network, Docker itself), which is where the join token and the machine's other
-// secrets are. So their compose files may only use what's listed here; anything else needs the fleet password. It's
+// secrets are. So their compose files may only use what's listed here; anything else needs the admin password. It's
 // a list of what's allowed, so whatever compose adds later is refused until someone has looked at it.
 const SAFE_TOP = new Set(["services", "volumes", "networks", "name", "version"]);
 const SAFE_SERVICE = new Set(["image", "build", "command", "entrypoint", "environment", "env_file", "ports", "expose",
@@ -320,7 +322,7 @@ const GENERATED = /^(?:x-runner:\n(?:  port: \d+\n)?(?:  replicas: \d+\n)?)?serv
 // Turns what was submitted into a spec the machines can run: { compose, port, files }.
 // Accepts a compose file, a Dockerfile, extra build files, or a mix; a Dockerfile on its own becomes a
 // one-service compose file. Rejects anything that would only fail later on a machine, and, unless the deploy comes
-// with the fleet password (trusted), anything that would reach outside the app's container (sandboxProblems).
+// with the admin password (trusted), anything that would reach outside the app's container (sandboxProblems).
 function buildSpec(body, { trusted = false } = {}) {
   if (!isMap(body)) throw new HttpError(400, "send a JSON object");
   let { compose = "", dockerfile = null, files = {}, port = null, replicas = null } = body;
@@ -394,7 +396,7 @@ function buildSpec(body, { trusted = false } = {}) {
     const merged = YAML.parse(compose, { merge: true });
     const problems = isMap(merged) && isMap(merged.services) ? sandboxProblems(merged) : ["the compose file"];
     if (problems.length) {
-      throw new HttpError(400, `without the fleet password, an app gets an ordinary container only, so its compose file can't use: ${problems.slice(0, 6).join("; ")}${problems.length > 6 ? `; and ${problems.length - 6} more` : ""}`);
+      throw new HttpError(400, `without the admin password, an app gets an ordinary container only, so its compose file can't use: ${problems.slice(0, 6).join("; ")}${problems.length > 6 ? `; and ${problems.length - 6} more` : ""}`);
     }
   }
   // Every service that builds from a local folder needs its Dockerfile among the files.
@@ -665,7 +667,7 @@ export class Control {
       if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
       if (request.method === "GET" && path === "/internal/dns") return json({ names: Object.fromEntries(this.dnsTargets(Date.now())) }); // where each replica's name points (tests)
       if (path.startsWith("/admin/api/")) {
-        // The UI: apps are open unless locked with a password; fleet changes need the fleet password. Changes sent
+        // The UI: apps are open unless locked with a password; fleet changes need the admin password. Changes sent
         // from other sites are refused. No machine powers here (joining, checking in): those hand out tunnel tokens.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
@@ -675,25 +677,25 @@ export class Control {
         // wrong guesses can still see everything.
         const fleet = /^\/(unlock|settings|roll|join-token|machines\/\d+\/evict|slots\/\d+)$/.test(route);
         const appChange = request.method !== "GET" && route.startsWith("/projects/");
-        const password = request.headers.get("x-fleet-password");
+        const password = adminPassword(request);
         const admin = (fleet || appChange) && password != null && await this.checkPassword(password, ip);
         if (request.method === "POST" && route === "/unlock") {
           if (!admin) throw new HttpError(401, "wrong password");
           return json({ ok: true });
         }
         return await this.api(request, url, route, {
-          admin, node: false, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
+          admin, node: false, ip, adminWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
         });
       }
       if (path.startsWith("/api/")) {
-        // Scripts: the same as the UI (apps are open; the fleet password for fleet changes and locked apps); machines
+        // Scripts: the same as the UI (apps are open; the admin password for fleet changes and locked apps); machines
         // send the join token.
-        const password = request.headers.get("x-fleet-password");
+        const password = adminPassword(request);
         const ip = request.headers.get("cf-connecting-ip") ?? "";
         const admin = password != null && await this.checkPassword(password, ip);
         const node = admin || (Boolean(this.env.JOIN_TOKEN) && request.headers.get("authorization") === `Bearer ${this.env.JOIN_TOKEN}`);
         return await this.api(request, url, path.slice("/api".length), {
-          admin, node, ip, fleetWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
+          admin, node, ip, adminWrong: password != null && !admin, appPassword: request.headers.get("x-app-password"),
         });
       }
       throw new HttpError(404, "not found");
@@ -719,9 +721,9 @@ export class Control {
     if (this.failures.size > 10_000) for (const [k, x] of this.failures) if (now - x.at >= PASSWORD_LOCKOUT_MS) this.failures.delete(k);
   }
 
-  // The fleet password (the secret FLEET_PASSWORD), compared in constant time.
+  // The admin password (the setting ADMIN_PASSWORD; FLEET_PASSWORD, its old name, still works), compared in constant time.
   async checkPassword(given, ip) {
-    const expected = this.env.FLEET_PASSWORD;
+    const expected = this.env.ADMIN_PASSWORD || this.env.FLEET_PASSWORD;
     if (!expected) return false;
     const key = `${ip}|fleet`;
     this.refuseIfLocked(key, Date.now());
@@ -757,12 +759,12 @@ export class Control {
 
   // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token), and any app, locked or not;
   // node: machines. Apps are open to everyone otherwise, unless locked with a password (appPassword then).
-  async api(request, url, route, { admin, node, ip = "", fleetWrong = false, appPassword = null }) {
+  async api(request, url, route, { admin, node, ip = "", adminWrong = false, appPassword = null }) {
     const { method } = request;
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
     });
-    const need = (ok, what = "the fleet password") => {
+    const need = (ok, what = "the admin password") => {
       if (!ok) throw new HttpError(401, `this needs ${what}`);
     };
     if (method === "GET" && route === "/status") return json(this.status());
@@ -776,7 +778,7 @@ export class Control {
       return json({ start: this.claimStarts(pool, "claim", Date.now()) });
     }
     if (method === "POST" && route === "/drain") return need(node, "the join token"), json(this.drain(await body()));
-    if (method === "POST" && route === "/roll") return need(admin || node, "the fleet password or the join token"), json(this.roll(url.searchParams.get("machine")));
+    if (method === "POST" && route === "/roll") return need(admin || node, "the admin password or the join token"), json(this.roll(url.searchParams.get("machine")));
     if (method === "GET" && route === "/join-token") return need(admin), json({ token: this.env.JOIN_TOKEN });
     if (method === "GET" && route === "/export") { // everything stored, a table at a time, for moving the control plane
       need(admin);
@@ -809,7 +811,7 @@ export class Control {
     if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
     // Apps are open: anyone can look, deploy a new one, change or remove one. Unless it's locked: a "password" sent
     // with a new app (or set later at /password) locks it, and changing it then needs that password (x-app-password)
-    // or the fleet password.
+    // or the admin password.
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password))?$/);
     if (m) {
       const [, name, action] = m;
@@ -832,13 +834,13 @@ export class Control {
         this.project(name); // 404 if there's no such app
         const current = this.appPasswords.get(name);
         if (current) { // locked
-          if (appPassword == null) throw new HttpError(401, fleetWrong ? "wrong fleet password" : `${name} is locked: changing it needs its password or the fleet password`);
+          if (appPassword == null) throw new HttpError(401, adminWrong ? "wrong admin password" : `${name} is locked: changing it needs its password or the admin password`);
           const now = Date.now();
           this.refuseIfLocked(key, now);
           const ok = given?.salt === current.salt && sameHex(given.hash, current.hash);
           this.noteTry(key, ok, now);
           if (!ok) throw new HttpError(401, `wrong password for ${name}`);
-        } else if (fleetWrong) throw new HttpError(401, "wrong fleet password");
+        } else if (adminWrong) throw new HttpError(401, "wrong admin password");
       }
       if (action === "unlock" && method === "POST") return json({ ok: true });
       if (action === "password" && method === "PUT") {

@@ -7,10 +7,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
 . "$HERE/stop.sh"
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-. "$HERE/start.sh" FLEET_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":5}'
+. "$HERE/start.sh" ADMIN_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":5}'
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
-A='x-fleet-password: adm'
+A='x-admin-password: adm'
 J=(-H content-type:application/json)
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  WRONG $1: wanted [$2], got [$3]"; fi; }
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" "${J[@]}" -d "$2" > /dev/null; }
