@@ -2,9 +2,17 @@
 // It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
 // (it serves each project at <project>-m<n>, which is how the control plane's Worker reaches this machine) and the
 // tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's told,
-// and restarts ones that stop answering. On GitHub Actions it also starts machines the control plane says are
-// missing and hands over to a fresh run before GitHub's 6-hour limit; on any other host it just keeps running.
+// and restarts ones that stop answering. It doesn't know what kind of machine it's on: the settings below describe it.
 // No dependencies: Node's built-ins plus the docker CLI.
+//   CONTROL_URL, CONTROL_TOKEN   the control plane and the token to join it with (required)
+//   RUNNER_DATA   where projects and the agent's ID live (default /var/lib/runner)
+//   AGENT_ID      this agent's ID (default: one made up once and kept in RUNNER_DATA, so a restart gets its slot back)
+//   POOL, POOL_SIZE   the pool this machine belongs to and how many machines it should have (none: a standalone host)
+//   MACHINE       the slot to take, when the machine was started for one
+//   LABEL, LINK   what the status page calls it (default: the hostname) and links to
+//   START_CMD     a shell command that starts a new machine for slot $SLOT. With it, the agent starts the pool members
+//                 the control plane says are missing, and its own replacement when it's handed over; without it, a
+//                 handover restarts the agent (where it runs under a supervisor, it comes back with the latest code)
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -14,33 +22,27 @@ import { dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
-// What this agent tells the control plane about its machine. On GitHub Actions: it's one of the POOL pool ("github"
-// unless the repo sets the POOL variable, so another account's copy of this repo is its own pool) (interchangeable, started on request), with its run page to link to; the workflow's own timer tells the control
-// plane when the run is going down. Anywhere else it's a standalone host that keeps its slot across restarts.
-const github = env.GITHUB_ACTIONS === "true";
-const pool = github ? env.POOL || "github" : null;
-const base = github ? env.RUNNER_TEMP : (env.RUNNER_DATA ?? "/var/lib/runner");
+const pool = env.POOL || null;
+const base = env.RUNNER_DATA || "/var/lib/runner";
 const started = Date.now();
-const hardStop = github ? started + 355 * 60_000 : Infinity; // leave before GitHub kills the job at 6 hours
-const selfHandover = github ? started + 330 * 60_000 : Infinity; // start a replacement ourselves if not asked by then
 const settleBy = started + 10 * 60_000; // open the tunnel by then even if a project is still struggling
 const ROUTER_PORT = 19080; // the tunnel sends everything here, and the router (Caddy) picks the project by hostname
 const dir = `${base}/projects`;
 const routerDir = `${base}/router`;
 let machine = 0; // the slot, from the control plane
 let tunnelToken = "";
-let agent = ""; // GitHub: one per run; a host keeps its ID in its data folder, so it gets its slot back after a restart
-let run = "";
+let agent = "";
+let run = ""; // this start of the agent
+// What this agent tells the control plane about its machine.
 const describe = () => ({
   pool,
   poolSize: pool && env.POOL_SIZE ? Number(env.POOL_SIZE) : undefined, // how many machines the pool should have
-  url: github ? `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null,
-  label: github ? `run ${env.GITHUB_RUN_ID}` : hostname(),
+  url: env.LINK || null,
+  label: env.LABEL || hostname(),
+  starts: Boolean(env.START_CMD),
 });
-// Commands run without the agent's own secrets, so a compose file can't read them.
-const cleanEnv = Object.fromEntries(
-  Object.entries(env).filter(([k]) => !["TUNNEL_TOKEN", "CONTROL_TOKEN", "GH_TOKEN"].includes(k)),
-);
+// Commands run without secrets (anything named like a token, key or password), so a compose file can't read them.
+const cleanEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !/TOKEN|SECRET|PASSWORD|KEY/i.test(k)));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (msg) => console.log(`${new Date().toISOString().slice(11, 19)} ${msg}`);
@@ -225,7 +227,7 @@ async function startTunnel() {
   throw new Error(`tunnel didn't connect: ${(await sh("docker", ["logs", "--tail", "20", "tunnel"])).out}`);
 }
 
-// ---- control plane and GitHub ----
+// ---- control plane ----
 
 let ready = false;
 
@@ -233,18 +235,16 @@ const metrics = startMetrics();
 
 // Get a slot and its tunnel token. Keeps trying: the control plane may be unreachable, or every slot taken.
 async function join() {
-  if (github) {
-    agent = `gh-${env.GITHUB_RUN_ID}`;
-    run = env.GITHUB_RUN_ID;
-  } else {
+  agent = env.AGENT_ID || "";
+  if (!agent) {
     const idFile = `${base}/agent-id`;
     agent = (await readFile(idFile, "utf8").catch(() => "")).trim();
     if (!agent) {
       agent = `host-${randomUUID().slice(0, 8)}`;
       await writeFile(idFile, agent);
     }
-    run = `${agent}-${started}`;
   }
+  run = `${agent}-${started}`;
   for (let wait = 5;; wait = Math.min(wait * 2, 60)) {
     try {
       const res = await fetch(`${env.CONTROL_URL}/api/join`, {
@@ -264,7 +264,7 @@ async function join() {
   }
 }
 
-// After a restart on a host: projects from last time that are no longer wanted.
+// After a restart: projects from last time that are no longer wanted.
 async function removeLeftovers(desired) {
   for (const name of await readdir(dir).catch(() => [])) {
     if (name in desired || projects.has(name)) continue;
@@ -288,19 +288,14 @@ async function sync() {
   return res.json();
 }
 
-async function startMachine(m) {
-  if (!github) return; // only GitHub machines can start other GitHub machines
-  const res = await fetch(`https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions/workflows/machine.yml/dispatches`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${env.GH_TOKEN}`,
-      accept: "application/vnd.github+json",
-      "content-type": "application/json",
-      "user-agent": "runner-agent",
-    },
-    body: JSON.stringify({ ref: env.GITHUB_REF_NAME || "main", inputs: { machine: String(m) } }),
-  }).catch((e) => ({ ok: false, status: e.message }));
-  log(res.ok ? `started machine ${m}` : `couldn't start machine ${m}: ${res.status}`);
+// START_CMD with SLOT=m, and the agent's full environment: it may need a token the projects don't get.
+function startMachine(m) {
+  return new Promise((resolve) => {
+    execFile("sh", ["-c", env.START_CMD], { timeout: 60_000, env: { ...env, SLOT: String(m) } }, (err, stdout, stderr) => {
+      log(err ? `couldn't start machine ${m}: ${`${stdout}${stderr}`.trim().split("\n").pop() || err.message}` : `started machine ${m}`);
+      resolve();
+    });
+  });
 }
 
 let stopping = false;
@@ -309,17 +304,17 @@ async function shutdown(reason, code = 0) {
   if (stopping) return;
   stopping = true;
   log(`${reason}; stopping the tunnel`);
-  // On a host, Docker restarts this container (fetching the latest agent), and it rejoins with the same slot.
+  // Under a supervisor (Docker's restart policy, say) the agent comes back with the same slot.
   await sh("docker", ["stop", "-t", "10", "tunnel"]);
   process.exit(code);
 }
-// Stopped from outside. On GitHub that means the machine is going away for good: say so in one last check-in, so its
-// replicas are placed elsewhere straight away (the runner kills the job within seconds). A host is probably just
-// restarting its agent and keeps them.
+// Stopped from outside. A pool member is interchangeable, so that means it's going away for good: say so in one last
+// check-in, so its replicas are placed elsewhere straight away. A standalone host is probably just restarting its
+// agent and keeps them.
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     if (stopping || leaving) return;
-    leaving = github;
+    leaving = Boolean(pool);
     (leaving ? sync().catch(() => {}) : Promise.resolve()).finally(() => shutdown("cancelled"));
   });
 }
@@ -327,14 +322,14 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
 async function main() {
   await mkdir(dir, { recursive: true });
   await join();
-  log(`machine ${machine}, run ${run}${github ? "" : ` on ${hostname()}`}`);
-  // A host may still have these from before a restart.
+  log(`machine ${machine}: ${describe().label}${pool ? `, pool ${pool}` : ""}`);
+  // Left from before a restart, maybe.
   await sh("docker", ["rm", "-f", "router", "tunnel"]);
   await startRouter();
-  let cleaned = github;
+  let cleaned = false;
   let successorAt = 0;
   let lastReport = 0;
-  while (Date.now() < hardStop) {
+  for (;;) {
     if (leaving) { // a signal handler is checking in for the last time; don't start anything meanwhile
       await sleep(1000);
       continue;
@@ -356,18 +351,13 @@ async function main() {
         cleaned = true;
         await removeLeftovers(plan.desired);
       }
-      for (const m of plan.start ?? []) await startMachine(m);
-      if (plan.handover && !github) return shutdown("restarting to update the agent");
+      if (env.START_CMD) for (const m of plan.start ?? []) await startMachine(m);
+      if (plan.handover && !env.START_CMD) return shutdown("handing over: restarting the agent");
       if (plan.handover && Date.now() - successorAt > 10 * 60_000) {
         successorAt = Date.now();
-        log("handing over to a fresh run of this machine");
+        log("handing over: starting a replacement for this machine");
         await startMachine(machine);
       }
-    }
-    if (!successorAt && Date.now() > selfHandover) {
-      successorAt = Date.now();
-      log("close to the 6-hour limit; starting a replacement");
-      await startMachine(machine);
     }
     // Open the tunnel only once the projects are up, so a fresh run doesn't take traffic it can't serve yet.
     if (!ready && plan && (settled(plan.desired) || Date.now() > settleBy)) {
@@ -383,7 +373,6 @@ async function main() {
     }
     await sleep((plan?.poll ?? 20) * 1000);
   }
-  await shutdown("reached the time limit");
 }
 
 main().catch((e) => shutdown(`agent failed: ${e.stack ?? e}`, 1));

@@ -9,7 +9,6 @@ routes = [{ pattern = "control.billybishop4-workers.xyz", custom_domain = true }
 rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
 
 [vars]
-REPO = "hetp4401/runner"
 DOMAIN = "billybishop4-workers.xyz"
 ZONE = "44fb65648f475249f22e9d0cffdd393d"
 POOLS = '{"github": 10}' # pools of replaceable machines and their sizes (the portal can change them)

@@ -1,21 +1,17 @@
 # runner
 
-A self-healing fleet: GitHub Actions machines (10 by default) plus any of your own hosts that join, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
+A self-healing fleet of machines that join a control plane: pools of GitHub Actions machines plus any of your own hosts, each online through its own Cloudflare tunnel. A project says how many replicas it wants, and the control plane places them on the machines with the most room. The project specs live in a control plane on Cloudflare (not in this repo), and machines find it: each one that starts up claims a free slot *n*, and the control plane creates tunnel `runner-n` for it the first time that slot is used.
 
-The control plane doesn't know what a machine is, or how long it lives; it's told. An agent describes itself with a **pool** (the name of a replaceable set it belongs to: the control plane keeps each pool at its size by asking members to start replacements; or none, for a standalone host that keeps its slot across restarts), a link and a label, and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). On GitHub Actions that ping comes from a one-line timer in the workflow, 4h15m-5h15m into the job at random; a host could send it from a cron before maintenance, a cloud VM from its termination notice.
+Neither the control plane nor the agent knows what a machine is, or how long it lives; they're told. An agent describes its machine with a **pool** (the name of a replaceable set it belongs to, which the control plane keeps at its size; or none, for a standalone host that keeps its slot across restarts), whether it **starts** machines (it has a `START_CMD`), a link and a label, and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). Everything about GitHub Actions lives in [`machine.yml`](.github/workflows/machine.yml): the job's 6-hour lifetime, a timer that drains the machine 4h15m-5h15m in at random, and the command that starts another machine.
 
-- **Status page:** https://control.billybishop4-workers.xyz
-- **Metrics:** https://control.billybishop4-workers.xyz/metrics shows CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
-- **Admin portal:** https://control.billybishop4-workers.xyz/admin (step-by-step deploy guide for the portal and the API at [/admin#guide](https://control.billybishop4-workers.xyz/admin#guide)). It's open, with no sign-in, so anyone with the URL can use it. From the portal you can:
-  - add projects and edit them
-  - roll back to an earlier version
-  - disable, enable and delete projects
-  - restart machines
-  - set how many machines run
+- **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
+  - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and changing apps: deploying, editing, rolling back (with a diff of what changes), changing replicas, moving a replica, and disabling or deleting apps (deleting asks you to type the name).
+  - **Needs the fleet password:** changing the fleet, which covers pool sizes, automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
+  - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (from 1 to 100, default 1). It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine). Replicas are numbered from 1, and replica *k* is also at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does. The port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (from 1 to 10, default 1; each on a different machine, so with fewer machines than that it runs on all of them). It's served at `https://<project>.billybishop4-workers.xyz`, which goes to a machine where it's healthy (each visitor sticks to one machine). Replicas are numbered from 1, and replica *k* is also at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does. The port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
@@ -39,15 +35,15 @@ Project names are lowercase letters, digits and dashes, and can't end in `-<numb
 
 Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute, keeping its number and URL. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
 
-Rebalancing is automatic (switch it off in the portal or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. The portal lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. Each replica is on a different machine, so more replicas than machines leave the extra ones waiting (their URLs answer 503 until a machine joins). The portal shows where each replica landed and why.
+Rebalancing is automatic (switch it off on the Fleet page or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. The Fleet page lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. Each replica is on a different machine, so more replicas than machines leave the extra ones waiting (their URLs answer 503 until a machine joins). Each app's page shows where each replica landed and why.
 
 ### Rollouts
 
-Each change is a new version, and every machine switches to it at once. There's no automatic rollback: if the new version fails, the machines show it as failed until you deploy a fix or load an earlier version in the portal and deploy it. A disabled project keeps its spec and versions but runs nowhere.
+Each change is a new version, and every machine switches to it at once. If the new version fails on a machine, every replica goes back to the last good version, and the app's page shows each failing machine's error until you deploy a fix or roll back from the Versions list. A disabled project keeps its spec and versions but runs nowhere.
 
 ## API
 
-The portal uses `/admin/api/*`, which needs no token. Scripts use `/api/*` with `Authorization: Bearer <admin token>`.
+The web app uses `/admin/api/*`: app routes need nothing, and fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need the header `x-fleet-password`. An address that sends a wrong password 5 times is refused for 15 minutes. Scripts can use `/api/*` with `Authorization: Bearer <admin token>` for everything.
 
 ```
 GET    /api/status                              projects and machines (no token needed)
@@ -58,14 +54,14 @@ GET    /api/projects/<name>[?version=N]         a version's compose file, files 
 POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
-PUT    /api/settings                            {"pools": {"github": 10}, "rebalance": true}  (machines to keep per pool; automatic rebalancing)
+PUT    /api/settings                            {"pools": {"<pool>": 10}, "rebalance": true}  (machines to keep per pool; automatic rebalancing)
 POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
-DELETE /api/slots/<n>                           retire an empty slot beyond the GitHub count: tunnel, records and DNS names go
+DELETE /api/slots/<n>                           retire an empty slot: tunnel, records and DNS names go
 GET    /api/join-token                          the token a host joins with (admin token only)
 POST   /api/join                                an agent starting up: {"agent", "pool", "url", "label", "want"} -> its slot and tunnel token
 POST   /api/claim?pool=<name>                    machines to start so the pool has its size (for a watchdog outside the pool)
-POST   /api/drain                               {"run": id} or {"machine": n}: it's going down soon, hand it over
+POST   /api/drain                               {"agent": id}, {"run": id} or {"machine": n}: it's going down soon, hand it over
 ```
 
 ```sh
@@ -86,13 +82,15 @@ runnerctl roll [n] | pool <name> <n>
 
 ## Your own machines
 
-Any Linux machine with Docker can join. Get the token with `runnerctl join-token`, then on the machine:
+Any Linux machine with Docker can join. Get the command, token included, from the Fleet page ("Add a machine"), or the token with `runnerctl join-token`, then on the machine:
 
 ```sh
 curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
 ```
 
-It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting machines from the portal restarts it. Hosts don't count toward the GitHub machine count. Remove one with `docker rm -f runner-agent tunnel router`, then retire its slot from the portal or with `runnerctl retire <n>` so its tunnel and `<app>-m<n>` names go too.
+Add `POOL=<name>` (and `POOL_SIZE=<n>`) to make it a member of a pool, and `LABEL=<name>` to name it on the status pages.
+
+It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting it from the web app restarts the agent. A host without `POOL` is standalone and doesn't count toward any pool's size. Remove one with `docker rm -f runner-agent tunnel router`, then retire its slot from the web app or with `runnerctl retire <n>` so its tunnel and `<app>-m<n>` names go too.
 
 ## How it works
 
@@ -102,28 +100,29 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - runs the rollouts
   - tracks machines and hands out restarts
   - keeps the DNS in line: `<project>` and `<project>-<k>` are answered by the Worker, which reaches machine *n* at `<project>-m<n>`, pointed at tunnel `runner-<n>`
-- **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), run by [`machine.yml`](.github/workflows/machine.yml) on every machine. It:
-  - checks in every 20 seconds, describing its machine: pool `github`, its run page
+- **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), on every machine (run by [`machine.yml`](.github/workflows/machine.yml) on GitHub Actions, by `install.sh` on a host). It's configured by environment variables (listed at the top of the file) and:
+  - checks in every 20 seconds, describing its machine: pool, label, link, whether it starts machines
   - writes each project's files and runs `docker compose up -d --build --wait`
   - removes what's no longer wanted
   - restarts projects that stop answering
   - routes `<project>-m<n>` hostnames through a local Caddy router behind the tunnel
 - **Self-healing**:
-  - Each machine hands over to a fresh run of itself before GitHub's 6-hour limit, one machine at a time, without downtime: a timer in the workflow pings the control plane 4h15m-5h15m in (at random, so machines that were replaced together drift apart).
-  - If a machine dies, the others start a replacement within about 2 minutes.
+  - A drained machine hands over to a replacement, one machine at a time, without downtime: with a `START_CMD` it starts one for its own slot; without, it restarts its agent.
+  - If a pool member dies, members that can start machines start a replacement within about 2 minutes; for a pool whose members can't, whatever watches it starts the slots `POST /api/claim?pool=<name>` returns.
+  - On GitHub Actions, the workflow drains each machine 4h15m-5h15m in (at random, so machines that were replaced together drift apart) and stops the agent before the 6-hour limit.
   - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left.
   - [`roll.yml`](.github/workflows/roll.yml) restarts the fleet one machine at a time when the agent changes.
 
 ## Tests
 
-`control/test/*.sh` run the control plane locally with `wrangler dev` against a fake Cloudflare API and drive it the way the agents and the portal do; see [`control/test/README.md`](control/test/README.md).
+`control/test/*.sh` run the control plane locally with `wrangler dev` against a fake Cloudflare API and drive it the way the agents and the web app do; see [`control/test/README.md`](control/test/README.md).
 
 ## Setup notes
 
 - **Repo secrets:** `CONTROL_NODE_TOKEN` (the same value as the Worker's `NODE_TOKEN`). Tunnel tokens come from the control plane.
-- **Worker secrets:** `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
+- **Worker secrets:** `ADMIN_PASSWORD` (the fleet password the web app asks for; without it, the admin token is the password), `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
-- **Portal:** `/admin` and `/admin/api/*` are open, with no sign-in. Changes sent from other sites are refused.
-- **More machines:** raise the `github` pool's size in the portal or with `runnerctl pool github <n>` (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
+- **Web app:** changes sent from other sites are refused.
+- **More machines:** raise a pool's size on the Fleet page or with `runnerctl pool github <n>` (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
 - **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `CONTROL_NODE_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

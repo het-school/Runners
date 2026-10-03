@@ -1,0 +1,1948 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Runner</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --surface: #fff; --soft: #f0eeea; --line: #e4e1dc; --fg: #1d1c1a; --fg-2: #4f4c47; --muted: #6e6a64;
+    --accent: #2f5bd3; --on-accent: #fff; --focus: #2f5bd3;
+    --healthy: #177245; --deploying: #a15c00; --failed: #b42318; --leaving: #4a55c9; --gone: #6e6a64;
+    --s1: #2a78d6; --s2: #d97a00; --s3: #0f9d76; --s4: #c0559b; --s5: #6b5bd2; --s-other: #9a968f;
+    --grid: #e6e3de; --axis: #c3c0b8;
+    --heat-0: #e3eefc; --heat-1: #b9d4f6; --heat-2: #86b4ee; --heat-3: #5293e3; --heat-4: #2f74cc; --heat-5: #1d58a3; --heat-6: #0f3c74; --heat-none: #f0eeea;
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+    --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 22px; --fs-num: 24px;
+    --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+    --font: system-ui, -apple-system, "Segoe UI", sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121110; --surface: #1b1a18; --soft: #24221f; --line: #2e2c29; --fg: #f1efec; --fg-2: #cfcac3; --muted: #a29d97;
+      --accent: #7b9cff; --on-accent: #0b1020; --focus: #9fb4ff;
+      --healthy: #5bd394; --deploying: #f2b84b; --failed: #ff8a7a; --leaving: #a7b2ff; --gone: #8d8882;
+      --s1: #5b9cf0; --s2: #f0a43a; --s3: #2fc495; --s4: #e07fbf; --s5: #9b8cf5; --s-other: #77726c;
+      --grid: #2c2a27; --axis: #3d3a36;
+      /* low recedes into the surface, high climbs to light blue */
+      --heat-0: #14284a; --heat-1: #183a6e; --heat-2: #1f5299; --heat-3: #2f6fc4; --heat-4: #5293e3; --heat-5: #86b4ee; --heat-6: #c3dbf8; --heat-none: #24221f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: var(--fs-md)/1.45 var(--font); }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  /* ---- shell ---- */
+  header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1120px; margin: 0 auto; padding: 0 16px; height: 52px; display: flex; align-items: center; gap: 10px; }
+  .brand { font-weight: 750; font-size: var(--fs-lg); text-decoration: none; }
+  nav.tabs { display: flex; gap: 2px; margin-left: 6px; }
+  nav.tabs a { text-decoration: none; color: var(--fg-2); padding: 7px 10px; border-radius: var(--r-sm); font-size: var(--fs-sm); font-weight: 600; }
+  nav.tabs a[aria-current="page"] { background: var(--soft); color: var(--fg); }
+  nav.tabs a i { font-style: normal; display: none; }
+  .spacer { flex: 1; }
+  #summary { font-size: var(--fs-xs); }
+  #lock { min-height: 32px; padding: 0 10px; font-size: var(--fs-xs); border-radius: var(--r-pill); }
+  #lock.open { color: var(--healthy); border-color: color-mix(in srgb, var(--healthy) 40%, var(--line)); }
+  main { max-width: 1120px; margin: 0 auto; padding: 14px 16px 56px; }
+  #banner { background: color-mix(in srgb, var(--deploying) 14%, var(--bg)); color: var(--fg); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); text-align: center; padding: 6px 12px; }
+  @media (max-width: 760px) {
+    header.top { backdrop-filter: none; background: var(--bg); } /* a filter would make it the tab bar's containing block */
+    nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; z-index: 6; background: var(--surface); border-top: 1px solid var(--line);
+               padding: 4px 4px calc(4px + env(safe-area-inset-bottom)); justify-content: space-around; }
+    nav.tabs a { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; padding: 6px 0; min-height: 50px; }
+    nav.tabs a i { display: block; font-size: 18px; line-height: 1.1; }
+    main { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+    #summary .long { display: none; }
+  }
+
+  /* ---- type and layout ---- */
+  h1 { font-size: var(--fs-xl); margin: 2px 0; line-height: 1.25; overflow-wrap: anywhere; }
+  .sub { color: var(--muted); font-size: var(--fs-sm); }
+  h2 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .05em; color: var(--fg-2); margin: 28px 0 10px; font-weight: 650;
+       display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  h2 .meta, h2 a { text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .meta { color: var(--muted); font-size: var(--fs-sm); }
+  .back { font-size: var(--fs-sm); color: var(--fg-2); text-decoration: none; display: inline-block; padding: 6px 0; }
+  .card { display: block; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--sp-4); min-width: 0; text-decoration: none; }
+  a.card:hover { border-color: var(--axis); }
+  .cards { display: grid; gap: 10px; }
+  .cards.two { grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); }
+  .name { font-weight: 650; font-size: var(--fs-lg); text-decoration: none; overflow-wrap: anywhere; }
+  .url { overflow-wrap: anywhere; }
+  .empty { color: var(--muted); padding: 22px; text-align: center; }
+  .ok-line { color: var(--healthy); font-weight: 600; }
+
+  /* ---- status ---- */
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); font-weight: 650; padding: 3px 9px; border-radius: var(--r-pill);
+          white-space: nowrap; color: var(--k); background: color-mix(in srgb, var(--k) 14%, transparent); }
+  .pill i, .chip i { font-style: normal; }
+  .healthy { --k: var(--healthy); } .deploying { --k: var(--deploying); } .failed { --k: var(--failed); } .leaving { --k: var(--leaving); } .gone { --k: var(--gone); }
+  @media (prefers-reduced-motion: no-preference) { .pill.deploying i { display: inline-block; animation: spin 2.4s linear infinite; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; min-width: 40px; justify-content: center; padding: 0 10px; border-radius: var(--r-sm);
+          font-size: var(--fs-sm); font-weight: 600; text-decoration: none; color: var(--k, var(--fg-2)); background: color-mix(in srgb, var(--k, var(--muted)) 13%, transparent); }
+  .chip sub { font-weight: 500; opacity: .8; }
+  .progress { margin-top: 8px; font-size: var(--fs-sm); color: var(--fg-2); }
+  .bars { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--soft); margin-top: 6px; }
+  .bars i { display: block; }
+  .errbox { margin-top: 10px; padding: 10px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--failed) 9%, transparent); color: var(--failed); font-size: var(--fs-sm); }
+  .errbox b { font-weight: 650; }
+  .errbox pre { margin: 6px 0 0; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--fg); }
+  .errbox .item + .item { margin-top: 10px; }
+  .problems { display: grid; gap: 8px; }
+  .problem { display: flex; align-items: center; gap: 10px; text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; }
+  .problem span.t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  a.problem:hover { border-color: var(--axis); }
+
+  /* ---- controls ---- */
+  button, .btn { font: inherit; font-size: var(--fs-sm); font-weight: 600; min-height: 40px; padding: 0 14px; border-radius: var(--r-md); border: 1px solid var(--line);
+                 background: var(--surface); color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; }
+  @media (pointer: coarse) { button, .btn { min-height: 44px; } }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .primary:hover { border-color: var(--accent); filter: brightness(1.05); }
+  .danger { color: var(--failed); border-color: color-mix(in srgb, var(--failed) 40%, var(--line)); }
+  .primary.danger { background: var(--failed); border-color: var(--failed); color: #fff; }
+  button.small, .btn.small { min-height: 32px; padding: 0 10px; font-size: var(--fs-xs); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.icon { min-width: 40px; padding: 0; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  input, textarea, select { font: inherit; font-size: 16px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-md); padding: 9px 11px; width: 100%; }
+  textarea { font: 13px/1.5 var(--mono); min-height: 170px; resize: vertical; tab-size: 2; }
+  @media (pointer: coarse) { textarea { font-size: 16px; } }
+  input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
+  label.f { display: block; font-weight: 650; font-size: var(--fs-sm); margin: 18px 0 6px; }
+  label.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: var(--fs-sm); }
+  .hint { color: var(--muted); font-size: var(--fs-xs); margin: 5px 0 0; }
+  .hint.bad { color: var(--failed); font-weight: 600; }
+  .stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface); }
+  .stepper button { border: 0; border-radius: 0; min-width: 44px; font-size: 18px; }
+  .stepper b { min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface); max-width: 100%; overflow-x: auto; }
+  .seg button { border: 0; border-radius: 0; min-height: 34px; font-weight: 500; color: var(--fg-2); }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--soft); color: var(--fg); font-weight: 700; }
+  .switch[aria-pressed="true"] { color: var(--healthy); }
+  .lockmark { font-size: 11px; }
+
+  /* ---- tables (cards on phones) ---- */
+  .tablewrap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: var(--fs-xs); font-weight: 600; color: var(--fg-2); background: var(--surface); }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tbody tr.click { cursor: pointer; }
+  tbody tr.click:hover td { background: var(--soft); }
+  tr.shown td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  td .s { color: var(--muted); font-size: var(--fs-xs); }
+  @media (max-width: 640px) {
+    table.rl thead { display: none; }
+    table.rl, table.rl tbody, table.rl tr, table.rl td { display: block; width: 100%; }
+    table.rl tr { border-bottom: 1px solid var(--line); padding: 10px 12px; }
+    table.rl tr:last-child { border-bottom: 0; }
+    table.rl td { border: 0; padding: 3px 0; text-align: left !important; white-space: normal; }
+    table.rl td[data-label]:not(:first-child)::before { content: attr(data-label); display: inline-block; min-width: 96px; color: var(--muted); font-size: var(--fs-xs); }
+    table.rl td:first-child { font-size: var(--fs-md); }
+  }
+
+  /* ---- metrics ---- */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px 14px; }
+  .tile .label { color: var(--fg-2); font-size: var(--fs-xs); }
+  .tile .value { font-size: var(--fs-num); font-weight: 650; margin-top: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tile .subv { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 12px; }
+  .ccard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px 14px 8px; min-width: 0; }
+  .ccard.wide { grid-column: 1 / -1; }
+  .ccard h3 { margin: 0; font-size: 14px; font-weight: 650; }
+  .ccard .desc { color: var(--muted); font-size: var(--fs-xs); margin: 1px 0 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-xs); color: var(--fg-2); margin: 2px 0 4px; }
+  .key { display: inline-block; width: 14px; height: 3px; border-radius: 1px; vertical-align: middle; margin-right: 5px; }
+  .key.box { height: 10px; width: 10px; border-radius: 2px; }
+  svg { display: block; overflow: visible; }
+  svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  svg text.lab { fill: var(--fg-2); cursor: pointer; }
+  .chart { position: relative; touch-action: pan-y; }
+  .nodata { color: var(--muted); padding: 26px 0; text-align: center; font-size: var(--fs-sm); }
+  #tip { position: fixed; z-index: 20; pointer-events: none; background: var(--surface); color: var(--fg); border: 1px solid var(--line);
+         box-shadow: 0 6px 24px rgba(0,0,0,.16); border-radius: var(--r-md); padding: 8px 10px; font-size: 12.5px; display: none; min-width: 140px; }
+  #tip .when { color: var(--muted); font-size: 11.5px; margin-bottom: 4px; }
+  #tip .r { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #tip .r b { font-weight: 650; font-variant-numeric: tabular-nums; min-width: 64px; }
+  #tip .r span { color: var(--fg-2); }
+  .meter { display: inline-block; width: 46px; height: 6px; border-radius: 3px; background: var(--heat-none); vertical-align: middle; margin-left: 6px; overflow: hidden; }
+  .meter i { display: block; height: 100%; border-radius: 3px; background: var(--s1); }
+  .meter i.warn { background: var(--deploying); } .meter i.crit { background: var(--failed); }
+  .heatlegend { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); margin: 0 0 4px; }
+  .heatlegend .ramp { width: 120px; height: 8px; border-radius: 4px; }
+  details.more > summary { cursor: pointer; font-size: var(--fs-sm); font-weight: 600; color: var(--fg-2); padding: 10px 0; }
+  .spark { display: inline-block; vertical-align: middle; margin-right: 6px; }
+  .log { font-size: var(--fs-sm); margin-top: 8px; }
+  .lockic { width: 12px; height: 12px; vertical-align: -1px; }
+  .mob { display: none; }
+  @media (max-width: 640px) { .mob { display: inline; } }
+
+  /* ---- spec, diff, guide ---- */
+  .ftabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  .ftab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; min-height: 36px; padding: 0 10px; font: 12.5px var(--mono); color: var(--muted); }
+  .ftab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  pre.code { margin: 0; padding: 12px; background: var(--soft); border-radius: 0 0 var(--r-md) var(--r-md); overflow: auto; max-height: 55dvh;
+             font: 12.5px/1.5 var(--mono); tab-size: 2; white-space: pre; }
+  .diff { font: 12px/1.5 var(--mono); background: var(--soft); border-radius: var(--r-md); overflow: auto; max-height: 60dvh; padding: 6px 0; }
+  .diff h4 { margin: 8px 12px 4px; font: 600 12.5px var(--mono); color: var(--fg); }
+  .diff div { white-space: pre; padding: 0 12px; }
+  .diff .add { background: color-mix(in srgb, var(--healthy) 16%, transparent); }
+  .diff .del { background: color-mix(in srgb, var(--failed) 14%, transparent); }
+  .diff .gap { color: var(--muted); }
+  .guide { line-height: 1.55; }
+  footer.foot { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+  .warnbox { margin: 12px 0; padding: 10px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--deploying) 12%, transparent); font-size: var(--fs-sm); }
+  .guide h3 { font-size: 15px; margin: 22px 0 6px; }
+  .guide p { margin: 6px 0; }
+  .guide ol { margin: 4px 0; padding-left: 22px; }
+  .guide code { font: 13px var(--mono); background: var(--soft); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
+  .codebox { position: relative; margin: 8px 0; }
+  .codebox pre.code { border-radius: var(--r-md); padding-right: 70px; white-space: pre-wrap; word-break: break-all; }
+  .codebox button { position: absolute; top: 6px; right: 6px; }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+  .kv div { background: var(--soft); border-radius: var(--r-md); padding: 8px 10px; }
+  .kv dt { font-size: var(--fs-xs); color: var(--muted); }
+  .kv dd { margin: 2px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+
+  /* ---- editor ---- */
+  .file { border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px; margin-top: 8px; background: var(--surface); }
+  .file textarea { min-height: 120px; margin-top: 6px; }
+  .formfoot { position: sticky; bottom: 0; background: color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter: blur(6px); border-top: 1px solid var(--line);
+              padding: 10px 0; margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
+  @media (max-width: 760px) { .formfoot { bottom: calc(62px + env(safe-area-inset-bottom)); } }
+
+  /* ---- sheets, toast ---- */
+  dialog { border: 0; padding: 0; width: min(640px, 100vw); max-height: 92dvh; border-radius: var(--r-lg); background: var(--surface); color: var(--fg); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  dialog.wide { width: min(900px, 100vw); }
+  @media (max-width: 640px) { dialog { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: var(--r-lg) var(--r-lg) 0 0; max-height: 92dvh; } }
+  .dlg { display: flex; flex-direction: column; max-height: 92dvh; }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .dlg-head h3 { margin: 0; font-size: var(--fs-lg); overflow-wrap: anywhere; }
+  .dlg-body { padding: 4px 16px 16px; overflow: auto; flex: 1; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+  .dlg .err { margin-top: 12px; color: var(--failed); font-size: var(--fs-sm); font-weight: 600; }
+  .opt { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
+  .opt.dis { opacity: .55; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 10px;
+           background: var(--fg); color: var(--bg); padding: 8px 8px 8px 14px; border-radius: var(--r-md); font-size: var(--fs-sm); max-width: calc(100vw - 24px); box-shadow: 0 8px 28px rgba(0,0,0,.2); }
+  #toast[hidden] { display: none; }
+  #toast.failed { background: var(--failed); color: #fff; }
+  #toast button { background: transparent; color: inherit; border-color: color-mix(in srgb, currentColor 40%, transparent); }
+  @media (max-width: 760px) { #toast { bottom: calc(70px + env(safe-area-inset-bottom)); } }
+</style>
+</head>
+<body>
+<div id="banner" hidden role="status"></div>
+<header class="top">
+  <div class="bar">
+    <a class="brand" href="#/">Runner</a>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/" data-nav=""><i aria-hidden="true">⌂</i>Overview</a>
+      <a href="#/apps" data-nav="apps"><i aria-hidden="true">▦</i>Apps</a>
+      <a href="#/machines" data-nav="machines"><i aria-hidden="true">▤</i>Machines</a>
+      <a href="#/metrics" data-nav="metrics"><i aria-hidden="true">∿</i>Metrics</a>
+      <a href="#/fleet" data-nav="fleet"><i aria-hidden="true">⚙</i>Fleet</a>
+    </nav>
+    <div class="spacer"></div>
+    <span id="summary" role="status" aria-live="polite"></span>
+    <button id="lock" type="button"></button>
+  </div>
+</header>
+<main id="main"></main>
+<dialog id="sheet"></dialog>
+<div id="toast" hidden role="status" aria-live="polite"></div>
+<div id="tip"></div>
+<script>
+// ======================================================================== helpers
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const enc = encodeURIComponent;
+const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+function compact(x, digits = 3) {
+  if (!isNum(x)) return "–";
+  const a = Math.abs(x);
+  if (a >= 1e9) return +(x / 1e9).toPrecision(digits) + "G";
+  if (a >= 1e6) return +(x / 1e6).toPrecision(digits) + "M";
+  if (a >= 1e4) return +(x / 1e3).toPrecision(digits) + "K";
+  if (a >= 100) return Math.round(x).toLocaleString();
+  if (a >= 10) return +x.toFixed(1) + "";
+  return +x.toFixed(2) + "";
+}
+function bytes(x) {
+  if (!isNum(x)) return "–";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (Math.abs(x) >= 1000 && i < u.length - 1) { x /= 1000; i++; }
+  return (Math.abs(x) >= 100 || i === 0 ? Math.round(x) : +x.toFixed(1)) + " " + u[i];
+}
+const F = {
+  pct: (x) => (isNum(x) ? (Math.abs(x) >= 10 ? Math.round(x) : +x.toFixed(1)) + "%" : "–"),
+  bytes,
+  rate: (x) => (isNum(x) ? bytes(x) + "/s" : "–"),
+  num: (x) => compact(x),
+  // apps report % of one core; shown as cores everywhere
+  cores: (x) => (isNum(x) ? +(x / 100).toFixed(x >= 100 ? 2 : 3) + " cores" : "–"),
+};
+const dec = (step) => Math.min(4, (String(+step.toPrecision(6)).split(".")[1] ?? "").length);
+const fixed = (v, step) => (v >= 10000 ? compact(v, 2) : v.toFixed(dec(step)));
+const AXIS = { pct: (x, s) => fixed(x, s) + "%", bytes: (x) => bytes(x).replace(" ", ""), rate: (x) => bytes(x).replace(" ", "") + "/s", num: fixed, cores: (x, s) => fixed(x / 100, s / 100) };
+function ago(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : s < 172800 ? (s / 3600).toFixed(1) + "h" : Math.round(s / 86400) + "d";
+}
+const pctOf = (a, b) => (isNum(a) && b > 0 ? (100 * a) / b : null);
+const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+const MAX_REPLICAS = 10;
+
+// ======================================================================== state
+const S = {
+  status: null, statusAt: 0, statusErr: null,
+  metrics: null, metricsAt: 0,
+  range: localStorage.getItem("metrics-range") || "1h",
+  heat: localStorage.getItem("metrics-heat") || "cpu",
+  fastUntil: 0, filter: "",
+};
+const pending = { replicas: {}, pools: {} }; // stepper values not saved yet
+const specCache = new Map(); // "name@version" -> spec (versions never change)
+let joinInfo = null; // { command, slots }: the join command shown in Fleet, and the slots that existed then
+const fast = () => (S.fastUntil = Date.now() + 5 * 60_000); // poll every 3s for a while after a change
+
+// ======================================================================== password
+let pw = sessionStorage.getItem("fleet-password") || localStorage.getItem("fleet-password") || "";
+function savePw(v, remember) {
+  pw = v;
+  sessionStorage.setItem("fleet-password", v);
+  if (remember) localStorage.setItem("fleet-password", v); else localStorage.removeItem("fleet-password");
+  renderChrome();
+}
+function forgetPw() {
+  pw = "";
+  sessionStorage.removeItem("fleet-password");
+  localStorage.removeItem("fleet-password");
+  renderChrome();
+  draw();
+}
+const LOCK = (open) => `<svg class="lockic" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="8" rx="1.5" fill="currentColor"/><path d="${open ? "M5 7V4.5a3 3 0 0 1 5.8-1" : "M5 7V5a3 3 0 0 1 6 0v2"}" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>`;
+const lockmark = () => (pw ? "" : ` <span class="lockmark" title="needs the fleet password">${LOCK(false)}<span class="mob"> </span></span>`);
+
+async function unlock() {
+  const ok = await sheet({
+    title: "Fleet password", ok: "Unlock",
+    html: `<p class="meta">Changing the fleet (pool sizes, rebalancing, restarting machines, moving apps off a machine, retiring slots, the join command) needs the password. Apps don't.</p>
+      <label class="f" for="pw-in">Password</label><input id="pw-in" type="password" autocomplete="current-password" required>
+      <label class="check"><input type="checkbox" id="pw-remember"> Remember on this device</label>`,
+    onOpen: (d) => $("#pw-in", d).focus(),
+    onOk: async (d) => {
+      const v = $("#pw-in", d).value;
+      const res = await fetch("/admin/api/unlock", { method: "POST", headers: { "x-fleet-password": v } }).catch(() => null);
+      if (!res) throw new Error("Can't reach the control plane");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        $("#pw-in", d).select();
+        throw new Error(res.status === 401 ? "Wrong password" : data.error || `HTTP ${res.status}`);
+      }
+      savePw(v, $("#pw-remember", d).checked);
+      return true;
+    },
+  });
+  if (ok) { toast("Fleet unlocked"); draw(); }
+  return Boolean(ok);
+}
+
+// Runs a fleet change, asking for the password first if there isn't one (and again if it stopped working).
+async function fleet(fn) {
+  if (!pw && !(await unlock())) return null;
+  try {
+    return await fn();
+  } catch (e) {
+    if (e.status !== 401) throw e;
+    forgetPw();
+    if (await unlock()) return fn();
+    return null;
+  }
+}
+
+// ======================================================================== API
+class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
+async function api(method, path, body, { fleet: isFleet = false } = {}) {
+  const headers = {};
+  if (body) headers["content-type"] = "application/json";
+  if (isFleet && pw) headers["x-fleet-password"] = pw;
+  let res;
+  try {
+    res = await fetch(`/admin/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
+  } catch {
+    throw new ApiError("Can't reach the control plane", 0);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(data.error || `HTTP ${res.status}`, res.status);
+  return data;
+}
+async function getSpec(name, version) {
+  const key = `${name}@${version}`;
+  if (!specCache.has(key)) specCache.set(key, await api("GET", `/projects/${enc(name)}?version=${version}`));
+  return specCache.get(key);
+}
+// The files of a spec, in the order they're shown: [[path, text]]
+function specFiles(spec) {
+  const out = [];
+  if (spec.compose) out.push(["compose.yaml", spec.compose]);
+  const files = spec.files || {};
+  if (files.Dockerfile != null) out.push(["Dockerfile", files.Dockerfile]);
+  for (const path of Object.keys(files).sort()) if (path !== "Dockerfile") out.push([path, files[path]]);
+  return out;
+}
+
+async function loadStatus() {
+  try {
+    S.status = await api("GET", "/status");
+    S.statusAt = Date.now();
+    S.statusErr = null;
+  } catch (e) {
+    S.statusErr = e.message;
+  }
+  renderChrome();
+  if (S.status) view?.status?.();
+}
+let metricsBusy = false;
+async function loadMetrics() {
+  if (metricsBusy) return;
+  metricsBusy = true;
+  try {
+    const res = await fetch(`/api/metrics?range=${S.range}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    S.metrics = await res.json();
+    S.metricsAt = Date.now();
+    if (S.status) view?.status?.();
+    view?.charts?.();
+  } catch {
+    // the charts keep what they had; the next poll tries again
+  } finally {
+    metricsBusy = false;
+  }
+}
+
+// ======================================================================== UI pieces
+const ICON = { healthy: "✓", deploying: "◐", failed: "✕", leaving: "→", gone: "○" };
+const pill = (kind, text) => `<span class="pill ${kind}"><i aria-hidden="true">${ICON[kind]}</i>${esc(text)}</span>`;
+
+function toast(message, { kind = "", action = null, sticky = false } = {}) {
+  const t = $("#toast");
+  t.className = kind;
+  t.innerHTML = `<span>${esc(message)}</span>${action ? `<button type="button" class="small" data-t="act">${esc(action.label)}</button>` : ""}<button type="button" class="small icon" data-t="x" aria-label="Dismiss">✕</button>`;
+  t.hidden = false;
+  t.onclick = (e) => {
+    const b = e.target.closest("[data-t]");
+    if (!b) return;
+    t.hidden = true;
+    if (b.dataset.t === "act") action.fn();
+  };
+  clearTimeout(toast.timer);
+  if (!sticky && kind !== "failed") toast.timer = setTimeout(() => (t.hidden = true), action ? 9000 : 4500);
+}
+const fail = (e) => toast(e.message, { kind: "failed" });
+
+// A modal sheet. Resolves with what onOk returns (true by default), or null if it's closed. An error thrown by onOk
+// is shown in the sheet, which stays open.
+function sheet({ title, html, ok = "OK", okKind = "primary", cancel = "Cancel", wide = false, onOpen, onOk }) {
+  return new Promise((resolve) => {
+    const d = $("#sheet");
+    d.className = wide ? "wide" : "";
+    d.innerHTML = `<form class="dlg" method="dialog"><div class="dlg-head"><h3>${esc(title)}</h3><button type="button" class="icon" data-x aria-label="Close">✕</button></div>
+      <div class="dlg-body">${html}<div class="err" role="alert" hidden></div></div>
+      <div class="dlg-foot">${cancel ? `<button type="button" data-x>${esc(cancel)}</button>` : ""}${ok ? `<button type="submit" class="${okKind}">${esc(ok)}</button>` : ""}</div></form>`;
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      if (d.open) d.close();
+      resolve(v);
+    };
+    $$("[data-x]", d).forEach((b) => (b.onclick = () => finish(null)));
+    // A close event left over from the previous sheet can arrive while this one is open; only a real close counts.
+    d.onclose = () => { if (!d.open) finish(null); };
+    const form = $("form", d), err = $(".err", d), submit = $("[type=submit]", d);
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      err.hidden = true;
+      if (submit) submit.disabled = true;
+      try {
+        const v = onOk ? await onOk(d) : true;
+        finish(v ?? true);
+      } catch (e) {
+        err.textContent = e.message;
+        err.hidden = false;
+      } finally {
+        if (submit) submit.disabled = false;
+      }
+    };
+    d.showModal();
+    onOpen?.(d);
+  });
+}
+const confirmSheet = (title, text, ok, okKind = "primary") => sheet({ title, ok, okKind, html: `<p>${text}</p>` });
+
+// A table; on phones each row becomes a small card (the header becomes labels). rows: [{ cells, href?, cls? }]
+function table(head, rows, { empty = "Nothing here", num = [] } = {}) {
+  const th = head.map((h, i) => `<th${num.includes(i) ? ' class="num"' : ""}>${esc(h)}</th>`).join("");
+  const body = rows.map((r) => `<tr class="${r.href ? "click " : ""}${r.cls ?? ""}"${r.href ? ` data-href="${esc(r.href)}"` : ""}>${r.cells.map((c, i) =>
+    `<td data-label="${esc(head[i])}"${num.includes(i) ? ' class="num"' : ""}>${c}</td>`).join("")}</tr>`).join("");
+  return `<div class="tablewrap"><table class="rl"><thead><tr>${th}</tr></thead><tbody>${body || `<tr><td colspan="${head.length}" class="s">${esc(empty)}</td></tr>`}</tbody></table></div>`;
+}
+const meter = (pct) => {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  return `<span class="meter" aria-hidden="true"><i class="${p >= 90 ? "crit" : p >= 75 ? "warn" : ""}" style="width:${p}%"></i></span>`;
+};
+const codebox = (text) => `<div class="codebox"><pre class="code">${esc(text)}</pre><button type="button" class="small" data-copy>Copy</button></div>`;
+const rangeSeg = () => `<span class="seg" role="group" aria-label="Time range">${["1h", "6h", "24h", "7d", "30d"].map((r) =>
+  `<button type="button" data-range="${r}" aria-pressed="${r === S.range}">${r}</button>`).join("")}</span>`;
+
+// ======================================================================== fleet facts
+// The run that speaks for each machine: its newest live one.
+function runsBy() {
+  const out = new Map();
+  for (const r of S.status.runs) if (r.live && !r.retiring && (!out.has(r.machine) || out.get(r.machine).started < r.started)) out.set(r.machine, r);
+  return out;
+}
+function machineState(n, r) {
+  if (!r && (S.status.starting ?? []).includes(n)) return { kind: "deploying", text: "being started" };
+  if (!r) return { kind: "gone", text: "down" };
+  if (r.handover) return { kind: "deploying", text: "replacing itself" };
+  if (r.draining) return { kind: "leaving", text: "going down soon" };
+  if (!r.ready) return { kind: "deploying", text: "starting up" };
+  if (S.status.rebalance.hot.includes(n)) return { kind: "failed", text: "hot" };
+  return { kind: "healthy", text: `online · ${ago(S.status.now - r.started)}` };
+}
+const APP_STATE = { live: ["healthy", "live"], deploying: ["deploying", "deploying"], halted: ["failed", "failed"], disabled: ["gone", "disabled"] };
+const appPill = (p, runs) => (p.state === "live" && runs && appFailures(p, runs).length ? pill("failed", "failing") : pill(...APP_STATE[p.state] ?? ["gone", p.state]));
+const runKind = (s) => (!s ? "gone" : s.s === "healthy" ? "healthy" : s.s === "failed" ? "failed" : "deploying");
+// One entry per replica (its staying copy), or every copy including ones moving away.
+function copies(p, all = false) {
+  return Array.from({ length: p.replicas }, (_, i) => {
+    const xs = p.placed.filter((x) => x.replica === i + 1);
+    if (all) return xs.length ? xs : [{ replica: i + 1 }];
+    return [xs.find((x) => !x.leaving) ?? { replica: i + 1 }];
+  }).flat();
+}
+function progress(p, runs) {
+  const target = p.halted ? p.stable : p.version;
+  let ok = 0, busy = 0, bad = 0;
+  for (const x of copies(p)) {
+    const s = x.machine != null ? runs.get(x.machine)?.projects[p.name] : null;
+    if (s?.s === "failed") bad++;
+    else if (s?.s === "healthy" && s.v === target) ok++;
+    else busy++;
+  }
+  return { target, ok, busy, bad, total: p.replicas };
+}
+// Every machine where the app is failing, with its error.
+function appFailures(p, runs) {
+  return [...runs.values()].map((r) => ({ machine: r.machine, s: r.projects[p.name] })).filter((x) => x.s?.s === "failed")
+    .map((x) => ({ machine: x.machine, v: x.s.v, e: x.s.e || "failed" }));
+}
+const upCount = () => [...runsBy().values()].filter((r) => r.ready).length;
+// Replicas that can be placed now: one per machine, so never more than there are machines.
+const placeable = (p) => Math.min(p.replicas, upCount());
+const replicaUrl = (p, k) => `https://${p.name}-${k}.${S.status.domain}/`;
+const sharedUrl = (p) => `https://${p.name}.${S.status.domain}/`;
+const appHref = (name) => `#/apps/${enc(name)}`;
+const machineHref = (n) => `#/machines/${n}`;
+
+function problems() {
+  const st = S.status, runs = runsBy(), out = [];
+  if (st.dnsError) out.push({ kind: "failed", text: `DNS: ${st.dnsError}` });
+  for (const n of st.dnsNotes ?? []) out.push({ kind: "deploying", text: `DNS: ${n}` });
+  for (const p of st.projects) {
+    const href = appHref(p.name);
+    if (p.state === "halted") out.push({ kind: "failed", href, text: `${p.name}: v${p.version} failed; running v${p.stable ?? "–"} instead` });
+    else if (p.state === "deploying") {
+      const g = progress(p, runs);
+      out.push({ kind: "deploying", href, text: `${p.name}: deploying v${p.version} (${g.ok} of ${g.total} healthy${g.bad ? `, ${g.bad} failed` : ""})` });
+    } else if (p.enabled) {
+      const f = appFailures(p, runs);
+      if (f.length) out.push({ kind: "failed", href, text: `${p.name}: failing on machine ${f.map((x) => x.machine).join(", ")}` });
+    }
+    if (p.enabled && p.staying < placeable(p)) out.push({ kind: "deploying", href, text: `${p.name}: ${plural(placeable(p) - p.staying, "replica")} waiting for a machine` });
+  }
+  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
+  for (const n of st.rebalance.hot) out.push({ kind: "failed", href: machineHref(n), text: `Machine ${n} is hot (CPU or memory high for 5 minutes)` });
+  for (const pool of st.pools) if (pool.live < pool.size) out.push({ kind: "deploying", href: "#/fleet", text: `Pool ${pool.name}: ${pool.live} of ${pool.size} machines up` });
+  return out;
+}
+const problemList = (list) => list.length
+  ? `<div class="problems">${list.map((x) => `<${x.href ? `a href="${esc(x.href)}"` : "div"} class="problem">${pill(x.kind, { failed: "problem", deploying: "in progress", gone: "down", leaving: "leaving", healthy: "ok" }[x.kind])}<span class="t">${esc(x.text)}</span>${x.href ? '<span aria-hidden="true">›</span>' : ""}</${x.href ? "a" : "div"}>`).join("")}</div>`
+  : `<div class="card ok-line">✓ Everything is running as it should</div>`;
+
+// The progress of a deploy, and every failing machine's error.
+function appStatusBlock(p, runs, { full = false } = {}) {
+  let html = "";
+  if (p.state === "deploying" || (full && p.enabled && p.stable !== p.version)) {
+    const g = progress(p, runs);
+    const w = (n) => (100 * n) / Math.max(1, g.total);
+    html += `<div class="progress">v${g.target}: ${g.ok} of ${g.total} healthy${g.busy ? ` · ${g.busy} starting` : ""}${g.bad ? ` · ${g.bad} failed` : ""}
+      <div class="bars" aria-hidden="true"><i style="width:${w(g.ok)}%;background:var(--healthy)"></i><i style="width:${w(g.bad)}%;background:var(--failed)"></i><i style="width:${w(g.busy)}%;background:var(--deploying);opacity:.5"></i></div></div>`;
+  }
+  const f = p.enabled ? appFailures(p, runs) : [];
+  if (p.halted || f.length) {
+    html += `<div class="errbox">${p.halted ? `<b>v${p.version} failed.</b> Every replica is back on v${esc(p.stable ?? "–")}.` : `<b>Failing on ${plural(f.length, "machine")}.</b>`}
+      ${(f.length ? f : [{ machine: null, e: p.halted }]).map((x) => `<div class="item">${x.machine != null ? `<a href="${machineHref(x.machine)}">Machine ${x.machine}</a> (v${esc(x.v)})` : ""}<pre>${esc(x.e)}</pre></div>`).join("")}
+      ${full ? `<div class="actions"><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit v${p.version}</a><button type="button" class="small" data-act="retry">Retry</button></div>` : ""}</div>`;
+  }
+  return html;
+}
+// "2 of 3 replicas placed", or "on all 5 machines (8 replicas asked)" when there are fewer machines than replicas.
+const placedText = (p) => (p.replicas > upCount() && p.staying >= placeable(p)
+  ? `on all ${plural(p.staying, "machine")} (${p.replicas} replicas asked)` : `${p.staying} of ${plural(p.replicas, "replica")} placed`);
+function replicaChips(p, runs, { links = true } = {}) {
+  if (!p.enabled) return "";
+  return `<div class="chips">${copies(p).map((x) => {
+    const s = x.machine != null ? runs.get(x.machine)?.projects[p.name] : null;
+    const kind = x.machine == null ? "gone" : runKind(s);
+    const where = x.machine == null ? (x.replica > upCount() ? "not placed: fewer machines than replicas" : "not placed yet") : !s ? `machine ${x.machine}, not running` : `machine ${x.machine}, v${s.v} ${s.s}`;
+    const inner = `<i aria-hidden="true">${ICON[kind]}</i>${x.replica}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
+    const label = `replica ${x.replica}: ${where}`;
+    return links && p.port
+      ? `<a class="chip ${kind}" href="${esc(replicaUrl(p, x.replica))}" target="_blank" rel="noopener" aria-label="${esc(label)}" title="${esc(label)}">${inner}</a>`
+      : `<span class="chip ${kind}" aria-label="${esc(label)}" title="${esc(label)}">${inner}</span>`;
+  }).join("")}</div>`;
+}
+
+// ======================================================================== charts
+const SERIES = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)"];
+const OTHER = "var(--s-other)";
+const appLabel = (a) => (a === "_system" ? "system (router + tunnel)" : a);
+const tip = $("#tip");
+function showTip(e, when, rows, anchor) {
+  tip.replaceChildren();
+  const w = document.createElement("div");
+  w.className = "when";
+  w.textContent = when;
+  tip.append(w);
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "r";
+    if (r.color) {
+      const k = document.createElement("i");
+      k.className = "key";
+      k.style.background = r.color;
+      row.append(k);
+    }
+    const b = document.createElement("b");
+    b.textContent = r.value;
+    const s = document.createElement("span");
+    s.textContent = r.name;
+    row.append(b, s);
+    tip.append(row);
+  }
+  tip.style.display = "block";
+  const { width, height } = tip.getBoundingClientRect();
+  let x, y;
+  if (e.pointerType === "touch" && anchor) {
+    // under a finger: pin it above the chart instead, so the finger doesn't cover it
+    const a = anchor.getBoundingClientRect();
+    x = Math.min(innerWidth - width - 8, Math.max(8, e.clientX - width / 2));
+    y = a.top - height - 8 > 56 ? a.top - height - 8 : a.bottom + 8;
+  } else {
+    x = e.clientX + 14;
+    if (x + width > innerWidth - 8) x = e.clientX - width - 14;
+    y = e.clientY + 14;
+    if (y + height > innerHeight - 8) y = e.clientY - height - 14;
+  }
+  tip.style.left = Math.max(8, x) + "px";
+  tip.style.top = Math.max(8, y) + "px";
+}
+const hideTip = () => (tip.style.display = "none");
+addEventListener("scroll", hideTip, { passive: true });
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest(".chart")) hideTip(); });
+function fmtTime(t) {
+  const d = new Date(t);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return S.metrics.step >= 600_000 ? d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time : time;
+}
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.append(e);
+  return e;
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+}
+function xTicks(t0, t1, width) {
+  const span = t1 - t0;
+  const want = Math.max(2, Math.floor(width / 90));
+  const steps = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map((m) => m * 60_000);
+  const step = steps.find((s) => span / s <= want) ?? steps[steps.length - 1];
+  const off = new Date().getTimezoneOffset() * 60_000;
+  const out = [];
+  for (let t = Math.ceil((t0 - off) / step) * step + off; t <= t1; t += step) out.push(t);
+  return { ticks: out, step };
+}
+function tickLabel(t, step) {
+  const d = new Date(t);
+  if (step >= 1440 * 60_000) return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.getHours() === 0 && d.getMinutes() === 0 && step >= 60 * 60_000 ? d.toLocaleDateString([], { month: "short", day: "numeric" }) : hm;
+}
+// A chart card; returns its body.
+function ccard(parent, title, desc, wide) {
+  const c = document.createElement("div");
+  c.className = "ccard" + (wide ? " wide" : "");
+  c.innerHTML = `<h3>${esc(title)}</h3>${desc ? `<div class="desc">${esc(desc)}</div>` : ""}`;
+  const body = document.createElement("div");
+  body.className = "chart";
+  body.dataset.title = title;
+  c.append(body);
+  parent.append(c);
+  return body;
+}
+function section(parent, title, extra = "") {
+  const h = document.createElement("h2");
+  h.innerHTML = `<span class="grow">${esc(title)}</span>${extra}`;
+  parent.append(h);
+  const g = document.createElement("div");
+  g.className = "grid";
+  parent.append(g);
+  return g;
+}
+function tiles(list) {
+  return `<div class="tiles">${list.map((t) => `<div class="tile"><div class="label">${esc(t.label)}</div><div class="value">${esc(t.value)}</div>${t.sub ? `<div class="subv">${esc(t.sub)}</div>` : ""}</div>`).join("")}</div>`;
+}
+
+// series: [{ name, values, color? }]; opts: { unit, stacked, ref: { value, name }, max, height }
+function lineChart(body, series, opts = {}) {
+  const t = S.metrics.t;
+  const unit = opts.unit ?? "num";
+  series = series.filter((s) => s.values?.some(isNum));
+  body.replaceChildren();
+  if (!series.length) {
+    body.innerHTML = '<div class="nodata">No data in this range yet</div>';
+    return;
+  }
+  series.forEach((s, i) => (s.color ??= SERIES[i % SERIES.length]));
+  if (series.length > 1 || opts.ref) {
+    const lg = document.createElement("div");
+    lg.className = "legend";
+    lg.innerHTML = series.map((s) => `<span><i class="key${opts.stacked ? " box" : ""}" style="background:${s.color}"></i>${esc(s.name)}</span>`).join("") +
+      (opts.ref ? `<span><i class="key" style="background:var(--axis)"></i>${esc(opts.ref.name)}</span>` : "");
+    body.append(lg);
+  }
+  const W = Math.max(260, body.clientWidth || body.parentElement.clientWidth - 28);
+  const H = opts.height ?? 170;
+  const L = 56, R = 10, T = 8, B = 22;
+  const n = t.length;
+  const top = series.map((s) => s.values.slice());
+  const base = series.map(() => new Array(n).fill(0));
+  if (opts.stacked) {
+    for (let i = 0; i < n; i++) {
+      let acc = 0;
+      const any = series.some((s) => isNum(s.values[i]));
+      series.forEach((s, j) => {
+        base[j][i] = any ? acc : null;
+        acc += isNum(s.values[i]) ? s.values[i] : 0;
+        top[j][i] = any ? acc : null;
+      });
+    }
+  }
+  let max = opts.max ?? 0;
+  for (const arr of top) for (const v of arr) if (isNum(v) && v > max) max = v;
+  if (opts.ref && isNum(opts.ref.value)) max = Math.max(max, opts.ref.value);
+  if (!(max > 0)) max = 1;
+  const step = niceStep(max / 4);
+  const yMax = Math.ceil(max / step - 1e-9) * step;
+  const t0 = t[0], t1 = t[n - 1];
+  const x = (i) => L + ((t[i] - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  const y = (v) => T + (1 - v / yMax) * (H - T - B);
+  const last = series.map((s) => [...s.values].reverse().find(isNum));
+  const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `${body.dataset.title ?? ""}: ${series.map((s, j) => `${s.name} now ${F[unit](last[j])}`).join(", ")}` });
+  for (let v = 0; v <= yMax + 1e-9; v += step) {
+    el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: v === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1, "shape-rendering": "crispEdges" }, svg);
+    el("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = AXIS[unit](v, step);
+  }
+  const xt = xTicks(t0, t1, W - L - R);
+  for (const tt of xt.ticks) {
+    const px = L + ((tt - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+    el("text", { x: px, y: H - 5, "text-anchor": "middle" }, svg).textContent = tickLabel(tt, xt.step);
+  }
+  const segs = (vals) => {
+    const out = [];
+    let cur = [];
+    vals.forEach((v, i) => {
+      if (isNum(v)) cur.push(i);
+      else if (cur.length) { out.push(cur); cur = []; }
+    });
+    if (cur.length) out.push(cur);
+    return out;
+  };
+  series.forEach((s, j) => {
+    for (const seg of segs(top[j])) {
+      const line = seg.map((i, k) => `${k ? "L" : "M"}${x(i).toFixed(1)},${y(top[j][i]).toFixed(1)}`).join("");
+      if (opts.stacked || series.length === 1) {
+        const lower = seg.slice().reverse().map((i) => `L${x(i).toFixed(1)},${y(opts.stacked ? base[j][i] : 0).toFixed(1)}`).join("");
+        el("path", { d: line + lower + "Z", fill: s.color, "fill-opacity": opts.stacked ? 0.28 : 0.1, stroke: "none" }, svg);
+      }
+      if (seg.length === 1) el("circle", { cx: x(seg[0]), cy: y(top[j][seg[0]]), r: 2, fill: s.color }, svg);
+      else el("path", { d: line, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    }
+  });
+  if (opts.ref && isNum(opts.ref.value)) {
+    el("line", { x1: L, x2: W - R, y1: y(opts.ref.value), y2: y(opts.ref.value), stroke: "var(--axis)", "stroke-width": 1.5, "stroke-dasharray": "4 3" }, svg);
+  }
+  const hair = el("line", { y1: T, y2: H - B, stroke: "var(--muted)", "stroke-width": 1, visibility: "hidden" }, svg);
+  const dots = series.map((s) => el("circle", { r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }, svg));
+  const hit = el("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" }, svg);
+  const move = (e) => {
+    const r = svg.getBoundingClientRect();
+    const tt = t0 + ((e.clientX - r.left - L) / (W - L - R)) * (t1 - t0);
+    const i = Math.max(0, Math.min(n - 1, Math.round(((tt - t0) / Math.max(1, t1 - t0)) * (n - 1))));
+    hair.setAttribute("x1", x(i));
+    hair.setAttribute("x2", x(i));
+    hair.setAttribute("visibility", "visible");
+    series.forEach((s, j) => {
+      const v = top[j][i];
+      dots[j].setAttribute("visibility", isNum(s.values[i]) ? "visible" : "hidden");
+      if (isNum(v)) { dots[j].setAttribute("cx", x(i)); dots[j].setAttribute("cy", y(v)); }
+    });
+    const rows = series.map((s) => ({ color: s.color, name: s.name, value: F[unit](s.values[i]) }));
+    if (opts.stacked && series.length > 1) rows.push({ name: "total", value: F[unit](series.reduce((a, s) => a + (isNum(s.values[i]) ? s.values[i] : 0), 0)) });
+    if (opts.ref) rows.push({ color: "var(--axis)", name: opts.ref.name, value: F[unit](opts.ref.value) });
+    showTip(e, fmtTime(t[i]), rows, svg);
+  };
+  const clear = () => {
+    hair.setAttribute("visibility", "hidden");
+    dots.forEach((d) => d.setAttribute("visibility", "hidden"));
+    hideTip();
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", (e) => { if (e.pointerType !== "touch") clear(); });
+  body.append(svg);
+}
+
+// rows: [{ name, values, href? }]; one blue ramp, low to high
+function heatmap(body, rows, opts = {}) {
+  const t = S.metrics.t;
+  const unit = opts.unit ?? "num";
+  body.replaceChildren();
+  if (!rows.some((r) => r.values?.some(isNum))) {
+    body.innerHTML = '<div class="nodata">No data in this range yet</div>';
+    return;
+  }
+  const cs = getComputedStyle(document.documentElement);
+  const ramp = Array.from({ length: 7 }, (_, i) => cs.getPropertyValue(`--heat-${i}`).trim());
+  const rgb = ramp.map((h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16)));
+  let max = opts.max ?? 0;
+  if (!opts.max) for (const r of rows) for (const v of r.values ?? []) if (isNum(v) && v > max) max = v;
+  if (!(max > 0)) max = 1;
+  const color = (v) => {
+    const f = Math.max(0, Math.min(1, v / max)) * (rgb.length - 1);
+    const i = Math.min(rgb.length - 2, Math.floor(f));
+    const k = f - i;
+    return `rgb(${rgb[i].map((c, j) => Math.round(c + (rgb[i + 1][j] - c) * k)).join(",")})`;
+  };
+  const lg = document.createElement("div");
+  lg.className = "heatlegend";
+  lg.innerHTML = `<span>low ${esc(F[unit](0))}</span><span class="ramp" style="background:linear-gradient(90deg,${ramp.join(",")})"></span><span>high ${esc(F[unit](max))}${opts.max ? "" : " (peak)"}</span>`;
+  body.append(lg);
+  const W = Math.max(260, body.clientWidth || body.parentElement.clientWidth - 28);
+  const L = 74, R = 10, T = 2, B = 22, rowH = 22, gap = 3;
+  // buckets at least 4px wide on narrow screens
+  const per = Math.max(1, Math.ceil((4 * t.length) / (W - L - R)));
+  const cols = Math.ceil(t.length / per);
+  const bucket = (vals, c) => {
+    const xs = (vals ?? []).slice(c * per, c * per + per).filter(isNum);
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+  };
+  const H = T + rows.length * (rowH + gap) + B;
+  const cw = (W - L - R) / cols;
+  const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": body.dataset.title ?? "" });
+  rows.forEach((r, ri) => {
+    const yy = T + ri * (rowH + gap);
+    const lab = el("text", { x: L - 8, y: yy + rowH / 2 + 4, "text-anchor": "end", class: r.href ? "lab" : "" }, svg);
+    lab.textContent = r.name;
+    if (r.href) lab.addEventListener("click", () => (location.hash = r.href));
+    el("rect", { x: L, y: yy, width: W - L - R, height: rowH, fill: "var(--heat-none)", rx: 3 }, svg);
+    for (let c = 0; c < cols; c++) {
+      const v = bucket(r.values, c);
+      if (isNum(v)) el("rect", { x: (L + c * cw).toFixed(2), y: yy, width: (cw + 0.6).toFixed(2), height: rowH, fill: color(v) }, svg);
+    }
+  });
+  const xt = xTicks(t[0], t[t.length - 1], W - L - R);
+  for (const tt of xt.ticks) {
+    const px = L + ((tt - t[0]) / Math.max(1, t[t.length - 1] - t[0])) * (W - L - R);
+    el("text", { x: px, y: H - 5, "text-anchor": "middle" }, svg).textContent = tickLabel(tt, xt.step);
+  }
+  const outline = el("rect", { width: Math.max(cw, 3), height: rowH, fill: "none", stroke: "var(--fg)", "stroke-width": 1.5, rx: 1, visibility: "hidden" }, svg);
+  const hit = el("rect", { x: L, y: 0, width: W - L - R, height: H - B, fill: "transparent" }, svg);
+  const show = (e) => {
+    const b = svg.getBoundingClientRect();
+    const c = Math.max(0, Math.min(cols - 1, Math.floor((e.clientX - b.left - L) / cw)));
+    const ri = Math.max(0, Math.min(rows.length - 1, Math.floor((e.clientY - b.top - T) / (rowH + gap))));
+    outline.setAttribute("x", L + c * cw - (cw < 3 ? (3 - cw) / 2 : 0));
+    outline.setAttribute("y", T + ri * (rowH + gap));
+    outline.setAttribute("visibility", "visible");
+    showTip(e, fmtTime(t[Math.min(t.length - 1, c * per)]), [{ name: rows[ri].name, value: F[unit](bucket(rows[ri].values, c)) }], svg);
+  };
+  hit.addEventListener("pointermove", show);
+  hit.addEventListener("pointerdown", show);
+  hit.addEventListener("pointerleave", (e) => { if (e.pointerType !== "touch") { outline.setAttribute("visibility", "hidden"); hideTip(); } });
+  body.append(svg);
+}
+// A collapsed "Disk and network" section, drawn when opened; it stays open across refreshes once opened.
+function moreSection(box, drawInto) {
+  const more = document.createElement("details");
+  more.className = "more";
+  more.innerHTML = "<summary>Disk and network</summary>";
+  const mg = document.createElement("div");
+  mg.className = "grid";
+  more.append(mg);
+  box.append(more);
+  more.ontoggle = () => {
+    S.moreOpen = more.open;
+    if (more.open && !mg.childElementCount) drawInto(mg);
+  };
+  if (S.moreOpen) more.open = true;
+}
+// A 64x20 line of the last hour or so, with a dot at the end.
+function spark(vals) {
+  const v = (vals ?? []).slice(-60);
+  const pts = v.map((y, i) => [i, y]).filter(([, y]) => isNum(y));
+  if (pts.length < 2) return "";
+  const max = Math.max(100, ...pts.map(([, y]) => y));
+  const X = (i) => (i / Math.max(1, v.length - 1)) * 62 + 1, Y = (y) => 19 - (y / max) * 18;
+  const d = pts.map(([i, y], k) => `${k ? "L" : "M"}${X(i).toFixed(1)},${Y(y).toFixed(1)}`).join("");
+  const [li, ly] = pts[pts.length - 1];
+  return `<svg class="spark" width="64" height="20" viewBox="0 0 64 20" aria-hidden="true"><path d="${d}" fill="none" stroke="var(--s1)" stroke-width="1.5"/><circle cx="${X(li)}" cy="${Y(ly)}" r="2" fill="var(--s1)"/></svg>`;
+}
+
+// metrics data helpers
+const M = () => S.metrics;
+const machineNums = () => {
+  const set = new Set(Object.keys(M().m).map(Number));
+  for (const k of Object.keys(M().live)) set.add(Number(k));
+  return [...set].sort((a, b) => a - b);
+};
+const hcol = (m, k) => M().m[m]?.h?.[k] ?? null;
+const acol = (m, app, k) => M().m[m]?.a?.[app]?.[k] ?? null;
+function combine(cols, how) {
+  const n = M().t.length;
+  const out = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const vals = cols.map((c) => c?.[i]).filter(isNum);
+    if (!vals.length) continue;
+    out[i] = how === "max" ? Math.max(...vals) : how === "avg" ? vals.reduce((a, b) => a + b, 0) / vals.length : vals.reduce((a, b) => a + b, 0);
+  }
+  return out;
+}
+const map2 = (a, b, f) => (a ?? []).map((v, i) => (isNum(v) && isNum(b?.[i]) ? f(v, b[i]) : null));
+const fleetH = (k, how = "sum") => combine(machineNums().map((m) => hcol(m, k)), how);
+function appNames() {
+  const set = new Set();
+  for (const x of Object.values(M().m)) for (const a of Object.keys(x.a ?? {})) set.add(a);
+  for (const x of Object.values(M().live)) for (const a of Object.keys(x.a ?? {})) set.add(a);
+  return [...set].sort((a, b) => (a === "_system") - (b === "_system") || a.localeCompare(b));
+}
+// Apps stacked by a field: the 5 biggest keep a color (the same color for the same app), the rest fold into "other".
+function appStack(cols) {
+  const names = appNames();
+  const totals = names.map((a) => [a, (cols(a) ?? []).reduce((s, v) => s + (isNum(v) ? v : 0), 0)]).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]);
+  const keep = totals.slice(0, totals.length > 6 ? 5 : 6).map(([a]) => a);
+  const rest = totals.slice(keep.length).map(([a]) => a);
+  const series = keep.map((a, i) => ({ name: appLabel(a), values: cols(a), color: i < 5 ? SERIES[i] : OTHER }));
+  if (rest.length) series.push({ name: `other (${rest.length})`, values: combine(rest.map(cols), "sum"), color: OTHER });
+  return series;
+}
+const liveRows = () => Object.entries(M().live).map(([m, x]) => ({ m: Number(m), ...x })).sort((a, b) => a.m - b.m);
+const sumLive = (f) => liveRows().reduce((s, r) => s + (isNum(f(r)) ? f(r) : 0), 0);
+const io = (a, b) => `${F.rate(a)} <span class="s">${F.rate(b)}</span>`;
+function fleetTiles() {
+  const live = liveRows();
+  const memTotal = sumLive((r) => r.h.memTotal), memUsed = sumLive((r) => r.h.memUsed);
+  return tiles([
+    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: M().expected ? `${live.length} of ${M().expected} machines reporting` : `${plural(live.length, "machine")} reporting` },
+    { label: "Memory used", value: memTotal ? F.pct((100 * memUsed) / memTotal) : "–", sub: `${bytes(memUsed)} of ${bytes(memTotal)}` },
+    { label: "Disk read", value: F.rate(sumLive((r) => r.h.diskRead)), sub: `write ${F.rate(sumLive((r) => r.h.diskWrite))}` },
+    { label: "Network in", value: F.rate(sumLive((r) => r.h.netRx)), sub: `out ${F.rate(sumLive((r) => r.h.netTx))}` },
+  ]);
+}
+
+// ======================================================================== diff
+function diffLines(a, b) {
+  const A = a.split("\n"), B = b.split("\n"), n = A.length, m = B.length;
+  if (n * m > 4e6) return null;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push([" ", A[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["-", A[i++]]);
+    else out.push(["+", B[j++]]);
+  }
+  while (i < n) out.push(["-", A[i++]]);
+  while (j < m) out.push(["+", B[j++]]);
+  return out;
+}
+// What changes going from one spec's files to another's (each [[path, text]]), plus port and replicas.
+function diffHtml(from, to, extra = []) {
+  const a = new Map(from), b = new Map(to);
+  const paths = [...new Set([...a.keys(), ...b.keys()])];
+  let html = extra.map((x) => `<h4>${esc(x)}</h4>`).join(""), changed = 0;
+  for (const path of paths) {
+    const x = a.get(path) ?? null, y = b.get(path) ?? null;
+    if (x === y) continue;
+    changed++;
+    html += `<h4>${esc(path)}${x === null ? " (new)" : y === null ? " (removed)" : ""}</h4>`;
+    const lines = diffLines(x ?? "", y ?? "");
+    if (!lines) { html += `<div class="gap">too big to compare</div>`; continue; }
+    const keep = lines.map((l, i) => l[0] !== " " || lines.slice(Math.max(0, i - 3), i + 4).some((k) => k[0] !== " "));
+    let gap = false;
+    lines.forEach((l, i) => {
+      if (!keep[i]) { if (!gap) html += `<div class="gap">⋯</div>`; gap = true; return; }
+      gap = false;
+      html += `<div class="${l[0] === "+" ? "add" : l[0] === "-" ? "del" : ""}">${esc(l[0] + " " + l[1])}</div>`;
+    });
+  }
+  return { html: html || `<div class="gap" style="padding:8px 12px">No differences</div>`, changed: changed + extra.length };
+}
+function specChanges(from, to) {
+  const extra = [];
+  if ((from.port ?? null) !== (to.port ?? null)) extra.push(`port: ${from.port ?? "none"} → ${to.port ?? "none"}`);
+  if ((from.replicas ?? 1) !== (to.replicas ?? 1)) extra.push(`replicas: ${from.replicas ?? 1} → ${to.replicas ?? 1}`);
+  return diffHtml(specFiles(from), specFiles(to), extra);
+}
+
+// ======================================================================== app actions
+async function deploySpec(name, body, message) {
+  const p = await api("PUT", `/projects/${enc(name)}`, body);
+  fast();
+  toast(p.unchanged ? `${name} is already running that` : message ?? `Deploying ${name} v${p.version}`);
+  loadStatus();
+  return p;
+}
+async function rollback(name, version) {
+  const p = S.status.projects.find((x) => x.name === name);
+  const [old, latest] = await Promise.all([getSpec(name, version), getSpec(name, p.version)]);
+  const d = specChanges(latest, { ...old, replicas: p.replicas });
+  const ok = await sheet({
+    title: `Roll ${name} back to v${version}?`, ok: `Deploy v${version}'s files`, wide: true,
+    html: `<p class="meta">v${version}'s files and port are deployed again as a new version. Replicas stay at ${p.replicas}.</p><div class="diff">${d.html}</div>`,
+  });
+  if (!ok) return;
+  try {
+    const res = await deploySpec(name, { compose: old.compose, files: old.files, port: old.port, replicas: p.replicas }, null);
+    if (res.unchanged) return toast(`${name} is already running v${version}'s files`);
+    toast(`${name} v${res.version} is v${version} again`, {
+      action: { label: "Undo", fn: () => deploySpec(name, { compose: latest.compose, files: latest.files, port: latest.port, replicas: p.replicas }, `Back to v${p.version}'s files`).catch(fail) },
+    });
+  } catch (e) { fail(e); }
+}
+async function showDiff(name, version) {
+  const p = S.status.projects.find((x) => x.name === name);
+  try {
+    const [old, latest] = await Promise.all([getSpec(name, version), getSpec(name, p.version)]);
+    const d = specChanges(old, latest);
+    await sheet({ title: `${name}: v${version} → v${p.version} (latest)`, ok: null, cancel: "Close", wide: true, html: `<div class="diff">${d.html}</div>` });
+  } catch (e) { fail(e); }
+}
+async function retry(name) {
+  const p = S.status.projects.find((x) => x.name === name);
+  try {
+    const spec = await getSpec(name, p.version);
+    await api("PUT", `/projects/${enc(name)}`, { compose: spec.compose, files: spec.files, port: spec.port, replicas: spec.replicas });
+    fast();
+    toast(`Retrying ${name} v${p.version}`);
+    loadStatus();
+  } catch (e) { fail(e); }
+}
+async function setEnabled(name, on) {
+  if (!on && !(await confirmSheet(`Disable ${name}?`, `Its containers stop on every machine and its URLs stop answering. Its spec and versions are kept, so you can enable it again.`, "Disable", "danger"))) return;
+  try {
+    await api("POST", `/projects/${enc(name)}/${on ? "enable" : "disable"}`);
+    fast();
+    toast(on ? `${name} is starting` : `${name} is stopping`, on ? {} : { action: { label: "Undo", fn: () => setEnabled(name, true) } });
+    loadStatus();
+  } catch (e) { fail(e); }
+}
+async function deleteApp(name) {
+  const p = S.status.projects.find((x) => x.name === name);
+  const ok = await sheet({
+    title: `Delete ${name}?`, ok: "Delete for good", okKind: "primary danger",
+    html: `<p>It stops on every machine, ${p.port ? "its URLs stop answering, " : ""}and all ${plural(p.version, "version")} are deleted. This can't be undone.</p>
+      <label class="f" for="del-name">Type <b>${esc(name)}</b> to confirm</label><input id="del-name" autocomplete="off" autocapitalize="off" spellcheck="false">`,
+    onOpen: (d) => $("#del-name", d).focus(),
+    onOk: async (d) => {
+      if ($("#del-name", d).value.trim() !== name) throw new Error(`Type ${name} exactly`);
+      await api("DELETE", `/projects/${enc(name)}`);
+      return true;
+    },
+  });
+  if (!ok) return;
+  toast(`${name} deleted`);
+  location.hash = "#/apps";
+  loadStatus();
+}
+async function moveSheet(name, from) {
+  const p = S.status.projects.find((x) => x.name === name);
+  const runs = runsBy(), live = S.metrics?.live ?? {};
+  const on = new Set(p.placed.map((x) => x.machine));
+  const opts = [...runs.values()].filter((r) => r.ready).sort((a, b) => a.machine - b.machine).map((r) => {
+    const h = live[r.machine]?.h;
+    const count = S.status.projects.filter((q) => q.placed.some((x) => x.machine === r.machine)).length;
+    const dis = on.has(r.machine);
+    return `<label class="opt${dis ? " dis" : ""}"><input type="radio" name="to" value="${r.machine}"${dis ? " disabled" : ""}>
+      <span><b>Machine ${r.machine}</b> <span class="meta">${h ? `CPU ${F.pct(h.cpu)} · memory ${F.pct(pctOf(h.memUsed, h.memTotal))} · ` : ""}${plural(count, "app")}${dis ? " · already runs it" : ""}</span></span></label>`;
+  }).join("");
+  const res = await sheet({
+    title: `Move ${name} off machine ${from}`, ok: "Move",
+    html: `<p class="meta">The new copy starts first and the old one is removed once the new one is healthy, so nothing goes down. The replica keeps its number and URL.</p>
+      <label class="opt"><input type="radio" name="to" value="" checked><span><b>The machine with the most room</b></span></label>${opts}`,
+    onOk: async (d) => {
+      const to = $("input[name=to]:checked", d).value;
+      await api("POST", `/projects/${enc(name)}/move?from=${from}${to ? `&to=${to}` : ""}`);
+      return { to };
+    },
+  });
+  if (!res) return;
+  fast();
+  toast(`Moving ${name} off machine ${from}${res.to ? ` to machine ${res.to}` : ""}`);
+  loadStatus();
+}
+async function saveReplicas(name) {
+  const p = S.status.projects.find((x) => x.name === name);
+  const want = pending.replicas[name];
+  try {
+    const spec = await getSpec(name, p.version);
+    await deploySpec(name, { compose: spec.compose, files: spec.files, port: spec.port, replicas: want }, `${name}: ${p.replicas} → ${want} replicas`);
+    delete pending.replicas[name];
+  } catch (e) { fail(e); }
+}
+
+// ======================================================================== fleet actions
+async function restartMachine(n) {
+  if (!(await confirmSheet(`Restart machine ${n}?`, "A replacement takes over before the old one leaves, so nothing goes down.", "Restart"))) return;
+  try {
+    if (await fleet(() => api("POST", `/roll?machine=${n}`, null, { fleet: true }))) { fast(); toast(`Machine ${n} is being replaced`); loadStatus(); }
+  } catch (e) { fail(e); }
+}
+async function evict(n) {
+  if (!(await confirmSheet(`Move every app off machine ${n}?`, "Each one goes to the machine with the most room; the new copy starts first and the old one is removed once it's healthy.", "Move apps off"))) return;
+  try {
+    const r = await fleet(() => api("POST", `/machines/${n}/evict`, null, { fleet: true }));
+    if (!r) return;
+    fast();
+    const parts = [r.moved.length ? `Moving ${r.moved.join(", ")} off machine ${n}` : `Nothing to move off machine ${n}`];
+    if (r.failed.length) parts.push(`couldn't move: ${r.failed.join("; ")}`);
+    toast(parts.join("; "), r.failed.length ? { kind: "failed" } : {});
+    loadStatus();
+  } catch (e) { fail(e); }
+}
+async function retireSlot(n) {
+  if (!(await confirmSheet(`Retire slot ${n}?`, `Its Cloudflare tunnel <code>runner-${n}</code> and every <code>&lt;app&gt;-m${n}</code> DNS name are deleted. A machine joining later gets a fresh slot.`, "Retire slot", "primary danger"))) return;
+  try {
+    const r = await fleet(() => api("DELETE", `/slots/${n}`, null, { fleet: true }));
+    if (r) { toast(`Slot ${n} retired`); location.hash = "#/machines"; loadStatus(); }
+  } catch (e) { fail(e); }
+}
+async function restartAll() {
+  if (!(await confirmSheet("Restart every machine?", `They're replaced one at a time, each by a fresh one that takes over before it leaves, so nothing goes down. With ${plural(runsBy().size, "machine")} this takes a while.`, "Restart all"))) return;
+  try {
+    if (await fleet(() => api("POST", "/roll", null, { fleet: true }))) { fast(); toast("Restarting machines one at a time"); loadStatus(); }
+  } catch (e) { fail(e); }
+}
+async function setRebalance(on) {
+  try {
+    const r = await fleet(() => api("PUT", "/settings", { rebalance: on }, { fleet: true }));
+    if (r) { toast(`Automatic rebalancing is ${r.rebalance ? "on" : "off"}`); loadStatus(); }
+  } catch (e) { fail(e); }
+}
+async function savePool(name) {
+  const want = pending.pools[name];
+  try {
+    const r = await fleet(() => api("PUT", "/settings", { pools: { [name]: want } }, { fleet: true }));
+    if (!r) return;
+    delete pending.pools[name];
+    fast();
+    toast(`Pool ${name} keeps ${plural(r.pools[name], "machine")}`);
+    loadStatus();
+  } catch (e) { fail(e); }
+}
+async function showJoin(pool, label) {
+  try {
+    const r = await fleet(() => api("GET", "/join-token", null, { fleet: true }));
+    if (!r) return;
+    const vars = [`JOIN_TOKEN=${r.token}`, pool && `POOL=${pool}`, label && `LABEL=${JSON.stringify(label)}`].filter(Boolean).join(" ");
+    joinInfo = { command: `curl -fsSL ${location.origin}/install.sh | sudo ${vars} sh`, slots: new Set(S.status.runs.map((x) => x.id)) };
+    view?.status?.();
+  } catch (e) { fail(e); }
+}
+
+// ======================================================================== views
+// Each view: { title, html, wantsMetrics, status() (status changed), charts() (metrics changed), click(e) }
+const main = $("#main");
+
+function vOverview() {
+  return {
+    title: "Overview", wantsMetrics: true,
+    html: `<h1>Overview</h1><div class="sub" id="ov-sub"></div>
+      <h2>Needs attention</h2><div id="ov-problems"></div>
+      <h2><span class="grow">Fleet now</span><a href="#/metrics">Metrics →</a></h2><div id="ov-tiles"><div class="meta">Loading…</div></div>
+      <h2><span class="grow">Apps</span><a href="#/apps">All apps →</a></h2><div class="cards" id="ov-apps"></div>
+      <h2><span class="grow">Machines</span><a href="#/machines">All machines →</a></h2><div class="cards two" id="ov-machines"></div>
+      <h2>Rebalancing</h2><div class="card" id="ov-activity"></div>`,
+    status() {
+      const st = S.status, runs = runsBy();
+      $("#ov-sub").textContent = `${plural(runs.size, "machine")} up${st.pools.length ? ` (pools want ${st.expected})` : ""} · ${plural(st.projects.length, "app")} · ${st.domain}`;
+      $("#ov-problems").innerHTML = problemList(problems());
+      $("#ov-apps").innerHTML = st.projects.map((p) => `<a class="card" href="${appHref(p.name)}">
+          <div class="row"><span class="name grow">${esc(p.name)}</span>${appPill(p, runs)}</div>
+          <div class="meta">v${p.version} · ${placedText(p)}</div>${replicaChips(p, runs, { links: false })}</a>`).join("")
+        || `<div class="card empty">No apps yet. <a href="#/apps/new">Deploy your first app</a></div>`;
+      $("#ov-machines").innerHTML = machineCards(true) || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`;
+      $("#ov-activity").innerHTML = rebalanceLog(5);
+    },
+    charts() { $("#ov-tiles").innerHTML = fleetTiles(); },
+  };
+}
+
+function rebalanceLog(limit) {
+  const r = S.status.rebalance;
+  return `<div class="meta">${r.on ? "On: a machine that stays hot (CPU over 85% or memory over 90% for 5 minutes) has its heaviest app moved off, and uneven spreads even out. One move every 10 minutes at most." : "Off: apps stay where they're placed until their machine goes away."}</div>
+    ${r.log.length ? `<div class="log">${r.log.slice(0, limit).map((x) => `<div>${esc(ago(S.status.now - x.t))} ago: ${esc(x.text)}</div>`).join("")}</div>` : `<div style="margin-top:8px" class="meta">Nothing moved yet.</div>`}`;
+}
+
+// Machine cards: state, label, pool, live CPU and memory, and what runs there.
+function machineCards(compact = false) {
+  const st = S.status, runs = runsBy(), live = S.metrics?.live ?? {};
+  return st.slots.map((n) => {
+    const r = runs.get(n), ms = machineState(n, r), h = live[n]?.h;
+    const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
+    const chips = apps.map(({ p, x }) => {
+      const s = r?.projects[p.name];
+      const kind = x.leaving ? "leaving" : runKind(s);
+      return `<span class="chip ${kind}"><i aria-hidden="true">${ICON[kind]}</i>${esc(p.name)}<sub>#${x.replica}</sub></span>`;
+    }).join("");
+    const errs = r ? Object.entries(r.projects).filter(([, s]) => s.s === "failed") : [];
+    return `<a class="card" href="${machineHref(n)}">
+      <div class="row"><span class="name grow">Machine ${n}</span>${pill(ms.kind, ms.text)}</div>
+      <div class="meta">${r ? `${esc(r.label || r.id)} · ${r.pool ? `pool ${esc(r.pool)}` : "standalone"}` : ms.kind === "deploying" ? "a pool member was asked to start one for this slot" : "not checking in"}</div>
+      ${h ? `<div class="meta" style="margin-top:6px">CPU ${F.pct(h.cpu)}${meter(h.cpu)} &nbsp; memory ${F.pct(pctOf(h.memUsed, h.memTotal))}${meter(pctOf(h.memUsed, h.memTotal))} ${compact ? "" : spark(hcol(n, "cpu"))}</div>` : ""}
+      ${chips ? `<div class="chips">${chips}</div>` : compact ? "" : `<div class="meta" style="margin-top:6px">No apps placed here</div>`}
+      ${!compact && errs.length ? `<div class="errbox">${errs.map(([name, s]) => `<div class="item"><b>${esc(name)}</b> v${esc(s.v)}<pre>${esc(s.e || "failed")}</pre></div>`).join("")}</div>` : ""}
+    </a>`;
+  }).join("");
+}
+
+function vApps() {
+  return {
+    title: "Apps",
+    html: `<div class="row"><h1 class="grow">Apps</h1><a class="btn primary" href="#/apps/new">New app</a></div>
+      <div class="sub">Anyone can deploy, edit and remove apps. Each app runs as many replicas as it asks for, on the machines with the most room.</div>
+      <div id="apps-filter"></div><div class="cards" id="apps-list" style="margin-top:14px"></div>`,
+    status() {
+      const st = S.status, runs = runsBy();
+      if (st.projects.length > 5 && !$("#apps-filter input")) {
+        $("#apps-filter").innerHTML = `<input type="search" placeholder="Filter apps" aria-label="Filter apps" style="margin-top:14px" value="${esc(S.filter)}">`;
+        $("#apps-filter input").oninput = (e) => { S.filter = e.target.value; this.status(); };
+      }
+      const list = st.projects.filter((p) => p.name.includes(S.filter.trim().toLowerCase()));
+      $("#apps-list").innerHTML = list.map((p) => `<div class="card">
+          <div class="row"><a class="name grow" href="${appHref(p.name)}">${esc(p.name)}</a>${appPill(p, runs)}</div>
+          <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} still running)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${placedText(p)} · ${p.files.length ? "built from files" : "published images"}</div>
+          ${p.port ? `<div class="meta url" style="margin-top:4px"><a href="${esc(sharedUrl(p))}" target="_blank" rel="noopener">${esc(sharedUrl(p).slice(8, -1))}</a></div>` : ""}
+          ${appStatusBlock(p, runs)}${replicaChips(p, runs)}
+          <div class="actions"><a class="btn small" href="${appHref(p.name)}">Open</a><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit</a></div>
+        </div>`).join("")
+        || (st.projects.length ? `<div class="card empty">No app matches “${esc(S.filter)}”</div>`
+          : `<div class="card empty">No apps yet.<div class="actions" style="justify-content:center"><a class="btn primary" href="#/apps/new">Deploy your first app</a><a class="btn" href="#/apps/new?sample=whoami">Try an example</a></div></div>`);
+    },
+  };
+}
+
+function vApp(name) {
+  const st = { spec: null, shown: null, tab: null, version: null };
+  const loadSpec = async (version) => {
+    try {
+      st.spec = await getSpec(name, version);
+      st.shown = version;
+      renderSpec();
+      if (view?.title === name && S.status) view.status(); // the versions list comes with the spec
+    } catch (e) { $("#ad-spec").innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
+  };
+  function renderSpec() {
+    const p = S.status.projects.find((x) => x.name === name);
+    if (!st.spec || !p) return;
+    const files = specFiles(st.spec);
+    if (!files.some(([path]) => path === st.tab)) st.tab = files[0]?.[0] ?? null;
+    const cur = files.find(([path]) => path === st.tab);
+    $("#ad-spec").innerHTML = `<div class="row" style="margin-bottom:8px">
+        <select id="ad-version" aria-label="Version" style="width:auto">${[...st.spec.versions].reverse().map((v) =>
+          `<option value="${v.version}"${v.version === st.shown ? " selected" : ""}>v${v.version}${v.version === p.version ? " (latest)" : ""}${v.version === p.stable ? " (good)" : ""}</option>`).join("")}</select>
+        <span class="meta grow">${plural(files.length, "file")} · port ${st.spec.port ?? "none"}</span>
+        <button type="button" class="small" data-act="copyfile"${cur ? "" : " disabled"}>Copy</button></div>
+      ${files.length ? `<div class="ftabs" role="tablist">${files.map(([path]) => `<button type="button" class="ftab" role="tab" aria-selected="${path === st.tab}" data-tab="${esc(path)}">${esc(path)}</button>`).join("")}</div><pre class="code" id="ad-code"></pre>` : `<div class="card empty">No files</div>`}`;
+    if (cur) $("#ad-code").textContent = cur[1];
+    $("#ad-version").onchange = (e) => loadSpec(Number(e.target.value));
+  }
+  return {
+    title: name, wantsMetrics: true,
+    html: `<a class="back" href="#/apps">← Apps</a><div id="ad-head"></div><div id="ad-status"></div>
+      <h2>Replicas</h2><div id="ad-replicas"></div>
+      <h2><span class="grow">Usage</span>${rangeSeg()}</h2><div id="ad-charts"><div class="meta">Loading…</div></div>
+      <h2>Spec</h2><div id="ad-spec"><div class="meta">Loading…</div></div>
+      <h2>Versions</h2><div id="ad-versions"></div>`,
+    status() {
+      const p = S.status.projects.find((x) => x.name === name);
+      if (!p) {
+        this.missing = true;
+        main.innerHTML = `<a class="back" href="#/apps">← Apps</a><h1>No app called ${esc(name)}</h1><p class="meta">It may have been deleted. <a href="#/apps/new">Deploy a new app</a></p>`;
+        return;
+      }
+      if (this.missing) { // it showed up (just deployed, say): put the page back
+        this.missing = false;
+        main.innerHTML = this.html;
+        st.version = null;
+        if (S.metrics) setTimeout(() => this.charts());
+      }
+      const runs = runsBy();
+      if (st.version !== p.version) { // first time, or a new version arrived
+        const follow = st.shown == null || st.shown === st.version;
+        st.version = p.version;
+        if (follow) loadSpec(p.version);
+      }
+      document.title = `${name} · Runner`;
+      $("#ad-head").innerHTML = `<div class="row"><h1 class="grow">${esc(name)}</h1>${appPill(p, runs)}</div>
+        <div class="sub">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · updated ${ago(S.status.now - p.updated)} ago · ${p.files.length ? "built from files" : "published images"}</div>
+        ${p.port ? `<div class="url" style="margin-top:4px"><a href="${esc(sharedUrl(p))}" target="_blank" rel="noopener"><b>${esc(sharedUrl(p).slice(8, -1))}</b></a> <span class="meta">sends each visitor to one healthy replica</span></div>` : ""}
+        <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit</a>
+          ${p.halted ? `<button type="button" data-act="retry">Retry v${p.version}</button>` : ""}
+          <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}</button>
+          <button type="button" class="danger" data-act="delete">Delete</button></div>`;
+      $("#ad-status").innerHTML = appStatusBlock(p, runs, { full: true });
+      const want = pending.replicas[name] ?? p.replicas;
+      const up = [...runs.values()].filter((r) => r.ready).length;
+      const rows = copies(p, true).map((x) => {
+        const r = x.machine != null ? runs.get(x.machine) : null;
+        const s = r?.projects[p.name];
+        const target = !p.enabled ? null : p.halted ? p.stable : p.version;
+        const kind = x.leaving ? "leaving" : x.machine == null ? "gone" : !r ? "gone" : runKind(s);
+        const text = x.leaving ? `moving to machine ${x.leaving.to}` : x.machine == null ? (x.replica > up ? "no machine free (starts when one joins)" : "waiting for a machine") : !r ? "machine down" : s ? s.s : "not running yet";
+        return { cells: [
+          `<b><span class="mob">Replica </span>${x.replica}</b>`,
+          x.machine != null ? `<a href="${machineHref(x.machine)}">Machine ${x.machine}</a>` : "–",
+          `${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="s">→ v${target}</span>` : ""}`,
+          `${pill(kind, text)}${x.since && !x.leaving ? `<div class="s">placed ${esc(ago(S.status.now - x.since))} ago: ${esc(x.reason)}</div>` : ""}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`,
+          p.port && !x.leaving ? `<a class="url" href="${esc(replicaUrl(p, x.replica))}" target="_blank" rel="noopener">${esc(replicaUrl(p, x.replica).slice(8, -1))}</a>` : `<span class="s">${p.port ? "" : "no port"}</span>`,
+          x.since && !x.leaving ? `<button type="button" class="small" data-act="move" data-machine="${x.machine}">Move</button>` : "",
+        ] };
+      });
+      $("#ad-replicas").innerHTML = `<div class="card" style="margin-bottom:10px"><div class="row">
+          <span class="grow"><b>Replicas</b><div class="meta">1–${MAX_REPLICAS}, each on a different machine; replica k is always at ${esc(name)}-k.</div></span>
+          <span class="stepper"><button type="button" data-act="rep" data-d="-1" aria-label="Fewer replicas"${want <= 1 ? " disabled" : ""}>−</button><b aria-live="polite">${want}</b><button type="button" data-act="rep" data-d="1" aria-label="More replicas"${want >= MAX_REPLICAS ? " disabled" : ""}>+</button></span>
+          ${want !== p.replicas ? `<button type="button" class="primary" data-act="saverep">Save (${p.replicas} → ${want})</button><button type="button" data-act="cancelrep">Cancel</button>` : ""}</div>
+          ${want > up ? `<div class="hint">${plural(up, "machine")} up, so it runs on all ${up}; replica${want - up > 1 ? `s ${up + 1}–${want} start` : ` ${want} starts`} when more machines join (until then ${want - up > 1 ? "their URLs answer" : "its URL answers"} 503).</div>` : ""}
+          ${want !== p.replicas ? `<div class="hint">Saving makes a new version with the same files.</div>` : ""}</div>
+        ${table(["Replica", "Machine", "Version", "State", "URL", ""], rows)}`;
+      const versions = st.spec?.versions ?? [];
+      $("#ad-versions").innerHTML = table(["Version", "", "Port", "Replicas", "Created", ""], [...versions].reverse().map((v) => ({
+        cls: v.version === st.shown ? "shown" : "",
+        cells: [`<b>v${v.version}</b>`, `${v.version === p.version ? `<span class="pill gone">latest</span>` : ""} ${v.version === p.stable ? pill("healthy", "good") : ""}`,
+          esc(v.port ?? "–"), esc(v.replicas), `<span class="s">${esc(new Date(v.created).toLocaleString())}</span>`,
+          `<span class="row"><button type="button" class="small" data-act="view" data-v="${v.version}">View</button>${v.version !== p.version ? `<button type="button" class="small" data-act="diff" data-v="${v.version}">Changes</button><button type="button" class="small" data-act="rollback" data-v="${v.version}">Roll back</button>` : ""}</span>`],
+      })), { empty: "Loading…" });
+    },
+    charts() {
+      const box = $("#ad-charts");
+      if (!box) return;
+      box.replaceChildren();
+      const ms = machineNums();
+      const inst = liveRows().filter((r) => r.a?.[name]).map((r) => ({ r, v: r.a[name] }));
+      const total = (k) => inst.reduce((s, x) => s + (x.v[k] ?? 0), 0);
+      box.insertAdjacentHTML("beforeend", tiles([
+        { label: "CPU", value: F.cores(total("cpu")), sub: `${plural(inst.length, "machine")} running it` },
+        { label: "Memory", value: bytes(total("mem")), sub: "all replicas" },
+        { label: "Disk read", value: F.rate(total("diskRead")), sub: `write ${F.rate(total("diskWrite"))}` },
+        { label: "Network in", value: F.rate(total("netRx")), sub: `out ${F.rate(total("netTx"))}` },
+      ]));
+      const A = (k) => combine(ms.map((m) => acol(m, name, k)), "sum");
+      const g = section(box, "All replicas together");
+      g.previousElementSibling.style.marginTop = "18px";
+      lineChart(ccard(g, "CPU"), [{ name: "CPU", values: A("cpu") }], { unit: "cores" });
+      lineChart(ccard(g, "Memory"), [{ name: "memory", values: A("mem") }], { unit: "bytes" });
+      const heat = section(box, "Per machine");
+      heatmap(ccard(heat, "CPU", "cores, per machine", true), ms.filter((m) => acol(m, name, "cpu")?.some(isNum)).map((m) => ({ name: `machine ${m}`, values: acol(m, name, "cpu"), href: machineHref(m) })), { unit: "cores" });
+      moreSection(box, (mg) => {
+        lineChart(ccard(mg, "Disk I/O"), [{ name: "read", values: A("diskRead") }, { name: "write", values: A("diskWrite") }], { unit: "rate" });
+        lineChart(ccard(mg, "Network I/O", "apps on host networking aren't counted"), [{ name: "in", values: A("netRx") }, { name: "out", values: A("netTx") }], { unit: "rate" });
+      });
+    },
+    async click(e) {
+      const b = e.target.closest("[data-act],[data-tab]");
+      if (!b) return;
+      if (b.dataset.tab) { st.tab = b.dataset.tab; return renderSpec(); }
+      const p = S.status.projects.find((x) => x.name === name);
+      const act = b.dataset.act, v = Number(b.dataset.v);
+      if (act === "retry") return retry(name);
+      if (act === "disable") return setEnabled(name, false);
+      if (act === "enable") return setEnabled(name, true);
+      if (act === "delete") return deleteApp(name);
+      if (act === "move") return moveSheet(name, Number(b.dataset.machine));
+      if (act === "rep") { pending.replicas[name] = Math.max(1, Math.min(MAX_REPLICAS, (pending.replicas[name] ?? p.replicas) + Number(b.dataset.d))); if (pending.replicas[name] === p.replicas) delete pending.replicas[name]; return this.status(); }
+      if (act === "cancelrep") { delete pending.replicas[name]; return this.status(); }
+      if (act === "saverep") return saveReplicas(name);
+      if (act === "view") { await loadSpec(v); this.status(); return $("#ad-spec").scrollIntoView({ behavior: "smooth", block: "start" }); }
+      if (act === "diff") return showDiff(name, v);
+      if (act === "rollback") return rollback(name, v);
+      if (act === "copyfile") {
+        const f = specFiles(st.spec).find(([path]) => path === st.tab);
+        try { await navigator.clipboard.writeText(f[1]); toast(`Copied ${f[0]}`); } catch { toast("Couldn't copy", { kind: "failed" }); }
+      }
+    },
+  };
+}
+
+const SAMPLES = {
+  whoami: { name: "whoami", port: 8080, replicas: 2, compose: "services:\n  web:\n    image: traefik/whoami\n    command: [\"--port\", \"8080\"]\n    ports: [\"8080:8080\"]\n    restart: unless-stopped\n" },
+  hello: { name: "hello", port: 9000, dockerfile: "FROM python:3.12-alpine\nWORKDIR /app\nCOPY index.html .\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]\n", files: { "index.html": "<h1>Hello from runner</h1>\n" } },
+};
+let dirty = false;
+
+function vEditor(name, sample) {
+  let latest = null;
+  const fileRow = (path = "", content = "") => `<div class="file"><div class="row"><input class="grow f-path" placeholder="path, e.g. web/Dockerfile" autocapitalize="off" spellcheck="false" value="${esc(path)}">
+    <button type="button" class="small danger" data-act="rmfile">Remove</button></div><textarea class="f-content" spellcheck="false">${esc(content)}</textarea></div>`;
+  function fill(spec) {
+    const files = { ...(spec.files || {}) };
+    if (spec.name && !name) $("#ed-name").value = spec.name;
+    $("#ed-port").value = spec.port ?? "";
+    $("#ed-replicas").value = spec.replicas ?? "";
+    $("#ed-compose").value = spec.compose || "";
+    $("#ed-dockerfile").value = spec.dockerfile ?? files.Dockerfile ?? "";
+    delete files.Dockerfile;
+    $("#ed-files").innerHTML = Object.entries(files).map(([p, c]) => fileRow(p, c)).join("");
+    checkName();
+  }
+  function formSpec() {
+    const files = {};
+    for (const div of $$("#ed-files .file")) {
+      const path = $(".f-path", div).value.trim();
+      if (path) files[path] = $(".f-content", div).value;
+    }
+    const body = { compose: $("#ed-compose").value, files };
+    if ($("#ed-dockerfile").value.trim()) body.dockerfile = $("#ed-dockerfile").value;
+    if ($("#ed-port").value) body.port = Number($("#ed-port").value);
+    if ($("#ed-replicas").value.trim()) body.replicas = Number($("#ed-replicas").value);
+    return body;
+  }
+  // The form as a spec for comparing: the Dockerfile counts as a file.
+  const formAsSpec = () => {
+    const b = formSpec();
+    return { compose: b.compose, files: { ...b.files, ...(b.dockerfile ? { Dockerfile: b.dockerfile } : {}) }, port: b.port ?? latest?.port ?? null, replicas: b.replicas ?? latest?.replicas ?? 1 };
+  };
+  function checkName() {
+    if (name) return true;
+    const v = $("#ed-name").value.trim();
+    const msg = !v ? "" : !NAME.test(v) ? "Lowercase letters, digits and dashes; it can't start or end with a dash"
+      : /-m?\d+$/.test(v) ? "It can't end in -<number> or -m<number>: those are the URLs of replicas and machines"
+      : S.status?.projects.some((p) => p.name === v) ? "There's already an app with this name; open it to edit it" : "";
+    $("#ed-name-hint").textContent = msg || `Replica k will be at https://${v || "name"}-k.${S.status?.domain ?? "…"}`;
+    $("#ed-name-hint").className = "hint" + (msg ? " bad" : "");
+    return !msg && Boolean(v);
+  }
+  async function addUploads(list) {
+    let n = 0;
+    const skipped = [];
+    for (const f of list) {
+      const parts = (f.webkitRelativePath || f.name).split("/");
+      const path = (f.webkitRelativePath ? parts.slice(1) : parts).join("/");
+      if (/(^|\/)(\.git|node_modules|__pycache__|\.venv)\//.test(path) || path === ".DS_Store") continue;
+      if (f.size > 250_000) { skipped.push(path); continue; }
+      const text = await f.text();
+      if (text.includes("\u0000")) { skipped.push(path); continue; }
+      if (/^(docker-)?compose\.ya?ml$/i.test(path)) $("#ed-compose").value = text;
+      else if (path === "Dockerfile") $("#ed-dockerfile").value = text;
+      else {
+        const row = $$("#ed-files .file").find((d) => $(".f-path", d).value.trim() === path);
+        if (row) $(".f-content", row).value = text;
+        else $("#ed-files").insertAdjacentHTML("beforeend", fileRow(path, text));
+      }
+      n++;
+    }
+    dirty = true;
+    toast(`Added ${plural(n, "file")}${skipped.length ? `; skipped ${skipped.join(", ")} (binary or over 250 KB)` : ""}`, skipped.length ? { kind: "failed" } : {});
+  }
+  return {
+    title: name ? `Edit ${name}` : "New app",
+    html: `<a class="back" href="${name ? appHref(name) : "#/apps"}">← ${name ? esc(name) : "Apps"}</a>
+      <h1>${name ? `Edit ${esc(name)}` : "New app"}</h1>
+      <div class="sub">${name ? "Deploying makes a new version; the replicas switch to it, and if it fails they go back to the last good one." : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
+      ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button></div>`}
+      <div class="errbox" id="ed-error" role="alert" hidden></div>
+      <form id="ed-form" novalidate>
+        ${name ? "" : `<label class="f" for="ed-name">Name</label><input id="ed-name" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app"><p class="hint" id="ed-name-hint"></p>`}
+        <div class="row" style="gap:16px;align-items:flex-start">
+          <div><label class="f" for="ed-port">Port</label><input id="ed-port" type="number" min="1" max="65535" placeholder="8080" style="width:130px" inputmode="numeric"></div>
+          <div><label class="f" for="ed-replicas">Replicas</label><input id="ed-replicas" inputmode="numeric" placeholder="1" style="width:100px" autocomplete="off"></div>
+        </div>
+        <p class="hint">Port: what the app listens on (or <code>x-runner.port</code> in the compose file; none keeps it offline). Replicas: 1–10 (default 1), each on a different machine; with fewer machines than that, it runs on all of them.</p>
+        <label class="f" for="ed-compose">Docker Compose</label>
+        <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
+        <p class="hint">Optional with a Dockerfile: then one service is made that builds it and publishes the port.</p>
+        <label class="f" for="ed-dockerfile">Dockerfile</label>
+        <textarea id="ed-dockerfile" spellcheck="false" placeholder="FROM node:22-alpine&#10;WORKDIR /app&#10;COPY . .&#10;CMD [&quot;node&quot;, &quot;server.js&quot;]"></textarea>
+        <label class="f">Other files</label>
+        <div id="ed-files"></div>
+        <div class="actions">
+          <button type="button" data-act="addfile">Add a file</button>
+          <button type="button" data-act="upload">Upload files</button>
+          <button type="button" data-act="uploaddir">Upload a folder</button>
+          <input type="file" id="ed-up" multiple hidden><input type="file" id="ed-updir" webkitdirectory hidden>
+        </div>
+        <p class="hint">Anything the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>, with paths relative to the compose file. A compose file and a top-level Dockerfile from an upload go in their boxes. Text only: 30 files, 250 KB in all.</p>
+        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : ""}
+        <div class="formfoot">${name ? `<button type="button" data-act="changes">Show changes</button><span class="spacer"></span>` : ""}<a class="btn" href="${name ? appHref(name) : "#/apps"}">Cancel</a><button type="submit" class="primary" id="ed-save">Deploy</button></div>
+      </form>`,
+    async mount() {
+      dirty = false;
+      const form = $("#ed-form");
+      form.addEventListener("input", (e) => { dirty = true; if (e.target.id === "ed-name") checkName(); });
+      $("#ed-up").onchange = (e) => addUploads(e.target.files);
+      $("#ed-updir").onchange = (e) => addUploads(e.target.files);
+      form.onsubmit = async (ev) => {
+        ev.preventDefault();
+        const err = $("#ed-error");
+        err.hidden = true;
+        const n = name || $("#ed-name").value.trim();
+        if (!name && !checkName()) { $("#ed-name").focus(); $("#ed-name-hint").className = "hint bad"; if (!n) $("#ed-name-hint").textContent = "Give the app a name"; return; }
+        $("#ed-save").disabled = true;
+        $("#ed-save").textContent = "Deploying…";
+        try {
+          const p = await api("PUT", `/projects/${enc(n)}`, formSpec());
+          dirty = false;
+          fast();
+          toast(p.unchanged ? `${n} is already running that` : `Deploying ${n} v${p.version}`);
+          location.hash = appHref(n);
+          loadStatus();
+        } catch (e) {
+          err.innerHTML = `<b>Not deployed:</b> ${esc(e.message)}`;
+          err.hidden = false;
+          err.scrollIntoView({ behavior: "smooth", block: "center" });
+        } finally {
+          $("#ed-save").disabled = false;
+          $("#ed-save").textContent = "Deploy";
+        }
+      };
+      if (name) {
+        try {
+          const p = await api("GET", `/projects/${enc(name)}`);
+          latest = p;
+          fill(p);
+        } catch (e) { fail(e); }
+      } else if (sample && SAMPLES[sample]) fill(SAMPLES[sample]);
+      else checkName();
+    },
+    async click(e) {
+      const b = e.target.closest("[data-act]");
+      if (!b) return;
+      const act = b.dataset.act;
+      if (act === "addfile") { $("#ed-files").insertAdjacentHTML("beforeend", fileRow()); $("#ed-files .file:last-child .f-path").focus(); }
+      if (act === "rmfile") { b.closest(".file").remove(); dirty = true; }
+      if (act === "upload") $("#ed-up").click();
+      if (act === "uploaddir") $("#ed-updir").click();
+      if (act === "sample") { fill(SAMPLES[b.dataset.s]); dirty = true; }
+      if (act === "changes" && latest) {
+        const box = $("#ed-diff");
+        if (box.innerHTML) { box.innerHTML = ""; b.textContent = "Show changes"; return; }
+        const d = specChanges(latest, formAsSpec());
+        box.innerHTML = `<h2>Changes since v${latest.version}</h2><div class="diff">${d.html}</div>`;
+        b.textContent = "Hide changes";
+      }
+    },
+  };
+}
+
+function vMachines() {
+  return {
+    title: "Machines", wantsMetrics: true,
+    html: `<h1>Machines</h1><div class="sub" id="mc-sub"></div><div class="cards two" id="mc-list" style="margin-top:14px"></div>`,
+    status() {
+      const runs = runsBy();
+      $("#mc-sub").innerHTML = `${plural(runs.size, "machine")} up · ${S.status.pools.map((p) => `pool ${esc(p.name)}: ${p.live} of ${p.size}`).join(" · ") || "no pools"} · <a href="#/fleet">Fleet settings</a>`;
+      $("#mc-list").innerHTML = machineCards() || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`;
+    },
+  };
+}
+
+function vMachine(n) {
+  return {
+    title: `Machine ${n}`, wantsMetrics: true,
+    html: `<a class="back" href="#/machines">← Machines</a><div id="md-head"></div>
+      <h2>Apps here</h2><div id="md-apps"></div>
+      <h2><span class="grow">Usage</span>${rangeSeg()}</h2><div id="md-charts"><div class="meta">Loading…</div></div>
+      <h2>Fleet actions</h2><div id="md-actions"></div>`,
+    status() {
+      const st = S.status, runs = runsBy(), r = runs.get(n), ms = machineState(n, r);
+      const known = st.slots.includes(n) || r;
+      $("#md-head").innerHTML = `<div class="row"><h1 class="grow">Machine ${n}</h1>${pill(ms.kind, ms.text)}</div>
+        <div class="sub">${r ? `${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : esc(r.label || r.id)} · ${r.pool ? `pool ${esc(r.pool)}` : "standalone"} · up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
+      const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
+      $("#md-apps").innerHTML = table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
+        const s = r?.projects[p.name];
+        const kind = x.leaving ? "leaving" : !r ? "gone" : runKind(s);
+        return { href: appHref(p.name), cells: [`<a href="${appHref(p.name)}"><b>${esc(p.name)}</b></a>`, `#${x.replica}`, s ? `v${esc(s.v)}` : "–",
+          `${pill(kind, x.leaving ? `moving to machine ${x.leaving.to}` : !r ? "machine down" : s ? s.s : "not running yet")}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`] };
+      }), { empty: "No apps are placed here" });
+      $("#md-actions").innerHTML = `<div class="card"><p class="meta" style="margin-top:0">These change the fleet, so they need the password.</p><div class="actions">
+        ${r ? `<button type="button" data-act="restart">Restart${lockmark()}</button><button type="button" data-act="evict">Move apps off${lockmark()}</button>`
+          : `<button type="button" class="danger" data-act="retire">Retire slot ${n}${lockmark()}</button>`}</div></div>`;
+    },
+    charts() {
+      const box = $("#md-charts");
+      if (!box) return;
+      box.replaceChildren();
+      const live = M().live[n], x = live?.h ?? {};
+      const H = (k) => hcol(n, k);
+      if (live) box.insertAdjacentHTML("beforeend", tiles([
+        { label: "CPU", value: F.pct(x.cpu) },
+        { label: "Memory used", value: F.pct(pctOf(x.memUsed, x.memTotal)), sub: `${bytes(x.memUsed)} of ${bytes(x.memTotal)}` },
+        { label: "Disk read", value: F.rate(x.diskRead), sub: `write ${F.rate(x.diskWrite)}` },
+        { label: "Network in", value: F.rate(x.netRx), sub: `out ${F.rate(x.netTx)}` },
+      ]));
+      const g = section(box, "Machine");
+      lineChart(ccard(g, "CPU", "average and peak, % of all cores"), [{ name: "average", values: H("cpu") }, { name: "peak", values: H("cpuMax") }], { unit: "pct" });
+      lineChart(ccard(g, "Memory used"), [{ name: "used", values: H("memUsed") }], { unit: "bytes", ref: { name: "installed", value: x.memTotal ?? Math.max(0, ...(H("memTotal") ?? []).filter(isNum)) } });
+      const apps = section(box, "Apps on this machine");
+      const A = (k) => (a) => acol(n, a, k);
+      lineChart(ccard(apps, "CPU by app"), appStack(A("cpu")), { unit: "cores", stacked: true });
+      lineChart(ccard(apps, "Memory by app"), appStack(A("mem")), { unit: "bytes", stacked: true });
+      if (live) {
+        const rows = Object.entries(live.a).sort(([a], [b]) => (a === "_system") - (b === "_system") || a.localeCompare(b)).map(([a, v]) => ({
+          href: a === "_system" ? null : appHref(a), cells: [`<b>${esc(appLabel(a))}</b>`, F.cores(v.cpu), bytes(v.mem), io(v.diskRead, v.diskWrite), io(v.netRx, v.netTx)] }));
+        const h = document.createElement("h2");
+        h.textContent = "Apps now";
+        box.append(h);
+        box.insertAdjacentHTML("beforeend", table(["App", "CPU", "Memory", "Disk read / write", "Network in / out"], rows, { num: [1, 2, 3, 4] }));
+      }
+      moreSection(box, (mg) => {
+        lineChart(ccard(mg, "Disk I/O"), [{ name: "read", values: H("diskRead") }, { name: "write", values: H("diskWrite") }], { unit: "rate" });
+        lineChart(ccard(mg, "Network I/O"), [{ name: "in", values: H("netRx") }, { name: "out", values: H("netTx") }], { unit: "rate" });
+      });
+    },
+    click(e) {
+      const b = e.target.closest("[data-act]");
+      if (!b) return;
+      if (b.dataset.act === "restart") restartMachine(n);
+      if (b.dataset.act === "evict") evict(n);
+      if (b.dataset.act === "retire") retireSlot(n);
+    },
+  };
+}
+
+function vMetrics() {
+  return {
+    title: "Metrics", wantsMetrics: true,
+    html: `<div class="row"><h1 class="grow">Metrics</h1>${rangeSeg()}</div><div class="sub" id="mx-sub">Loading…</div><div id="mx"></div>`,
+    charts() {
+      const box = $("#mx");
+      if (!box) return;
+      box.replaceChildren();
+      $("#mx-sub").textContent = `${S.metrics.step / 60000}-minute points · updated ${ago(Date.now() - S.metricsAt)} ago`;
+      box.insertAdjacentHTML("beforeend", `<h2>Fleet now</h2>${fleetTiles()}<h2>Machines now</h2>`);
+      box.insertAdjacentHTML("beforeend", table(["Machine", "CPU", "Memory", "Disk read / write", "Network in / out"], liveRows().map((r) => ({
+        href: machineHref(r.m),
+        cells: [`<a href="${machineHref(r.m)}"><b>Machine ${r.m}</b></a>${r.ready ? "" : ' <span class="s">starting</span>'}`,
+          `${spark(hcol(r.m, "cpu"))} ${F.pct(r.h.cpu)}${meter(r.h.cpu)}`,
+          `${F.pct(pctOf(r.h.memUsed, r.h.memTotal))}${meter(pctOf(r.h.memUsed, r.h.memTotal))} <span class="s">${bytes(r.h.memUsed)}</span>`,
+          io(r.h.diskRead, r.h.diskWrite), io(r.h.netRx, r.h.netTx)],
+      })), { empty: "Nothing reporting right now", num: [1, 2, 3, 4] }));
+      const ms = machineNums();
+      const heat = section(box, "Per machine", `<span class="seg" role="group" aria-label="Heatmap shows"><button type="button" data-heat="cpu" aria-pressed="${S.heat === "cpu"}">CPU</button><button type="button" data-heat="mem" aria-pressed="${S.heat === "mem"}">Memory</button></span>`);
+      const rows = ms.map((m) => ({ name: `machine ${m}`, href: machineHref(m),
+        values: S.heat === "cpu" ? hcol(m, "cpu") : map2(hcol(m, "memUsed"), hcol(m, "memTotal"), (u, t) => (100 * u) / t) }));
+      heatmap(ccard(heat, S.heat === "cpu" ? "CPU" : "Memory", `% ${S.heat === "cpu" ? "of all cores" : "used"} · tap a machine's name to open it`, true), rows, { unit: "pct", max: 100 });
+      const g = section(box, "Whole fleet");
+      lineChart(ccard(g, "CPU", "average across machines, and the busiest machine"), [{ name: "average", values: fleetH("cpu", "avg") }, { name: "busiest machine", values: fleetH("cpu", "max") }], { unit: "pct" });
+      lineChart(ccard(g, "Memory by app", "summed over machines"), appStack((a) => combine(ms.map((m) => acol(m, a, "mem")), "sum")), { unit: "bytes", stacked: true });
+      lineChart(ccard(g, "CPU by app", "summed over machines"), appStack((a) => combine(ms.map((m) => acol(m, a, "cpu")), "sum")), { unit: "cores", stacked: true });
+      lineChart(ccard(g, "Memory used", "all machines"), [{ name: "used", values: fleetH("memUsed") }], { unit: "bytes", ref: { name: "installed", value: Math.max(0, ...fleetH("memTotal").filter(isNum)) } });
+      moreSection(box, (mg) => {
+        lineChart(ccard(mg, "Disk I/O", "all machines"), [{ name: "read", values: fleetH("diskRead") }, { name: "write", values: fleetH("diskWrite") }], { unit: "rate" });
+        lineChart(ccard(mg, "Network I/O", "all machines"), [{ name: "in", values: fleetH("netRx") }, { name: "out", values: fleetH("netTx") }], { unit: "rate" });
+      });
+    },
+    click(e) {
+      const b = e.target.closest("[data-heat]");
+      if (!b) return;
+      S.heat = b.dataset.heat;
+      localStorage.setItem("metrics-heat", S.heat);
+      this.charts();
+    },
+  };
+}
+
+function vFleet() {
+  return {
+    title: "Fleet",
+    html: `<h1>Fleet</h1><div class="sub">Everyone can see this page; changing anything here needs the fleet password.</div>
+      <h2>Pools</h2><div id="fl-pools"></div>
+      <h2>Rebalancing</h2><div id="fl-rebalance"></div>
+      <h2>Restart</h2><div class="card"><div class="row"><span class="grow meta">Replace every machine, one at a time, without downtime (for example after changing the agent).</span><button type="button" data-act="rollall" id="fl-roll"></button></div></div>
+      <h2>Add a machine</h2><div id="fl-join"></div>`,
+    status() {
+      const st = S.status;
+      $("#fl-pools").innerHTML = `<div class="cards">${st.pools.map((p) => {
+        const want = pending.pools[p.name] ?? p.size;
+        return `<div class="card"><div class="row"><span class="grow"><b>Pool ${esc(p.name)}</b><div class="meta">${p.live} of ${p.size} machines up</div></span>
+          <span class="stepper"><button type="button" data-act="pool" data-pool="${esc(p.name)}" data-d="-1" aria-label="Fewer machines in ${esc(p.name)}"${want <= 0 ? " disabled" : ""}>−</button><b aria-live="polite">${want}</b><button type="button" data-act="pool" data-pool="${esc(p.name)}" data-d="1" aria-label="More machines in ${esc(p.name)}">+</button></span>
+          ${want !== p.size ? `<button type="button" class="primary" data-act="savepool" data-pool="${esc(p.name)}">Save (${p.size} → ${want})${lockmark()}</button><button type="button" data-act="cancelpool" data-pool="${esc(p.name)}">Cancel</button>` : ""}</div></div>`;
+      }).join("") || `<div class="card empty">No pools. Machines that join without a pool are standalone and keep their slot.</div>`}</div>
+        <p class="hint">A pool is a set of interchangeable machines; the control plane keeps it at its size by having members (or whatever watches the pool) start replacements.</p>`;
+      $("#fl-rebalance").innerHTML = `<div class="card"><div class="row"><span class="grow"><b>Automatic rebalancing</b></span>
+        <button type="button" class="switch" data-act="rebalance" aria-pressed="${st.rebalance.on}">${st.rebalance.on ? "✓ On" : "○ Off"}${lockmark()}</button></div>${rebalanceLog(10)}</div>`;
+      $("#fl-roll").innerHTML = `Restart all${lockmark()}`;
+      $("#fl-join").innerHTML = `<div class="card"><div class="row"><span class="grow meta">Any Linux machine with Docker can join the fleet with one command.</span><a class="btn" href="#/contribute">How to contribute a machine</a></div></div>`;
+    },
+    click(e) {
+      const b = e.target.closest("[data-act]");
+      if (!b) return;
+      const act = b.dataset.act, pool = b.dataset.pool;
+      const p = S.status.pools.find((x) => x.name === pool);
+      if (act === "pool") { pending.pools[pool] = Math.max(0, (pending.pools[pool] ?? p.size) + Number(b.dataset.d)); if (pending.pools[pool] === p.size) delete pending.pools[pool]; this.status(); }
+      if (act === "cancelpool") { delete pending.pools[pool]; this.status(); }
+      if (act === "savepool") savePool(pool);
+      if (act === "rebalance") setRebalance(b.getAttribute("aria-pressed") !== "true");
+      if (act === "rollall") restartAll();
+    },
+  };
+}
+
+// The join command: shown after the password, with the newcomers that checked in since.
+function joinBlock() {
+  const st = S.status;
+  const newcomers = joinInfo ? st.runs.filter((r) => !joinInfo.slots.has(r.id) && r.live) : [];
+  if (joinInfo) return `${codebox(joinInfo.command)}<p class="hint">The token in it is a secret: anyone who has it can add a machine to the fleet.</p>
+    <div style="margin-top:10px">${newcomers.length ? newcomers.map((r) => `<div class="ok-line">✓ Machine ${r.machine} joined (${esc(r.label || r.id)}) <a href="${machineHref(r.machine)}">Open</a></div>`).join("") : `<span class="meta">${pill("deploying", "waiting")} for a new machine to check in…</span>`}</div>`;
+  return `<div class="row" style="align-items:flex-end">
+      <div><label class="f" for="cj-pool">Pool (optional)</label><input id="cj-pool" placeholder="standalone" autocapitalize="off" spellcheck="false" style="width:180px"></div>
+      <div><label class="f" for="cj-label">Name (optional)</label><input id="cj-label" placeholder="its hostname" style="width:180px"></div>
+      <button type="button" class="primary" data-act="join">Show the join command${lockmark()}</button></div>
+    <p class="hint">Showing it needs the fleet password, because the command carries the join token. Without the password, ask the fleet's owner for the command.</p>`;
+}
+
+function vContribute() {
+  const o = location.origin;
+  return {
+    title: "Contribute a machine",
+    html: `<h1>Contribute a machine</h1><div class="sub">Add a computer to the fleet: it takes a slot, gets its own Cloudflare tunnel, and runs the app replicas placed on it.</div>
+      <div class="card guide" style="margin-top:12px">
+        <h3 style="margin-top:4px">What you need</h3>
+        <ol><li>A Linux machine (a VM, a server, a spare PC) with <a href="https://docs.docker.com/engine/install/" target="_blank" rel="noopener">Docker</a> installed. 2 CPU cores and 2 GB of memory or more is a good start.</li>
+          <li>Outbound internet. No open ports, port forwarding or public IP: the machine dials out through its tunnel.</li>
+          <li>The join command, which carries the fleet's join token (below).</li></ol>
+        <div class="warnbox"><b>Only contribute a machine you're happy for others to run code on.</b> Anyone can deploy apps to this fleet, and an app placed on your machine runs as Docker containers with whatever its compose file asks for, which can include host folders and privileged access. A dedicated VM is the safe choice.</div>
+        <h3>1. Get the join command</h3>
+        <div id="cj-join"></div>
+        <h3>2. Run it on the machine</h3>
+        <p>It runs <a href="/install.sh" target="_blank" rel="noopener">install.sh</a> from the control plane (read it first if you like), which starts the agent in the container <code>runner-agent</code>. The agent downloads its latest code each time it starts, joins, and keeps its slot across restarts.</p>
+        ${codebox(`curl -fsSL ${o}/install.sh | sudo JOIN_TOKEN=<token> sh`)}
+        <p>Options, as more <code>NAME=value</code> before <code>sh</code>:</p>
+        <ul><li><code>POOL=&lt;name&gt;</code>: join a pool, a set of interchangeable machines the control plane keeps at a size. Without one, the machine is <b>standalone</b>: it doesn't count toward a pool, and keeps its slot when it restarts.</li>
+          <li><code>POOL_SIZE=&lt;n&gt;</code>: how many machines that pool should have.</li>
+          <li><code>LABEL=&lt;name&gt;</code>: what the status pages call it (default: its hostname).</li>
+          <li><code>RUNNER_DATA=&lt;folder&gt;</code>: where it keeps its files (default <code>/var/lib/runner</code>).</li></ul>
+        <h3>3. Check it joined</h3>
+        <p>Within a minute it shows up under <a href="#/machines">Machines</a>, and new replicas start going to it. Follow it on the machine with <code>docker logs -f runner-agent</code>.</p>
+        <h3>Leave the fleet</h3>
+        ${codebox("docker rm -f runner-agent tunnel router")}
+        <p>Its replicas move to other machines within about a minute. Then the fleet's owner can retire its slot (on its machine page) so its tunnel and DNS names are removed.</p>
+        <h3>Contribute a GitHub Actions pool</h3>
+        <p>A GitHub account can run a pool of machines as Actions jobs: copy the <a href="https://github.com/hetp4401/runner" target="_blank" rel="noopener">runner</a> repo into the account (public, so the minutes are free), then in its settings add the secret <code>CONTROL_NODE_TOKEN</code> (the join token) and the variables <code>POOL</code> (the pool's name), <code>POOL_SIZE</code> (how many machines) and <code>AGENT_REPO=hetp4401/runner</code>, and turn off its <code>roll</code> workflow. Its <code>watchdog</code> workflow starts the machines, and each one hands over to a fresh job before GitHub's 6-hour limit.</p>
+      </div>`,
+    status() { $("#cj-join").innerHTML = joinBlock(); },
+    click(e) {
+      const b = e.target.closest("[data-act=join]");
+      if (!b) return;
+      const name = $("#cj-pool").value.trim().toLowerCase();
+      if (name && !/^[a-z0-9-]{1,30}$/.test(name)) return toast("A pool name is lowercase letters, digits and dashes", { kind: "failed" });
+      showJoin(name, $("#cj-label").value.trim());
+    },
+  };
+}
+
+function vGuide() {
+  const o = location.origin, dom = () => S.status?.domain ?? "<domain>";
+  return {
+    title: "Guide",
+    html: `<h1>Deploying apps</h1><div class="card guide" style="margin-top:12px" id="guide"></div>`,
+    status() {
+      if ($("#guide").childElementCount) return;
+      const d = esc(dom());
+      $("#guide").innerHTML = `
+      <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 10, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
+        It's at <code>https://&lt;name&gt;.${d}</code>, which sends each visitor to one healthy replica, and replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code> whichever machine it's on.
+        Each deploy is a new version; if it fails, the replicas go back to the last good one.</p>
+      <h3>From this site</h3>
+      <ol><li>Open <a href="#/apps/new">New app</a>, or start from one of its examples.</li>
+        <li><b>Name:</b> lowercase letters, digits and dashes, like <code>my-app</code>.</li>
+        <li><b>Port:</b> what the app listens on (or <code>x-runner.port</code> in the compose file).</li>
+        <li>Paste a compose file and/or a Dockerfile, and add (or upload) anything the build <code>COPY</code>s.</li>
+        <li><b>Deploy.</b> The app's page shows each replica come up, and every machine's error if one fails.</li></ol>
+      <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count.</p>
+      <h3>With the API</h3>
+      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>; no token is needed for apps. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–10, default 1; with fewer machines than replicas, it runs on every machine).
+        Fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need the header <code>x-fleet-password</code>.</p>
+      ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
+      <p class="hint">Files on disk: let <code>jq</code> build the body.</p>
+      ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}}' |\ncurl -X PUT ${o}/admin/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
+      ${codebox(`B=${o}/admin/api\ncurl $B/status                          # every app and machine\ncurl $B/projects/my-app                 # the current spec and its versions\ncurl $B/projects/my-app?version=2       # an earlier version\ncurl -X POST $B/projects/my-app/disable # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable\ncurl -X DELETE $B/projects/my-app       # delete it and its versions`)}
+      <p class="hint">With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does this for you. Limits: 30 files, 250 KB, text only; ports 2019 and 19080 are taken.</p>
+      <h3>Add a machine</h3>
+      <p>Any Linux machine with Docker can join: see <a href="#/contribute">Contribute a machine</a>.</p>`;
+    },
+  };
+}
+
+// ======================================================================== shell
+let view = null, current = "";
+function parseHash() {
+  const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
+  return { parts: path.split("/").filter(Boolean).map(decodeURIComponent), q: new URLSearchParams(query) };
+}
+function route() {
+  const { parts, q } = parseHash();
+  const [a, b, c] = parts;
+  view = a === "apps" && b === "new" ? vEditor(null, q.get("sample"))
+    : a === "apps" && b && c === "edit" ? vEditor(b)
+    : a === "apps" && b ? vApp(b)
+    : a === "apps" ? vApps()
+    : a === "machines" && b ? vMachine(Number(b))
+    : a === "machines" ? vMachines()
+    : a === "metrics" ? vMetrics()
+    : a === "fleet" ? vFleet()
+    : a === "guide" ? vGuide()
+    : a === "contribute" ? vContribute()
+    : vOverview();
+  current = location.hash;
+  document.title = `${view.title} · Runner`;
+  hideTip();
+  main.innerHTML = view.html + `<footer class="foot"><a href="#/guide">Deploy guide</a> · <a href="#/contribute">Contribute a machine</a> · <a href="/install.sh" target="_blank" rel="noopener">install.sh</a></footer>`;
+  main.onclick = (e) => {
+    const tr = e.target.closest("tr[data-href]");
+    if (tr && !e.target.closest("a,button,input,select")) location.hash = tr.dataset.href;
+    view.click?.(e);
+  };
+  const sec = ["apps", "machines", "metrics", "fleet"].includes(a) ? a : ["guide", "contribute"].includes(a) ? null : "";
+  for (const link of $$("nav.tabs a")) {
+    if (link.dataset.nav === sec) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  view.mount?.();
+  draw();
+  if (view.wantsMetrics && !S.metrics) loadMetrics();
+}
+function draw() {
+  if (!view) return;
+  hideTip();
+  if (S.status) view.status?.();
+  if (S.metrics && view.charts) view.charts();
+}
+function renderChrome() {
+  const lock = $("#lock");
+  lock.innerHTML = `${LOCK(Boolean(pw))} ${pw ? "Unlocked" : "Locked"}`;
+  lock.className = pw ? "open" : "";
+  lock.title = pw ? "Lock: forget the fleet password on this browser" : "Unlock fleet changes with the password";
+  const banner = $("#banner");
+  banner.hidden = !S.statusErr;
+  if (S.statusErr) banner.textContent = `${S.statusErr}. ${S.status ? `Showing what it said ${ago(Date.now() - S.statusAt)} ago.` : ""}`;
+  if (!S.status) { $("#summary").textContent = S.statusErr ? "" : "Loading…"; return; }
+  const n = problems().filter((x) => x.kind === "failed" || x.kind === "gone").length;
+  $("#summary").innerHTML = `${pill(n ? "failed" : "healthy", `${runsBy().size} up${n ? ` · ${n} problem${n === 1 ? "" : "s"}` : ""}`)}`;
+}
+
+// Global controls: copy buttons, the time range, the lock.
+document.addEventListener("click", async (e) => {
+  const copy = e.target.closest("[data-copy]");
+  if (copy) {
+    try { await navigator.clipboard.writeText($("pre", copy.parentElement).textContent); copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1500); }
+    catch { toast("Couldn't copy", { kind: "failed" }); }
+  }
+  const range = e.target.closest("[data-range]");
+  if (range) {
+    S.range = range.dataset.range;
+    localStorage.setItem("metrics-range", S.range);
+    $$("[data-range]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.range === S.range));
+    loadMetrics();
+  }
+});
+$("#lock").onclick = () => {
+  if (!pw) return unlock();
+  forgetPw();
+  toast("Fleet locked: the password is forgotten on this browser");
+};
+
+// Leaving the editor with changes asks first.
+addEventListener("hashchange", () => {
+  if (dirty && location.hash !== current) {
+    if (!confirm("Leave without deploying? Your changes will be lost.")) { history.replaceState(null, "", current); return; }
+    dirty = false;
+  }
+  route();
+  scrollTo(0, 0);
+});
+addEventListener("beforeunload", (e) => { if (dirty) e.preventDefault(); });
+let resizeTimer;
+let lastWidth = innerWidth;
+addEventListener("resize", () => {
+  if (innerWidth === lastWidth) return; // phones fire resize on scroll as the toolbar hides
+  lastWidth = innerWidth;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => view?.charts && S.metrics && view.charts(), 200);
+});
+
+// Old links: /admin#<app>, /admin#guide, and /metrics#fleet, #machine/<n>, #app/<name> (the server sends ?from=metrics).
+(function legacy() {
+  const h = location.hash.slice(1), from = new URLSearchParams(location.search).get("from");
+  if (location.search) history.replaceState(null, "", "/" + location.hash);
+  if (h.startsWith("/")) return;
+  let to = null;
+  if (from === "metrics") {
+    const [v, pick] = h.split("/");
+    to = v === "machine" && pick ? `#/machines/${pick}` : v === "app" && pick ? `#/apps/${pick}` : "#/metrics";
+  } else if (h === "guide") to = "#/guide";
+  else if (h) to = `#/apps/${h}`;
+  else if (from === "admin") to = "#/apps";
+  if (to) history.replaceState(null, "", "/" + to);
+})();
+
+route();
+loadStatus();
+setInterval(() => {
+  if (document.hidden) return;
+  if (Date.now() < S.fastUntil || Date.now() - S.statusAt >= 10_000) loadStatus();
+}, 3000);
+setInterval(() => { if (!document.hidden && view?.wantsMetrics) loadMetrics(); }, 30_000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadStatus(); if (view?.wantsMetrics) loadMetrics(); } });
+</script>
+</body>
+</html>

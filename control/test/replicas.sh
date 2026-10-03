@@ -6,19 +6,19 @@ cd "$HERE/.."
 . "$HERE/stop.sh"
 rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"github":4}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var NODE_TOKEN:node --var 'POOLS:{"main":4}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
 A='authorization: Bearer adm'
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" -H content-type:application/json -d "$2" | jq -c '{name, replicas, error}'; }
-join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"github\",\"want\":$2}" >/dev/null; }
+join() { curl -s -X POST $B/api/join -H 'authorization: Bearer node' -H content-type:application/json -d "{\"agent\":\"$1\",\"pool\":\"main\",\"want\":$2}" >/dev/null; }
 # A machine checks in like an agent: it reports web healthy from the check-in after it's told to run it.
 declare -A REPORT
 LOAD=([1]="50 50" [2]="10 20" [3]="30 40" [4]="20 30" [5]="5 10")
 MACHINES="1 2 3 4"
 sync() { # machine [leaving]
   local m=$1 l=(${LOAD[$1]}) res
-  res=$(curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$m,\"run\":\"r$m\",\"agent\":\"gh-r$m\",\"pool\":\"github\",\"started\":$START,\"ready\":true,\"status\":${REPORT[$m]:-{\}},\"leaving\":${2:-false},\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":${l[0]},\"memUsed\":${l[1]},\"memTotal\":100},\"a\":{}}}}")
+  res=$(curl -s -X POST $B/api/sync -H 'authorization: Bearer node' -H content-type:application/json -d "{\"machine\":$m,\"run\":\"r$m\",\"agent\":\"agent-r$m\",\"pool\":\"main\",\"started\":$START,\"ready\":true,\"status\":${REPORT[$m]:-{\}},\"leaving\":${2:-false},\"metrics\":{\"live\":{\"t\":$(date +%s%3N),\"h\":{\"cpu\":${l[0]},\"memUsed\":${l[1]},\"memTotal\":100},\"a\":{}}}}")
   if echo "$res" | jq -e '.desired.web' >/dev/null; then REPORT[$m]='{"web":{"v":1,"s":"healthy"}}'; else REPORT[$m]='{}'; fi
 }
 tick() { for m in $MACHINES; do sync $m; done; }

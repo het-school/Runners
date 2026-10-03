@@ -3,27 +3,30 @@
 // machines. Machines find it, not the other way round: any agent joins at /api/join, gets the lowest free slot n and
 // the token for tunnel runner-<n> (created through the Cloudflare API the first time a slot is used), then checks in
 // at /api/sync. The agent describes its machine; this never knows what's behind it:
-//   pool     the name of a replaceable set it belongs to (members are started on request to keep the pool's size),
-//            or none for a standalone host that keeps its slot across restarts
+//   pool     the name of a replaceable set it belongs to (the control plane keeps each pool at its size), or none
+//            for a standalone host that keeps its slot across restarts
+//   starts   whether it can start machines: pool members that can are asked to start missing peers and their own
+//            replacements; for the rest, whatever watches the pool asks /api/claim
 //   url      what to link to for it, and a label
 //   leaving  on its last check-in, when it's going for good (its replicas are placed elsewhere at once)
-// and whatever runs the machine pings POST /api/drain when it's going down soon (a timer in the GitHub workflow,
-// a cron before maintenance, a cloud termination notice): the control plane then hands the machine over, one at a
-// time, the same way as for a requested roll. Nothing here predicts lifetimes.
+// and whatever runs the machine pings POST /api/drain when it's going down soon (a timer, a cron before
+// maintenance, a cloud termination notice): the control plane then hands the machine over, one at a time, the same
+// way as for a requested roll. Nothing here predicts lifetimes.
 // It also keeps DNS in line. The public URLs are this Worker's: <project> passes each request on to a machine where
 // the project is healthy, and <project>-<k> to the machine running replica k (replicas are numbered 1 to N and keep
 // their number when they move, so these URLs only change with the replica count). The Worker reaches machine n at
 // <project>-m<n>, which points at tunnel runner-<n>.
-//   /            public status page          /api/*        API, Bearer token (admin, or node for join/sync/claim)
-//   /admin       admin portal (open)         /admin/api/*  the project API without a token
-//   /metrics     metrics dashboard           /api/metrics  machine and app metrics (no token needed)
+//   /            the UI (everything public)  /api/*        API, Bearer token (admin, or node for join/sync/claim)
+//                                            /admin/api/*  the UI's API: projects open to anyone, fleet changes
+//                                                          need the password (x-fleet-password)
+//   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
 import { DurableObject } from "cloudflare:workers";
 import YAML from "yaml";
-import ADMIN_PAGE from "./admin.html";
-import METRICS_PAGE from "./metrics.html";
-import { STATUS_PAGE } from "./status-page.js";
+import APP_PAGE from "./app.html";
 
 const POLL_S = 20; // how often agents check in
+const PASSWORD_TRIES = 5; // wrong fleet passwords from one address before it's refused for PASSWORD_LOCKOUT_MS
+const PASSWORD_LOCKOUT_MS = 15 * 60_000;
 const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
@@ -34,7 +37,7 @@ const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const SHARED_DNS = "100::"; // <project>.DOMAIN and <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
-const MAX_REPLICAS = 100;
+const MAX_REPLICAS = 10; // each replica on a different machine; with fewer machines, it runs on all of them
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
 // Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
@@ -273,6 +276,7 @@ function installScript(origin) {
   return `#!/bin/sh
 # Adds this machine to the runner fleet (https://github.com/hetp4401/runner). Needs Docker.
 #   curl -fsSL ${origin}/install.sh | sudo JOIN_TOKEN=<token> sh
+# Optional: POOL=<name> (and POOL_SIZE) makes it a member of that pool; LABEL names it on the status page.
 # The agent runs in the container runner-agent, takes a free slot n, and serves every project at
 # https://<project>-n.<domain>. It fetches the latest agent code each time it starts.
 # Remove the machine:  docker rm -f runner-agent tunnel router
@@ -285,6 +289,7 @@ docker rm -f runner-agent >/dev/null 2>&1 || true
 docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --network host --hostname "$(hostname)" \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
   -e CONTROL_URL=${origin} -e CONTROL_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
+  -e POOL="\${POOL:-}" -e POOL_SIZE="\${POOL_SIZE:-}" -e LABEL="\${LABEL:-}" \\
   docker:cli sh -c '
     set -e
     apk add --no-cache nodejs >/dev/null
@@ -374,6 +379,7 @@ export class Control extends DurableObject {
     this.bootAt = Date.now();
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
     this.lastRebalance = 0;
+    this.failures = new Map(); // address -> { n, at }: wrong fleet passwords
     this.autoMoved = new Map(); // project -> when it was last moved automatically
     this.rebalanceLog = JSON.parse(this.settings.get("rebalance_log") ?? "[]");
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
@@ -486,23 +492,34 @@ export class Control extends DurableObject {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
-      if (request.method === "GET" && path === "/") return html(STATUS_PAGE);
-      if (request.method === "GET" && path === "/admin") return html(ADMIN_PAGE);
-      if (request.method === "GET" && path === "/metrics") return html(METRICS_PAGE);
+      if (request.method === "GET" && path === "/") return html(APP_PAGE);
+      // The old pages are views of the app now; the app turns their #fragments into its own routes.
+      if (request.method === "GET" && (path === "/admin" || path === "/metrics")) {
+        return new Response(null, { status: 302, headers: { location: `/?from=${path.slice(1)}` } });
+      }
       if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
       if (request.method === "GET" && path === "/internal/routes") return json(this.healthyRoutes(Date.now()));
       if (path.startsWith("/admin/api/")) {
-        // The portal is open to anyone with the URL (no sign-in); only refuse changes sent from other sites.
+        // The UI: anyone can see everything and deploy; fleet changes need the password. Changes sent from other
+        // sites are refused. No machine powers here (joining, checking in): those hand out tunnel tokens.
         const origin = request.headers.get("origin");
         if (request.method !== "GET" && origin && origin !== url.origin) throw new HttpError(403, "cross-site request refused");
-        // No machine powers here (joining, checking in): those hand out tunnel tokens and project specs.
-        return await this.api(request, url, path.slice("/admin/api".length), { admin: true, node: false, portal: true });
+        const route = path.slice("/admin/api".length);
+        // Only fleet routes look at the password, so a refused address can still see and deploy.
+        const fleet = /^\/(unlock|settings|roll|join-token|machines\/\d+\/evict|slots\/\d+)$/.test(route);
+        const password = request.headers.get("x-fleet-password");
+        const admin = fleet && password != null && await this.checkPassword(password, request.headers.get("cf-connecting-ip") ?? "");
+        if (request.method === "POST" && route === "/unlock") {
+          if (!admin) throw new HttpError(401, "wrong password");
+          return json({ ok: true });
+        }
+        return await this.api(request, url, route, { admin, deploy: true, node: false });
       }
       if (path.startsWith("/api/")) {
         const auth = request.headers.get("authorization") ?? "";
         const admin = Boolean(this.env.ADMIN_TOKEN) && auth === `Bearer ${this.env.ADMIN_TOKEN}`;
         const node = admin || (Boolean(this.env.NODE_TOKEN) && auth === `Bearer ${this.env.NODE_TOKEN}`);
-        return await this.api(request, url, path.slice("/api".length), { admin, node });
+        return await this.api(request, url, path.slice("/api".length), { admin, deploy: admin, node });
       }
       throw new HttpError(404, "not found");
     } catch (e) {
@@ -510,13 +527,31 @@ export class Control extends DurableObject {
     }
   }
 
-  async api(request, url, route, { admin, node, portal = false }) {
+  // The fleet password: ADMIN_PASSWORD, or the admin token if there's none. Compared in constant time, and an address
+  // that gets it wrong too often is refused for a while.
+  async checkPassword(given, ip) {
+    const expected = this.env.ADMIN_PASSWORD || this.env.ADMIN_TOKEN;
+    if (!expected) return false;
+    const now = Date.now();
+    const f = this.failures.get(ip);
+    if (f && f.n >= PASSWORD_TRIES && now - f.at < PASSWORD_LOCKOUT_MS) {
+      throw new HttpError(429, `too many wrong passwords; try again in ${Math.ceil((PASSWORD_LOCKOUT_MS - (now - f.at)) / 60_000)} min`);
+    }
+    const digest = async (x) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(x));
+    const ok = crypto.subtle.timingSafeEqual(await digest(given), await digest(expected));
+    if (ok) this.failures.delete(ip);
+    else this.failures.set(ip, { n: (f && now - f.at < PASSWORD_LOCKOUT_MS ? f.n : 0) + 1, at: now });
+    return ok;
+  }
+
+  // admin: fleet changes (pools, rebalancing, restarts, evictions, slots, the join token); deploy: projects.
+  async api(request, url, route, { admin, deploy, node }) {
     const { method } = request;
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
     });
     const need = (ok) => {
-      if (!ok) throw new HttpError(401, "bad token");
+      if (!ok) throw new HttpError(401, node || admin ? "this needs the fleet password" : "this needs the fleet password or a token");
     };
     if (method === "GET" && route === "/status") return json(this.status());
     if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
@@ -530,8 +565,7 @@ export class Control extends DurableObject {
     }
     if (method === "POST" && route === "/drain") return need(node), json(this.drain(await body()));
     if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
-    // The token a new host joins with; only with the admin token itself, never through the open portal.
-    if (method === "GET" && route === "/join-token") return need(admin && !portal), json({ token: this.env.NODE_TOKEN });
+    if (method === "GET" && route === "/join-token") return need(admin), json({ token: this.env.NODE_TOKEN });
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const ev = route.match(/^\/machines\/(\d+)\/evict$/);
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
@@ -539,7 +573,7 @@ export class Control extends DurableObject {
     if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move))?$/);
     if (m) {
-      need(admin);
+      need(deploy);
       const [, name, action] = m;
       if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to")));
       if (action && method === "POST") return json(this.setEnabled(name, action === "enable"));
@@ -963,16 +997,18 @@ export class Control extends DurableObject {
     const pool = typeof body.pool === "string" && /^[a-z0-9-]{1,30}$/.test(body.pool) ? body.pool : null;
     const url = typeof body.url === "string" && /^https:\/\/[^\s"<>]{1,300}$/.test(body.url) ? body.url : null;
     const label = String(body.label ?? "").slice(0, 80) || null;
+    const starts = body.starts !== false; // agents from before this field could all start machines
     this.askPoolSize(pool, body.poolSize);
     let r = this.runs.get(run);
     if (!r) {
       const agent = String(body.agent ?? run).slice(0, 100);
-      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, url, drain: 0 };
+      r = { id: run, machine, started, status, ready, handover: 0, retire: 0, seen: now, agent, label, pool, url, drain: 0, starts };
       this.saveRun(r);
     } else {
       const changed = ready !== r.ready || JSON.stringify(status) !== JSON.stringify(r.status) ||
         pool !== (r.pool ?? null) || url !== (r.url ?? null) || label !== (r.label ?? null);
       Object.assign(r, { status, ready, seen: now, pool, url, label });
+      r.starts = starts; // sent with every check-in, so it's kept in memory only
       // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
       if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
     }
@@ -989,7 +1025,7 @@ export class Control extends DurableObject {
       this.saveRun(r);
     }
     const handover = !r.retire && this.wantsHandover(r, now);
-    const start = !r.retire && r.ready && r.pool ? this.claimStarts(r.pool, run, now) : []; // pool members start their peers
+    const start = !r.retire && r.ready && r.pool && r.starts ? this.claimStarts(r.pool, run, now) : []; // pool members start their peers
     this.cleanup(now);
     return {
       domain: this.env.DOMAIN,
@@ -1011,10 +1047,11 @@ export class Control extends DurableObject {
   drain(body) {
     const now = Date.now();
     const runId = body?.run != null ? String(body.run) : null;
+    const agent = body?.agent != null ? String(body.agent) : null;
     const machine = Number(body?.machine);
     const runs = [...this.runs.values()].filter((x) => this.live(x, now) && !x.retire &&
-      ((runId && x.id === runId) || (Number.isInteger(machine) && x.machine === machine)));
-    if (!runs.length) throw new HttpError(404, "no live run matches that run or machine");
+      ((runId && x.id === runId) || (agent && x.agent === agent) || (Number.isInteger(machine) && x.machine === machine)));
+    if (!runs.length) throw new HttpError(404, "no live run matches that run, agent or machine");
     for (const x of runs) {
       if (!x.drain) {
         x.drain = now;
@@ -1316,7 +1353,7 @@ export class Control extends DurableObject {
     for (const [m, x] of this.liveMetrics) {
       const r = this.runs.get(x.run);
       if (now - x.t > LIVE_MS || !r) continue;
-      live[m] = { ...x, ready: Boolean(r.ready), status: r.status };
+      live[m] = { ...x, ready: Boolean(r.ready), status: r.status, url: r.url ?? null, label: r.label };
     }
     return {
       now, range: rangeName, step, expected: this.expectedMachines(),
@@ -1343,6 +1380,7 @@ export class Control extends DurableObject {
       dnsNotes: this.dnsNotes ?? [],
       rebalance: { on: this.rebalanceOn(), log: this.rebalanceLog.slice(0, 10), hot: [...this.liveMachines(now).keys()].filter((m) => this.isHot(m, now)) },
       // Slots to show: ones with a recent run, plus ones a machine is starting for.
+      starting: [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !this.liveRuns(now).some((r) => r.machine === n)).map(([n]) => n),
       slots: [...new Set([
         ...[...this.runs.values()].filter((r) => now - r.seen < 3600_000).map((r) => r.machine),
         ...[...this.starts].filter(([, at]) => now - at < START_WAIT_MS).map(([n]) => n),
