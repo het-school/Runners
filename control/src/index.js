@@ -288,7 +288,7 @@ docker rm -f runner-agent >/dev/null 2>&1 || true
 docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --network host --hostname "$(hostname)" \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
   -e CONTROL_URL=${origin} -e JOIN_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
-  -e LABEL="\${LABEL:-}" \\
+  -e LABEL="\${LABEL:-$(hostname)}" \\
   docker:cli sh -c '
     set -e
     apk add --no-cache nodejs >/dev/null

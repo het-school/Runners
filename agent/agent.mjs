@@ -9,7 +9,7 @@
 //   AGENT_ID      this agent's ID (default: one made up once and kept in RUNNER_DATA, so a restart gets its slot back)
 //   POOL, POOL_SIZE   the pool this machine belongs to and how many machines it should have (none: a standalone host)
 //   MACHINE       the slot to take, when the machine was started for one
-//   LABEL         what the pages call it (default: the hostname)
+//   LABEL         what the pages call it (optional; without one it's just its machine number)
 //   START_CMD     a shell command that starts a new machine for slot $SLOT. With it, the agent starts the pool members
 //                 the control plane says are missing, and its own replacement when it's handed over; without it, a
 //                 handover restarts the agent (where it runs under a supervisor, it comes back with the latest code)
@@ -17,7 +17,6 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
@@ -37,7 +36,7 @@ let run = ""; // this start of the agent
 const describe = () => ({
   pool,
   poolSize: pool && env.POOL_SIZE ? Number(env.POOL_SIZE) : undefined, // how many machines the pool should have
-  label: env.LABEL || hostname(),
+  label: env.LABEL || null,
   starts: Boolean(env.START_CMD),
 });
 // Commands run without secrets (anything named like a token, key or password), so a compose file can't read them.
@@ -320,7 +319,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
 async function main() {
   await mkdir(dir, { recursive: true });
   await join();
-  log(`machine ${machine}: ${describe().label}${pool ? `, pool ${pool}` : ""}`);
+  log(`machine ${machine}${describe().label ? `: ${describe().label}` : ""}${pool ? `, pool ${pool}` : ""}`);
   // Left from before a restart, maybe.
   await sh("docker", ["rm", "-f", "router", "tunnel"]);
   await startRouter();
