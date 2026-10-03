@@ -56,11 +56,12 @@ jobs:
           # exec: the agent is the step's own process, so a cancelled run's signal reaches it too (timeout passes it on and keeps its exit status).
           exec timeout -k 2m --preserve-status 355m node agent/agent.mjs
 
-      # A run that ended on its own (its time was up, or it was told to leave): make sure the pool is whole. Running
-      # machines start each other within a couple of minutes, but when every machine of the pool ends at about the
-      # same time (after a long control-plane outage, say) there's nobody left to do it, and the watchdog's schedule
-      # isn't reliable. If the control plane can't be reached at all, this machine starts a replacement for its own
-      # slot, so the pool outlives the outage. Not after a cancel: cancelling the runs is how a pool is stopped by hand.
+      # A run that ended on its own (its time was up, or it was told to leave): ask the control plane what the pool is
+      # missing and start it. Running machines start each other within a couple of minutes, but when every machine
+      # of the pool ends at about the same time there's nobody left to do it, and the watchdog's schedule isn't
+      # reliable. Only what the control plane names is started: a slot that's live refuses a second machine, and
+      # the control plane being unreachable is left to the watchdog. Not after a cancel: cancelling the runs is how a
+      # pool is stopped by hand.
       - name: Keep the pool whole
         if: ${{ !cancelled() && steps.agent.outcome == 'success' }}
         shell: bash
@@ -70,15 +71,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           POOL: ${{ vars.POOL || 'github' }}
           POOL_SIZE: ${{ vars.POOL_SIZE }}
-          MACHINE: ${{ inputs.machine }}
         run: |
-          if start=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
-              "$CONTROL_URL/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -er '.start[]?'); then
-            [ -n "$start" ] || echo "every machine of the pool is running or starting"
-          else
-            echo "::warning::the control plane didn't answer; starting a replacement for machine $MACHINE"
-            start=$MACHINE
+          if ! answer=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" "$CONTROL_URL/api/claim?pool=$POOL&size=$POOL_SIZE"); then
+            echo "::warning::the control plane didn't answer; the watchdog starts whatever is missing"
+            exit 0
           fi
+          start=$(echo "$answer" | jq -r '.start[]?') # nothing when the pool is whole (jq -e would make that an error)
+          [ -n "$start" ] || echo "every machine of the pool is running or starting"
           rc=0
           for m in $start; do
             if gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $m"; then
