@@ -28,13 +28,19 @@ import { DurableObject } from "cloudflare:workers";
 import YAML from "yaml";
 import APP_PAGE from "./app.html";
 
-const POLL_S = 20; // how often agents check in
+// How often agents check in. Every check-in is a request to this Worker and to its Durable Object, and the free plan
+// allows 100,000 a day of each (shared with the web app and with every visit to the apps), so the whole fleet together
+// gets CHECKINS_PER_DAY and the interval grows with the number of machines: 20 machines check in every 58 s. Never
+// under MIN_POLL_S or over MAX_POLL_S; the POLL_S var fixes it instead.
+const CHECKINS_PER_DAY = 30_000;
+const MIN_POLL_S = 30;
+const MAX_POLL_S = 300;
 const PASSWORD_TRIES = 5; // wrong passwords from one address (per app, and for the fleet) before it's refused for PASSWORD_LOCKOUT_MS
 const PASSWORD_LOCKOUT_MS = 15 * 60_000;
 const APP_PASSWORD_MIN = 6;
 const APP_PASSWORD_MAX = 200;
 const PBKDF2_ITERATIONS = 10_000; // app passwords are stored as salted PBKDF2-SHA256 (kept light for the CPU limit)
-const LIVE_MS = 75_000; // a run counts as up if it checked in this recently
+// A run counts as up if it checked in within liveMs: two and a half check-ins, so one late check-in doesn't count as down.
 const START_WAIT_MS = 8 * 60_000; // after starting a machine, give it this long to show up before trying again
 const HANDOVER_STUCK_MS = 15 * 60_000; // a handover slower than this stops holding up the other machines
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -584,6 +590,7 @@ export class Control extends DurableObject {
     }
     this.remapped = new Map(); // "name@v|ports" -> compose text with moved ports
     this.bootAt = Date.now();
+    this.setPace(this.bootAt);
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
     this.lastRebalance = 0;
     this.failures = new Map(); // "address|fleet" or "address|app:<name>" -> { n, at }: wrong passwords
@@ -606,6 +613,16 @@ export class Control extends DurableObject {
 
   all(query, ...args) {
     return this.sql.exec(query, ...args).toArray();
+  }
+
+  // The check-in interval (pollS) for the fleet's current size, and how long a run counts as up without checking in
+  // (liveMs: two and a half intervals, so one late check-in doesn't count as down). Worked out from the machines seen
+  // in the last 10 minutes, not from liveMs itself.
+  setPace(now) {
+    const fixed = Number(this.env.POLL_S);
+    const machines = new Set([...this.runs.values()].filter((r) => !r.retire && now - r.seen < 10 * 60_000).map((r) => r.machine)).size;
+    this.pollS = fixed > 0 ? Math.max(5, fixed) : Math.min(MAX_POLL_S, Math.max(MIN_POLL_S, Math.round((86400 * Math.max(1, machines)) / CHECKINS_PER_DAY)));
+    this.liveMs = Math.round(2.5 * this.pollS * 1000);
   }
 
   setSetting(key, value) {
@@ -639,7 +656,7 @@ export class Control extends DurableObject {
   // Just after a (re)start, runs loaded from storage haven't checked in yet to say which pool they're in. Until they
   // have (or 150 s have passed), a pool looks smaller than it is, so nothing is started or retired on that account.
   settling(now) {
-    return now - this.bootAt < 2 * LIVE_MS && this.liveRuns(now).some((x) => now - x.seen > now - this.bootAt);
+    return now - this.bootAt < 2 * this.liveMs && this.liveRuns(now).some((x) => now - x.seen > now - this.bootAt);
   }
 
   poolSize(pool) {
@@ -656,7 +673,7 @@ export class Control extends DurableObject {
   }
 
   live(run, now) {
-    return now - run.seen < LIVE_MS;
+    return now - run.seen < this.liveMs;
   }
 
   liveRuns(now) {
@@ -711,6 +728,7 @@ export class Control extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
+    this.setPace(Date.now());
     try {
       if (request.method === "GET" && path === "/") return html(APP_PAGE);
       // The old pages are views of the app now; the app turns their #fragments into its own routes.
@@ -1141,7 +1159,7 @@ export class Control extends DurableObject {
   // started) it counts as half busy, so a machine that's measured and quiet wins.
   load(machine, placedCount, now) {
     const m = this.liveMetrics.get(machine);
-    const fresh = m && now - m.t < 3 * LIVE_MS;
+    const fresh = m && now - m.t < 3 * this.liveMs;
     const cpu = fresh ? m.h.cpu : 50;
     const mem = fresh && m.h.memTotal ? (100 * m.h.memUsed) / m.h.memTotal : 50;
     return { score: cpu + mem + 30 * placedCount, reason: fresh ? `cpu ${Math.round(cpu)}%, memory ${Math.round(mem)}%, ${placedCount} other ${placedCount === 1 ? "copy" : "copies"} placed` : "no metrics yet" };
@@ -1152,7 +1170,7 @@ export class Control extends DurableObject {
     let changed = false;
     // After a (re)start the first machine to check in would get every replica, because it's the only one with
     // metrics; wait until every machine that's up has reported some (or 3 minutes).
-    const measured = (machine) => now - (this.liveMetrics.get(machine)?.t ?? 0) < 3 * LIVE_MS;
+    const measured = (machine) => now - (this.liveMetrics.get(machine)?.t ?? 0) < 3 * this.liveMs;
     const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> copies placed on it
     for (const [name, list] of this.copies) {
@@ -1340,7 +1358,7 @@ export class Control extends DurableObject {
 
   hasRoom(machine, now) {
     const m = this.liveMetrics.get(machine);
-    if (!m || now - m.t > 3 * LIVE_MS || !m.h.memTotal) return false;
+    if (!m || now - m.t > 3 * this.liveMs || !m.h.memTotal) return false;
     return m.h.cpu < ROOM_CPU && (100 * m.h.memUsed) / m.h.memTotal < ROOM_MEM;
   }
 
@@ -1455,8 +1473,9 @@ export class Control extends DurableObject {
         pool !== (r.pool ?? null) || label !== (r.label ?? null);
       Object.assign(r, { status, ready, seen: now, pool, label });
       r.starts = starts; // sent with every check-in, so it's kept in memory only
-      // Write when something changed, and "last seen" at most every 30s, to keep storage writes low.
-      if (changed || now - r.savedSeen > 30_000) this.saveRun(r);
+      // Write when something changed, and "last seen" at most every 5 minutes (it only matters across restarts of this
+      // object, and the free plan allows 100,000 row writes a day).
+      if (changed || now - r.savedSeen > 5 * 60_000) this.saveRun(r);
     }
     this.takeMetrics(r, body.metrics, now);
     if (body.leaving && !r.retire) {
@@ -1475,7 +1494,7 @@ export class Control extends DurableObject {
     this.cleanup(now);
     return {
       domain: this.env.DOMAIN,
-      poll: POLL_S,
+      poll: this.pollS,
       desired: r.retire ? {} : this.desiredFor(r.machine),
       retire: Boolean(r.retire),
       handover,
@@ -1820,7 +1839,7 @@ export class Control extends DurableObject {
     const live = {};
     for (const [m, x] of this.liveMetrics) {
       const r = this.runs.get(x.run);
-      if (now - x.t > LIVE_MS || !r) continue;
+      if (now - x.t > this.liveMs || !r) continue;
       live[m] = { ...x, ready: Boolean(r.ready), status: r.status, label: r.label };
     }
     return live;
