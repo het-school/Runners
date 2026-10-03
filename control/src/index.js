@@ -300,14 +300,24 @@ echo "Joined. Follow it with: docker logs -f runner-agent"
 `;
 }
 
+const MAX_BODY = 1_000_000; // bytes; a spec is at most MAX_SPEC_BYTES, plus JSON quoting
+
 export default {
-  fetch(request, env) {
+  async fetch(request, env) {
     const host = new URL(request.url).hostname;
     const suffix = `.${env.DOMAIN}`;
     if (host !== env.CONTROL_HOST && host.endsWith(suffix) && !host.slice(0, -suffix.length).includes(".")) {
       return proxy(request, env, host.slice(0, -suffix.length));
     }
-    return env.CONTROL.get(env.CONTROL.idFromName("main")).fetch(request);
+    // The object gets the whole body up front: a body still streaming in after the object has replied (a refused
+    // change, say) fails the stream, and that resets the object.
+    let body;
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY) return json({ error: "the request is too big" }, 413);
+      body = await request.arrayBuffer();
+      if (body.byteLength > MAX_BODY) return json({ error: "the request is too big" }, 413);
+    }
+    return env.CONTROL.get(env.CONTROL.idFromName("main")).fetch(new Request(request, { body }));
   },
 };
 
@@ -451,7 +461,8 @@ export class Control extends DurableObject {
     const key = `${name}@${v}`;
     if (!this.versions.has(key)) {
       const row = this.all("SELECT compose, port, files, replicas FROM versions WHERE name = ? AND version = ?", name, v)[0];
-      this.versions.set(key, row && { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}") });
+      if (!row) return undefined; // not cached: a version asked for before it's deployed mustn't stay missing once it is
+      this.versions.set(key, { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}") });
     }
     return this.versions.get(key);
   }
@@ -1508,14 +1519,15 @@ export class Control extends DurableObject {
   async alarm() {
     const now = Date.now();
     if (now >= (this.dnsDue ?? 0)) {
+      const due = this.dnsDue; // a change during the sync asks for another one (scheduleDns), which must stand
       try {
         await this.syncDns();
         this.dnsError = null;
-        this.dnsDue = now + 3600_000; // re-check hourly in case something drifted
+        if (this.dnsDue === due) this.dnsDue = now + 3600_000; // re-check hourly in case something drifted
       } catch (e) {
         this.dnsError = e.message;
         console.log(`DNS sync failed: ${e.message}`);
-        this.dnsDue = now + 60_000;
+        if (this.dnsDue === due) this.dnsDue = now + 60_000;
       }
     }
     await this.ctx.storage.setAlarm(this.dnsDue);
