@@ -7,7 +7,7 @@ cd "$HERE/.."
 . "$HERE/stop.sh"
 rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var ADMIN_TOKEN:adm --var ADMIN_PASSWORD:hunter2 --var NODE_TOKEN:node --var 'POOLS:{"main":2}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var FLEET_PASSWORD:hunter2 --var JOIN_TOKEN:node --var 'POOLS:{"main":2}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 U=localhost:8911/admin/api
 A=localhost:8911/api
@@ -55,8 +55,8 @@ want 400 -X PUT $U/projects/web/password -H 'x-app-password: web-secret' "${J[@]
 want 200 -X PUT $U/projects/web/password -H 'x-app-password: web-secret' "${J[@]}" -d '{"password":"web-secret-2"}'
 want 401 -X POST $U/projects/web/unlock -H 'x-app-password: web-secret'
 want 200 -X POST $U/projects/web/unlock -H 'x-app-password: web-secret-2'
-echo "== an app deployed with the admin token and no password: only the fleet password changes it, until it gets one"
-want 200 -X PUT $A/projects/legacy -H 'authorization: Bearer adm' "${J[@]}" -d '{"port":7070,"dockerfile":"FROM x"}'
+echo "== an app a script deploys with the fleet password and no app password: only the fleet password changes it, until it gets one"
+want 200 -X PUT $A/projects/legacy -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"port":7070,"dockerfile":"FROM x"}'
 has legacy
 want 401 -X POST $U/projects/legacy/disable
 want 401 -X POST $U/projects/legacy/disable -H 'x-app-password: anything'
@@ -64,9 +64,12 @@ want 200 -X POST $U/projects/legacy/disable -H 'x-fleet-password: hunter2'
 want 200 -X PUT $U/projects/legacy/password -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"password":"legacy-pass"}'
 want 200 -X POST $U/projects/legacy/enable -H 'x-app-password: legacy-pass'
 has legacy
-echo "== the admin token on /api changes any app; without a token /api refuses"
-want 200 -X POST $A/projects/web/disable -H 'authorization: Bearer adm'
+echo "== scripts: the fleet password on /api changes any app; without it /api refuses, and the join token only does machine things"
+want 200 -X POST $A/projects/web/disable -H 'x-fleet-password: hunter2'
 want 401 -X POST $A/projects/web/enable
+want 401 -X POST $A/projects/web/enable -H 'authorization: Bearer node'
+want 401 $A/join-token -H 'authorization: Bearer node'
+want 200 $A/join-token -H 'x-fleet-password: hunter2'
 echo "== 5 wrong passwords for web: web refuses this address for a while, even the right one; api and the fleet don't"
 for i in 1 2 3 4 5; do want 401 -X POST $U/projects/web/unlock -H 'x-app-password: wrong' >/dev/null; done
 want 429 -X POST $U/projects/web/unlock -H 'x-app-password: web-secret-2'
@@ -91,8 +94,8 @@ echo "== fleet changes with the password"
 want 200 -X PUT $U/settings -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"rebalance":false}'
 want 200 -X POST $U/roll -H 'x-fleet-password: hunter2'
 want 200 $U/join-token -H 'x-fleet-password: hunter2'
-echo "== the admin token still works on /api"
-want 200 -X PUT $A/settings -H 'authorization: Bearer adm' "${J[@]}" -d '{"rebalance":true}'
+echo "== fleet changes from a script: the fleet password on /api"
+want 200 -X PUT $A/settings -H 'x-fleet-password: hunter2' "${J[@]}" -d '{"rebalance":true}'
 echo "== 5 wrong fleet passwords, then even the right one is refused for a while"
 for i in 1 2 3 4 5; do want 401 -X POST $U/unlock -H 'x-fleet-password: wrong' >/dev/null; done
 want 429 -X POST $U/unlock -H 'x-fleet-password: hunter2'

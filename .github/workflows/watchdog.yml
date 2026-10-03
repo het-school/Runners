@@ -21,12 +21,12 @@ jobs:
     steps:
       - name: Start missing machines
         env:
-          CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
+          JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           POOL: ${{ vars.POOL || 'github' }}
           POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
         run: |
-          start=$(curl -sSf -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
+          start=$(curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
             "https://control.billybishop4-workers.xyz/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -r '.start[]')
           for m in $start; do
             gh workflow run machine.yml -R "$GITHUB_REPOSITORY" -f machine="$m" && echo "started machine $m"

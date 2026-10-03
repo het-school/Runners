@@ -14,6 +14,6 @@ jobs:
     steps:
       - name: Ask the control plane for a rolling restart
         env:
-          CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
+          JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
         run: |
-          curl -sSf -X POST -H "Authorization: Bearer $CONTROL_TOKEN" https://control.billybishop4-workers.xyz/api/roll
+          curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" https://control.billybishop4-workers.xyz/api/roll

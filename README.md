@@ -6,7 +6,7 @@ Neither the control plane nor the agent knows what a machine is, or how long it 
 
 - **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and deploying a new app.
-  - **Needs the app's password:** changing an app: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name), and changing its password. Whoever deploys an app sets its password; the browser keeps it for the session (or on that device if you tick the box). The fleet password works for every app too. Apps with no password (deployed with the admin token and none, or from before app passwords) can only be changed with the fleet password until one is set from the app's page or with `runnerctl password <name>`.
+  - **Needs the app's password:** changing an app: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name), and changing its password. Whoever deploys an app sets its password; the browser keeps it for the session (or on that device if you tick the box). The fleet password works for every app too. Apps with no password (deployed by a script with the fleet password and none, or from before app passwords) can only be changed with the fleet password until one is set from the app's page or with `runnerctl password <name>`.
   - **Needs the fleet password:** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
   - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 
@@ -44,7 +44,7 @@ Each change is a new version, and every machine switches to it at once. If the n
 
 ## API
 
-The web app uses `/admin/api/*`. Reading is open. Deploying a new app (`PUT /projects/<name>`) needs `"password"` (6+ characters) in the body; after that, changing the app (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`) needs the header `x-app-password` or `x-fleet-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-fleet-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Scripts can use `/api/*` with `Authorization: Bearer <admin token>` for everything, without app passwords.
+The web app uses `/admin/api/*`. Reading is open. Deploying a new app (`PUT /projects/<name>`) needs `"password"` (6+ characters) in the body; after that, changing the app (`PUT`, `/enable`, `/disable`, `/move`, `DELETE`, and `PUT /projects/<name>/password` with `{"password": "new"}`) needs the header `x-app-password` or `x-fleet-password`. Fleet routes (`/settings`, `/roll`, `/machines/<n>/evict`, `/slots/<n>`, `/join-token`) need `x-fleet-password`. App passwords are stored as salted PBKDF2 hashes and never sent out; the status only says `hasPassword`. An address that sends a wrong password 5 times is refused for 15 minutes, counted separately for the fleet and for each app. Scripts can use `/api/*` with the fleet password (`x-fleet-password`, with the same lockout) for everything, without app passwords; machines use it with the join token (`Authorization: Bearer <join token>`).
 
 ```
 GET    /api/status                              projects and machines (no token needed)
@@ -59,7 +59,7 @@ PUT    /api/settings                            {"pools": {"<pool>": 10}, "rebal
 POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 DELETE /api/slots/<n>                           retire an empty slot: tunnel, records and DNS names go
-GET    /api/join-token                          the token a host joins with (admin token only)
+GET    /api/join-token                          the join token (needs the fleet password)
 POST   /api/join                                an agent starting up: {"agent", "pool", "url", "label", "want"} -> its slot and tunnel token
 POST   /api/claim?pool=<name>                    machines to start so the pool has its size (for a watchdog outside the pool)
 POST   /api/drain                               {"agent": id}, {"run": id} or {"machine": n}: it's going down soon, hand it over
@@ -71,7 +71,7 @@ curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello \
   -d '{"dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]", "port": 9000}'
 ```
 
-[`bin/runnerctl`](bin/runnerctl) wraps the API. It reads the token from `~/.config/runnerctl/token`.
+[`bin/runnerctl`](bin/runnerctl) wraps the API. It sends the fleet password, from `$FLEET_PASSWORD` or `~/.config/runnerctl/fleet-password`.
 
 ```
 runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
@@ -120,10 +120,10 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 
 ## Setup notes
 
-- **Repo secrets:** `CONTROL_NODE_TOKEN` (the same value as the Worker's `NODE_TOKEN`). Tunnel tokens come from the control plane.
-- **Worker secrets:** `ADMIN_PASSWORD` (the fleet password the web app asks for; without it, the admin token is the password), `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
+- **Repo secrets:** `JOIN_TOKEN` (the same value as the Worker's `JOIN_TOKEN`). Tunnel tokens come from the control plane.
+- **Worker secrets:** two you use, `FLEET_PASSWORD` (the owner's: the web app asks for it, and `runnerctl` and scripts send it) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the Worker uses: a Cloudflare token with Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone. App passwords are kept by the control plane.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Web app:** changes sent from other sites are refused.
 - **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
-- **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `CONTROL_NODE_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`.
+- **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `JOIN_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

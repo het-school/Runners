@@ -1,5 +1,5 @@
 # Control plane: project specs, placement, machine health, DNS. Knows nothing about what machines are; their agents say.
-# Deploy from control/: wrangler deploy (secrets: ADMIN_TOKEN, NODE_TOKEN, and CF_API_TOKEN: Cloudflare Tunnel edit
+# Deploy from control/: wrangler deploy (secrets: FLEET_PASSWORD, JOIN_TOKEN, and CF_API_TOKEN: Cloudflare Tunnel edit
 # on the account, DNS and Workers Routes edit on the zone).
 name = "runner-control"
 main = "src/index.js"

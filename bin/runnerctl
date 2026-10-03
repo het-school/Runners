@@ -16,11 +16,11 @@
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 #   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names
-# The admin token comes from $RUNNER_TOKEN or ~/.config/runnerctl/token.
+# The fleet password comes from $FLEET_PASSWORD or ~/.config/runnerctl/fleet-password.
 set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
-TOKEN=${RUNNER_TOKEN:-$(cat ~/.config/runnerctl/token 2>/dev/null || true)}
-api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
+FLEET_PASSWORD=${FLEET_PASSWORD:-$(cat ~/.config/runnerctl/fleet-password 2>/dev/null || true)}
+api() { curl -sS -H "x-fleet-password: $FLEET_PASSWORD" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
 usage() { sed -n '2,19p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}

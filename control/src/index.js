@@ -16,7 +16,8 @@
 // to the machine running replica k (replicas are numbered 1 to N and keep their number when they move, so these URLs
 // only change with the replica count). There's no shared URL in front of a project's replicas. The Worker reaches
 // machine n at <project>-m<n>, which points at tunnel runner-<n>.
-//   /            the UI (everything public)  /api/*        API, Bearer token (admin, or node for join/sync/claim)
+//   /            the UI (everything public)  /api/*        API: the fleet password (x-fleet-password) for everything, or
+//                                                          the join token (Bearer) for machines: join/sync/claim/drain/roll
 //                                            /admin/api/*  the UI's API: anyone can see everything and deploy a new
 //                                                          app, which sets that app's password; changing an app needs
 //                                                          its password (x-app-password) or the fleet password
@@ -286,7 +287,7 @@ mkdir -p "$DATA"
 docker rm -f runner-agent >/dev/null 2>&1 || true
 docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --network host --hostname "$(hostname)" \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
-  -e CONTROL_URL=${origin} -e CONTROL_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
+  -e CONTROL_URL=${origin} -e JOIN_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
   -e LABEL="\${LABEL:-}" \\
   docker:cli sh -c '
     set -e
@@ -522,9 +523,10 @@ export class Control extends DurableObject {
         });
       }
       if (path.startsWith("/api/")) {
-        const auth = request.headers.get("authorization") ?? "";
-        const admin = Boolean(this.env.ADMIN_TOKEN) && auth === `Bearer ${this.env.ADMIN_TOKEN}`;
-        const node = admin || (Boolean(this.env.NODE_TOKEN) && auth === `Bearer ${this.env.NODE_TOKEN}`);
+        // Scripts send the fleet password, as the UI does; machines send the join token.
+        const password = request.headers.get("x-fleet-password");
+        const admin = password != null && await this.checkPassword(password, request.headers.get("cf-connecting-ip") ?? "");
+        const node = admin || (Boolean(this.env.JOIN_TOKEN) && request.headers.get("authorization") === `Bearer ${this.env.JOIN_TOKEN}`);
         return await this.api(request, url, path.slice("/api".length), { admin, deploy: admin, node });
       }
       throw new HttpError(404, "not found");
@@ -550,9 +552,9 @@ export class Control extends DurableObject {
     if (this.failures.size > 10_000) for (const [k, x] of this.failures) if (now - x.at >= PASSWORD_LOCKOUT_MS) this.failures.delete(k);
   }
 
-  // The fleet password: ADMIN_PASSWORD, or the admin token if there's none. Compared in constant time.
+  // The fleet password (the secret FLEET_PASSWORD), compared in constant time.
   async checkPassword(given, ip) {
-    const expected = this.env.ADMIN_PASSWORD || this.env.ADMIN_TOKEN;
+    const expected = this.env.FLEET_PASSWORD;
     if (!expected) return false;
     const key = `${ip}|fleet`;
     this.refuseIfLocked(key, Date.now());
@@ -593,30 +595,30 @@ export class Control extends DurableObject {
     const body = () => request.json().catch(() => {
       throw new HttpError(400, "the body must be JSON");
     });
-    const need = (ok) => {
-      if (!ok) throw new HttpError(401, node || admin ? "this needs the fleet password" : "this needs the fleet password or a token");
+    const need = (ok, what = "the fleet password") => {
+      if (!ok) throw new HttpError(401, `this needs ${what}`);
     };
     if (method === "GET" && route === "/status") return json(this.status());
     if (method === "GET" && route === "/metrics") return this.metricsResponse(url.searchParams.get("range") ?? "1h");
-    if (method === "POST" && route === "/join") return need(node), json(await this.join(await body()));
-    if (method === "POST" && route === "/sync") return need(node), json(this.sync(await body()));
+    if (method === "POST" && route === "/join") return need(node, "the join token"), json(await this.join(await body()));
+    if (method === "POST" && route === "/sync") return need(node, "the join token"), json(this.sync(await body()));
     if (method === "POST" && route === "/claim") {
-      need(node);
+      need(node, "the join token");
       const pool = url.searchParams.get("pool");
       this.askPoolSize(pool, url.searchParams.get("size"));
       return json({ start: this.claimStarts(pool, "claim", Date.now()) });
     }
-    if (method === "POST" && route === "/drain") return need(node), json(this.drain(await body()));
-    if (method === "POST" && route === "/roll") return need(admin || node), json(this.roll(url.searchParams.get("machine")));
-    if (method === "GET" && route === "/join-token") return need(admin), json({ token: this.env.NODE_TOKEN });
+    if (method === "POST" && route === "/drain") return need(node, "the join token"), json(this.drain(await body()));
+    if (method === "POST" && route === "/roll") return need(admin || node, "the fleet password or the join token"), json(this.roll(url.searchParams.get("machine")));
+    if (method === "GET" && route === "/join-token") return need(admin), json({ token: this.env.JOIN_TOKEN });
     if (method === "PUT" && route === "/settings") return need(admin), json(this.putSettings(await body()));
     const ev = route.match(/^\/machines\/(\d+)\/evict$/);
     if (ev && method === "POST") return need(admin), json(this.evict(Number(ev[1])));
     const sl = route.match(/^\/slots\/(\d+)$/);
     if (sl && method === "DELETE") return need(admin), json(await this.retireSlot(Number(sl[1])));
-    // Apps: anyone can look. Deploying a new one sets its password ("password" in the body; optional with admin rights);
-    // after that, changing it needs that password (x-app-password) or admin rights. An app with no password (from
-    // before app passwords, or deployed with admin rights and none) can only be changed with admin rights.
+    // Apps: anyone can look. Deploying a new one sets its password ("password" in the body; optional with the fleet
+    // password); after that, changing it needs that password (x-app-password) or the fleet password. An app with no
+    // password (from before app passwords, or deployed with the fleet password and none) needs the fleet password.
     const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password))?$/);
     if (m) {
       const [, name, action] = m;

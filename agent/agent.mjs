@@ -4,7 +4,7 @@
 // tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's told,
 // and restarts ones that stop answering. It doesn't know what kind of machine it's on: the settings below describe it.
 // No dependencies: Node's built-ins plus the docker CLI.
-//   CONTROL_URL, CONTROL_TOKEN   the control plane and the token to join it with (required)
+//   CONTROL_URL, JOIN_TOKEN   the control plane and the fleet's join token (required)
 //   RUNNER_DATA   where projects and the agent's ID live (default /var/lib/runner)
 //   AGENT_ID      this agent's ID (default: one made up once and kept in RUNNER_DATA, so a restart gets its slot back)
 //   POOL, POOL_SIZE   the pool this machine belongs to and how many machines it should have (none: a standalone host)
@@ -41,6 +41,7 @@ const describe = () => ({
   label: env.LABEL || hostname(),
   starts: Boolean(env.START_CMD),
 });
+const JOIN_TOKEN = env.JOIN_TOKEN || env.CONTROL_TOKEN; // CONTROL_TOKEN: its name in workflows from before
 // Commands run without secrets (anything named like a token, key or password), so a compose file can't read them.
 const cleanEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !/TOKEN|SECRET|PASSWORD|KEY/i.test(k)));
 
@@ -248,7 +249,7 @@ async function join() {
     try {
       const res = await fetch(`${env.CONTROL_URL}/api/join`, {
         method: "POST",
-        headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${JOIN_TOKEN}`, "content-type": "application/json" },
         body: JSON.stringify({ agent, ...describe(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
         signal: AbortSignal.timeout(30_000),
       });
@@ -278,7 +279,7 @@ async function sync() {
   const sent = metrics.payload();
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
-    headers: { authorization: `Bearer ${env.CONTROL_TOKEN}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${JOIN_TOKEN}`, "content-type": "application/json" },
     body: JSON.stringify({ machine, run, agent, ...describe(), started, ready, status, leaving, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
