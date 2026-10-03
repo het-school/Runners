@@ -55,9 +55,12 @@ function sh(cmd, args, { timeout = 15 * 60_000, extraEnv = {} } = {}) {
   });
 }
 
-// How the control plane's Worker reaches a project on this machine (the public URLs name replicas, not machines).
+// Each copy answers its replica's public name, <app>-<k>.<domain>, which DNS points at this machine's tunnel while the
+// copy runs here. (It also still answers the older way: <app>-m<n>.<domain> plus a replica header, which is how the
+// control plane's Worker reached machines before the names pointed straight at tunnels.)
+const replicaHost = (app, replica) => `${app}-${replica}.${domain}`;
 const machineHost = (app) => `${app}-m${machine}.${domain}`;
-const REPLICA_HEADER = "X-Runner-Replica"; // which copy the Worker wants, when a machine runs more than one
+const REPLICA_HEADER = "X-Runner-Replica";
 
 // GET / for a hostname (and replica) through the local router: { code, routed }, with code 0 if nothing answered.
 // The router's own "no such project" 404 carries X-Runner-Route: none, so it isn't mistaken for the project's.
@@ -78,7 +81,7 @@ async function answers(name, seconds) {
   const end = Date.now() + seconds * 1000;
   const p = projects.get(name);
   for (;;) {
-    const { code, routed } = await probe(machineHost(p.app), p.replica);
+    const { code, routed } = await probe(replicaHost(p.app, p.replica), p.replica);
     if (code && routed && code !== 502) return true;
     if (Date.now() >= end) return false;
     await sleep(2000);
@@ -220,16 +223,16 @@ let routerConfig = "";
 const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRouter).catch((e) => log(`router update failed: ${e.message}`)));
 
 function routerJson() {
-  // The copy a project is known here by its plain name takes its host; any further copy of it here (<name>-r<k>) is
-  // matched by the replica header too, and comes first. Requests for a copy that isn't here fall to the plain one.
-  const routes = [...projects]
-    .filter(([, p]) => p.port && domain)
-    .sort(([ka, pa], [kb, pb]) => (ka === pa.app) - (kb === pb.app)) // header routes first, plain ones after
-    .map(([key, p]) => ({
-      match: [{ host: [machineHost(p.app)], ...(key === p.app ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }],
-      // stream_close_delay: a config reload would otherwise cut every websocket on the machine.
-      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }],
-    }));
+  // Each copy answers its replica's public name. The older way too: the copy a project is known here by its plain
+  // name takes the machine host; any further copy of it here (<name>-r<k>) is matched by the replica header, and comes
+  // first, so requests for a copy that isn't here fall to the plain one.
+  const handle = (p) => [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }]; // stream_close_delay: a config reload would otherwise cut every websocket on the machine
+  const copies = [...projects].filter(([, p]) => p.port && domain);
+  const routes = [
+    ...copies.map(([, p]) => ({ match: [{ host: [replicaHost(p.app, p.replica)] }], handle: handle(p) })),
+    ...copies.sort(([ka, pa], [kb, pb]) => (ka === pa.app) - (kb === pb.app)) // header routes first, plain ones after
+      .map(([key, p]) => ({ match: [{ host: [machineHost(p.app)], ...(key === p.app ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }], handle: handle(p) })),
+  ];
   routes.push({
     handle: [{
       handler: "static_response",
