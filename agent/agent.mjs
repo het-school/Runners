@@ -1,6 +1,7 @@
 // Runner agent: keeps one machine's projects in line with the control plane.
 // It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
-// (it serves each project at <project>-m<n>, which is how the control plane's Worker reaches this machine) and the
+// (it serves each project at <project>-m<n>, which is how the control plane's Worker reaches this machine; a machine
+// running two copies of a project tells them apart by the replica number the Worker sends in a header) and the
 // tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's told,
 // and restarts ones that stop answering. It doesn't know what kind of machine it's on: the settings below describe it.
 // No dependencies: Node's built-ins plus the docker CLI.
@@ -15,19 +16,20 @@
 //                 handover restarts the agent (where it runs under a supervisor, it comes back with the latest code)
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
 import { startMetrics } from "./metrics.mjs";
 
 const env = process.env;
 const pool = env.POOL || null;
-const base = env.RUNNER_DATA || "/var/lib/runner";
+const base = resolve(env.RUNNER_DATA || "/var/lib/runner");
 const started = Date.now();
 const settleBy = started + 10 * 60_000; // open the tunnel by then even if a project is still struggling
-const ROUTER_PORT = 19080; // the tunnel sends everything here, and the router (Caddy) picks the project by hostname
+const ROUTER_PORT = Number(env.ROUTER_PORT) || 19080; // the tunnel sends everything here, and the router (Caddy) picks the project by hostname
 const dir = `${base}/projects`;
 const routerDir = `${base}/router`;
+const MANIFEST = ".runner-files"; // in each project's folder: the files the agent wrote there last time
 let machine = 0; // the slot, from the control plane
 let tunnelToken = "";
 let agent = "";
@@ -54,13 +56,14 @@ function sh(cmd, args, { timeout = 15 * 60_000, extraEnv = {} } = {}) {
 }
 
 // How the control plane's Worker reaches a project on this machine (the public URLs name replicas, not machines).
-const machineHost = (name) => `${name}-m${machine}.${domain}`;
+const machineHost = (app) => `${app}-m${machine}.${domain}`;
+const REPLICA_HEADER = "X-Runner-Replica"; // which copy the Worker wants, when a machine runs more than one
 
-// GET / for a hostname through the local router: { code, routed }, with code 0 if nothing answered.
+// GET / for a hostname (and replica) through the local router: { code, routed }, with code 0 if nothing answered.
 // The router's own "no such project" 404 carries X-Runner-Route: none, so it isn't mistaken for the project's.
-function probe(host) {
+function probe(host, replica = 1) {
   return new Promise((resolve) => {
-    const req = http.get({ host: "127.0.0.1", port: ROUTER_PORT, path: "/", headers: { host }, timeout: 5000 }, (res) => {
+    const req = http.get({ host: "127.0.0.1", port: ROUTER_PORT, path: "/", headers: { host, [REPLICA_HEADER]: String(replica) }, timeout: 5000 }, (res) => {
       res.resume();
       resolve({ code: res.statusCode, routed: res.headers["x-runner-route"] !== "none" });
     });
@@ -73,8 +76,9 @@ function probe(host) {
 // except the router's "no such project" and its 502 for "the project isn't answering".
 async function answers(name, seconds) {
   const end = Date.now() + seconds * 1000;
+  const p = projects.get(name);
   for (;;) {
-    const { code, routed } = await probe(machineHost(name));
+    const { code, routed } = await probe(machineHost(p.app), p.replica);
     if (code && routed && code !== 502) return true;
     if (Date.now() >= end) return false;
     await sleep(2000);
@@ -83,14 +87,17 @@ async function answers(name, seconds) {
 
 // ---- projects ----
 
-const projects = new Map(); // name -> { v, port, s: "applying" | "healthy" | "failed", e, busy, at, misses }
+// Keyed by what the control plane calls each copy (a project's name, or <name>-r<k> for a second copy of it here).
+const projects = new Map(); // key -> { app, replica, v, port, s: "applying" | "healthy" | "failed", e, busy, at, misses }
 let domain = "";
 
-async function apply(name, want) {
-  const p = { v: want.v, port: want.port, s: "applying", e: "", busy: true, at: Date.now(), misses: 0 };
+// Writes the project's files and brings it up. `recreate` is for trying the same version again after a failure: compose
+// only recreates the containers whose config changed, so a container that's running but hung would be left as it is.
+async function apply(name, want, { recreate = false } = {}) {
+  const p = { app: want.app ?? name, replica: want.replica ?? 1, v: want.v, port: want.port, s: "applying", e: "", busy: true, at: Date.now(), misses: 0 };
   projects.set(name, p);
   updateRouter();
-  log(`${name}: starting v${want.v}`);
+  log(`${name}: starting v${want.v}${recreate ? " again" : ""}`);
   let s = "healthy";
   let e = "";
   try {
@@ -98,19 +105,29 @@ async function apply(name, want) {
     const file = `${projectDir}/compose.yaml`;
     await mkdir(projectDir, { recursive: true });
     // Dockerfiles and anything else the build needs sit next to the compose file, so `build: .` finds them.
-    // The folder isn't cleared first: relative bind mounts (./data) may live in it.
-    for (const [path, content] of Object.entries(want.files ?? {})) {
+    // The folder isn't cleared first: relative bind mounts (./data) may live in it. Files written for an earlier
+    // version that this one doesn't have are removed, so every machine builds from the same files.
+    const paths = Object.keys(want.files ?? {});
+    const inside = (path) => {
       const target = resolve(projectDir, path);
       if (!target.startsWith(`${projectDir}/`)) throw new Error(`file path ${path} points outside the project`);
+      return target;
+    };
+    const before = JSON.parse(await readFile(`${projectDir}/${MANIFEST}`, "utf8").catch(() => "[]"));
+    for (const path of before) if (!paths.includes(path)) await unlink(inside(path)).catch(() => {});
+    for (const [path, content] of Object.entries(want.files ?? {})) {
+      const target = inside(path);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content);
     }
+    await writeFile(`${projectDir}/${MANIFEST}`, JSON.stringify(paths));
     await writeFile(file, want.compose);
-    // compose only recreates the containers whose config changed, and --wait fails if one won't stay up.
+    // --wait fails if a container won't stay up.
     const up = await sh("docker", ["compose", "-p", name, "-f", file, "up", "-d", "--build", "--remove-orphans",
-      "--wait", "--wait-timeout", "300"]);
+      "--wait", "--wait-timeout", "300", ...(recreate ? ["--force-recreate"] : [])]);
     if (!up.ok) [s, e] = ["failed", up.out.split("\n").slice(-6).join("\n").slice(-600)];
     else if (want.port && !(await answers(name, 60))) [s, e] = ["failed", `nothing answers on port ${want.port} through the router`];
+    if (s === "healthy" && paths.length) sh("docker", ["image", "prune", "-f"]); // layers of earlier builds, so the disk doesn't fill up
   } catch (err) {
     [s, e] = ["failed", err.message];
   }
@@ -118,14 +135,32 @@ async function apply(name, want) {
   log(`${name}: v${want.v} ${s}${e ? ` (${e.split("\n").pop()})` : ""}`);
 }
 
+// Deletes a project's folder. Files a container wrote through a bind mount belong to root, so if the plain delete is
+// refused, it's done from a container instead.
+async function removeDir(path) {
+  try {
+    await rm(path, { recursive: true, force: true });
+  } catch (e) {
+    const r = await sh("docker", ["run", "--rm", "-v", `${path}:/p`, "busybox", "sh", "-c", "find /p -mindepth 1 -delete"]);
+    await rm(path, { recursive: true, force: true }).catch(() => {
+      throw new Error(`couldn't delete ${path}: ${e.message}${r.ok ? "" : `; ${r.out.split("\n").pop()}`}`);
+    });
+  }
+}
+
 async function remove(name) {
   const p = projects.get(name);
   p.busy = true;
   log(`${name}: removing`);
-  await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
-  projects.delete(name);
-  await rm(`${dir}/${name}`, { recursive: true, force: true });
-  updateRouter();
+  try {
+    await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
+    await removeDir(`${dir}/${name}`);
+  } finally {
+    // Whatever happened to its files, its route goes: the router then answers "no such project", which tells the
+    // Worker to try another machine.
+    projects.delete(name);
+    updateRouter();
+  }
 }
 
 // Start what's new or changed, retry what failed, remove what's no longer wanted.
@@ -133,17 +168,22 @@ function reconcile(desired) {
   for (const [name, want] of Object.entries(desired)) {
     const p = projects.get(name);
     if (p?.busy) continue;
-    const retry = p?.s === "failed" && Date.now() - p.at > 3 * 60_000;
-    if (!p || p.v !== want.v || p.port !== want.port || retry) apply(name, want).catch((e) => log(`${name}: ${e.message}`));
+    // A failed project is tried again: soon while the machine is still starting up (a hiccup mustn't hold its tunnel
+    // back for long), every 3 minutes once it's online.
+    const retry = p?.s === "failed" && Date.now() - p.at > (ready ? 3 * 60_000 : 30_000);
+    if (!p || p.v !== want.v || p.port !== want.port || retry) {
+      apply(name, want, { recreate: retry && p.v === want.v }).catch((e) => log(`${name}: ${e.message}`));
+    }
   }
   for (const [name, p] of projects) {
     if (!(name in desired) && !p.busy) remove(name).catch((e) => log(`${name}: ${e.message}`));
   }
 }
 
+// Every wanted project runs its wanted version and answers (a project without a port counts once it's up).
 const settled = (desired) => Object.entries(desired).every(([name, want]) => {
   const p = projects.get(name);
-  return p && p.v === want.v && !p.busy;
+  return p && p.v === want.v && !p.busy && p.s === "healthy";
 });
 
 // A project that stops answering three checks in a row is marked failed, which makes reconcile start it again.
@@ -163,15 +203,19 @@ async function checkHealth() {
 
 let routerChain = Promise.resolve();
 let routerConfig = "";
-// Queued so configs are applied in order.
-const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRouter));
+// Queued so configs are applied in order; a failure is logged and the next update tries again.
+const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRouter).catch((e) => log(`router update failed: ${e.message}`)));
 
 function routerJson() {
-  const routes = [...projects]
-    .filter(([, p]) => p.port && domain)
-    .map(([name, p]) => ({
-      match: [{ host: [machineHost(name)] }],
-      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1 }],
+  // Copies other than the first match the replica header too, and come first; the first copy of a project here takes
+  // whatever is left for its host (requests for a copy that isn't here any more included).
+  const routes = [...projects.values()]
+    .filter((p) => p.port && domain)
+    .sort((a, b) => (a.replica === 1) - (b.replica === 1))
+    .map((p) => ({
+      match: [{ host: [machineHost(p.app)], ...(p.replica === 1 ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }],
+      // stream_close_delay: a config reload would otherwise cut every websocket on the machine.
+      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }],
     }));
   routes.push({
     handle: [{
@@ -182,7 +226,21 @@ function routerJson() {
     }],
   });
   return JSON.stringify({
-    apps: { http: { servers: { router: { listen: [`127.0.0.1:${ROUTER_PORT}`], automatic_https: { disable: true }, routes } } } },
+    apps: {
+      http: {
+        servers: {
+          router: {
+            listen: [`127.0.0.1:${ROUTER_PORT}`],
+            automatic_https: { disable: true },
+            routes,
+            // The tunnel is on this machine, so it's trusted: the X-Forwarded-* headers it carries (the replica's
+            // public host, https, the visitor's address) reach the project instead of being replaced by this
+            // machine's own. Projects that build links from them get their public address.
+            trusted_proxies: { source: "static", ranges: ["127.0.0.1/32", "::1/128"] },
+          },
+        },
+      },
+    },
   });
 }
 
@@ -200,6 +258,7 @@ async function startRouter() {
   await mkdir(routerDir, { recursive: true });
   routerConfig = routerJson();
   await writeFile(`${routerDir}/caddy.json`, routerConfig);
+  await sh("docker", ["rm", "-f", "router"]); // left from before a restart, or from a start that failed
   const r = await sh("docker", ["run", "-d", "--name", "router", "--network", "host", "--restart", "unless-stopped",
     "-v", `${routerDir}:/etc/router:ro`, "caddy:2", "caddy", "run", "--config", "/etc/router/caddy.json"]);
   if (!r.ok) throw new Error(`router didn't start: ${r.out}`);
@@ -212,6 +271,7 @@ async function startRouter() {
 
 async function startTunnel() {
   await writeFile(`${base}/tunnel.yml`, `ingress:\n  - service: http://127.0.0.1:${ROUTER_PORT}\n`);
+  await sh("docker", ["rm", "-f", "tunnel"]); // from a start that didn't connect
   const r = await sh("docker", ["run", "-d", "--name", "tunnel", "--network", "host", "--restart", "unless-stopped",
     "-e", "TUNNEL_TOKEN", "-v", `${base}/tunnel.yml:/etc/cloudflared/config.yml:ro`,
     "cloudflare/cloudflared:latest", "tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yml", "run"],
@@ -228,9 +288,12 @@ async function startTunnel() {
 
 let ready = false;
 
-const metrics = startMetrics();
+// Only this machine's own projects (and the agent's own containers) go into the metrics, under their project's name
+// (a second copy of a project here is compose project <name>-r<k>, but the same app).
+const metrics = startMetrics({ appOf: (project) => projects.get(project)?.app ?? null });
 
-// Get a slot and its tunnel token. Keeps trying: the control plane may be unreachable, or every slot taken.
+// Get a slot and its tunnel token. Keeps trying while the control plane is unreachable or every slot is taken; gives up
+// (so whatever runs this machine can start another) if the token is refused, or, for a pool member, after 10 minutes.
 async function join() {
   agent = env.AGENT_ID || "";
   if (!agent) {
@@ -242,19 +305,33 @@ async function join() {
     }
   }
   run = `${agent}-${started}`;
+  let want = env.MACHINE ? Number(env.MACHINE) : undefined;
+  const giveUpAt = Date.now() + 10 * 60_000;
   for (let wait = 5;; wait = Math.min(wait * 2, 60)) {
     try {
       const res = await fetch(`${env.CONTROL_URL}/api/join`, {
         method: "POST",
         headers: { authorization: `Bearer ${env.JOIN_TOKEN}`, "content-type": "application/json" },
-        body: JSON.stringify({ agent, ...describe(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
+        body: JSON.stringify({ agent, ...describe(), want }),
         signal: AbortSignal.timeout(30_000),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) throw new Error(`the join token was refused: ${data.error ?? `HTTP ${res.status}`}`);
+      if (res.status === 409 && want) { // the slot this machine was started for is in use; any other will do
+        log(`slot ${want} is taken (${data.error ?? "HTTP 409"}); asking for a free one`);
+        want = undefined;
+        continue;
+      }
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      if (!(Number.isInteger(data.machine) && data.machine >= 1) || typeof data.tunnelToken !== "string" || !data.tunnelToken ||
+        typeof data.domain !== "string" || !data.domain) {
+        throw new Error(`the control plane's answer makes no sense: ${JSON.stringify(data).slice(0, 200)}`);
+      }
       ({ machine, tunnelToken, domain } = data);
       return log(`joined as machine ${machine} (${agent})`);
     } catch (e) {
+      if (e.message.startsWith("the join token was refused")) throw e;
+      if (pool && Date.now() > giveUpAt) throw new Error(`couldn't join for 10 minutes (${e.message})`);
       log(`couldn't join (${e.message}); trying again in ${wait}s`);
       await sleep(wait * 1000);
     }
@@ -266,8 +343,12 @@ async function removeLeftovers(desired) {
   for (const name of await readdir(dir).catch(() => [])) {
     if (name in desired || projects.has(name)) continue;
     log(`${name}: left over from before; removing`);
-    await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
-    await rm(`${dir}/${name}`, { recursive: true, force: true });
+    try {
+      await sh("docker", ["compose", "-p", name, "-f", `${dir}/${name}/compose.yaml`, "down", "--remove-orphans"]);
+      await removeDir(`${dir}/${name}`);
+    } catch (e) {
+      log(`${name}: ${e.message}`);
+    }
   }
 }
 
@@ -285,13 +366,15 @@ async function sync() {
   return res.json();
 }
 
-// START_CMD with SLOT=m, and the agent's full environment: it may need a token the projects don't get.
+// START_CMD with SLOT=m, and the agent's full environment: it may need a token the projects don't get. It runs in the
+// background (a slow one mustn't hold up the check-ins), once at a time per slot.
+const starting = new Set();
 function startMachine(m) {
-  return new Promise((resolve) => {
-    execFile("sh", ["-c", env.START_CMD], { timeout: 60_000, env: { ...env, SLOT: String(m) } }, (err, stdout, stderr) => {
-      log(err ? `couldn't start machine ${m}: ${`${stdout}${stderr}`.trim().split("\n").pop() || err.message}` : `started machine ${m}`);
-      resolve();
-    });
+  if (starting.has(m)) return;
+  starting.add(m);
+  execFile("sh", ["-c", env.START_CMD], { timeout: 120_000, env: { ...env, SLOT: String(m) } }, (err, stdout, stderr) => {
+    starting.delete(m);
+    log(err ? `couldn't start machine ${m}: ${`${stdout}${stderr}`.trim().split("\n").pop() || err.message}` : `started machine ${m}`);
   });
 }
 
@@ -322,10 +405,20 @@ async function main() {
   log(`machine ${machine}${describe().label ? `: ${describe().label}` : ""}${pool ? `, pool ${pool}` : ""}`);
   // Left from before a restart, maybe.
   await sh("docker", ["rm", "-f", "router", "tunnel"]);
-  await startRouter();
+  // Nothing can be served or checked without the router, so keep trying (its image pull may have failed).
+  for (;;) {
+    try {
+      await startRouter();
+      break;
+    } catch (e) {
+      log(`${e.message.split("\n")[0]}; trying again in 30s`);
+      await sleep(30_000);
+    }
+  }
   let cleaned = false;
   let successorAt = 0;
   let lastReport = 0;
+  let tunnelRetryAt = 0;
   for (;;) {
     if (leaving) { // a signal handler is checking in for the last time; don't start anything meanwhile
       await sleep(1000);
@@ -348,19 +441,26 @@ async function main() {
         cleaned = true;
         await removeLeftovers(plan.desired);
       }
-      if (env.START_CMD) for (const m of plan.start ?? []) await startMachine(m);
+      if (env.START_CMD) for (const m of plan.start ?? []) startMachine(m);
       if (plan.handover && !env.START_CMD) return shutdown("handing over: restarting the agent");
       if (plan.handover && Date.now() - successorAt > 10 * 60_000) {
         successorAt = Date.now();
         log("handing over: starting a replacement for this machine");
-        await startMachine(machine);
+        startMachine(machine);
       }
     }
-    // Open the tunnel only once the projects are up, so a fresh run doesn't take traffic it can't serve yet.
-    if (!ready && plan && (settled(plan.desired) || Date.now() > settleBy)) {
-      await startTunnel();
-      ready = true;
-      continue; // check in straight away as ready
+    // Open the tunnel only once the projects are up and answering, so a fresh run doesn't take traffic it can't serve
+    // yet (after 10 minutes, open it anyway: the control plane sees what's failing). A tunnel that won't connect is
+    // tried again in a minute; meanwhile the machine's old run, if any, keeps serving.
+    if (!ready && plan && Date.now() >= tunnelRetryAt && (settled(plan.desired) || Date.now() > settleBy)) {
+      try {
+        await startTunnel();
+        ready = true;
+        continue; // check in straight away as ready
+      } catch (e) {
+        log(`${e.message.split("\n")[0]}; trying again in a minute`);
+        tunnelRetryAt = Date.now() + 60_000;
+      }
     }
     await checkHealth();
     if (Date.now() - lastReport > 5 * 60_000) {
@@ -372,4 +472,4 @@ async function main() {
   }
 }
 
-main().catch((e) => shutdown(`agent failed: ${e.stack ?? e}`, 1));
+main().catch((e) => shutdown(`agent failed: ${e.message}`, 1));

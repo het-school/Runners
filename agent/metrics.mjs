@@ -9,7 +9,7 @@ import http from "node:http";
 const SAMPLE_MS = 10_000;
 const KEEP_MINUTES = 30; // minutes held back while the control plane is unreachable
 const PEAK = new Set(["cpu"]); // fields whose peak within the minute is kept too, as <field>Max
-const SYSTEM_CONTAINERS = new Set(["router", "tunnel"]); // the agent's own containers count as app "_system"
+const SYSTEM_CONTAINERS = new Set(["router", "tunnel", "runner-agent"]); // the agent's own containers count as app "_system"
 
 const num = (s) => Number(s) || 0;
 const read = (path) => readFile(path, "utf8").catch(() => "");
@@ -79,30 +79,44 @@ function hostSample(a, b) {
 
 // ---- containers (Docker Engine API) ----
 
+// Resolves null on any failure, including a response cut off before its end (otherwise the sampler would wait forever).
 function docker(path) {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      resolve(v);
+    };
     const req = http.get({ socketPath: "/var/run/docker.sock", path, timeout: 8000 }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (c) => (body += c));
       res.on("end", () => {
         try {
-          resolve(res.statusCode === 200 ? JSON.parse(body) : null);
+          finish(res.statusCode === 200 ? JSON.parse(body) : null);
         } catch {
-          resolve(null);
+          finish(null);
         }
       });
+      res.on("error", () => finish(null));
+      res.on("close", () => finish(null));
     });
     req.on("timeout", () => req.destroy());
-    req.on("error", () => resolve(null));
+    req.on("error", () => finish(null));
+    req.on("close", () => finish(null));
   });
 }
 
-async function readContainers() {
+// Only the agent's own projects (appOf names the app a compose project belongs to, or null) and its own containers are
+// counted; whatever else runs on the machine isn't this fleet's business.
+async function readContainers(appOf) {
   const list = (await docker("/containers/json")) ?? []; // running containers
   const out = await Promise.all(list.map(async (c) => {
     const name = (c.Names?.[0] ?? c.Id).replace(/^\//, "");
-    const app = c.Labels?.["com.docker.compose.project"] ?? (SYSTEM_CONTAINERS.has(name) ? "_system" : name);
+    const project = c.Labels?.["com.docker.compose.project"];
+    const app = project != null ? appOf(project) : SYSTEM_CONTAINERS.has(name) ? "_system" : null;
+    if (!app) return null;
     const st = await docker(`/containers/${c.Id}/stats?stream=false&one-shot=true`);
     if (!st) return { id: c.Id, app };
     const ms = st.memory_stats ?? {};
@@ -119,7 +133,7 @@ async function readContainers() {
     }
     return { id: c.Id, app, cpuNs: st.cpu_stats?.cpu_usage?.total_usage ?? 0, mem: Math.max(0, (ms.usage ?? 0) - inactive), rx, tx, br, bw };
   }));
-  return { at: performance.now(), list: out };
+  return { at: performance.now(), list: out.filter(Boolean) };
 }
 
 // Per-app totals between two readings. CPU is in percent of one core, like `docker stats`.
@@ -145,7 +159,7 @@ function appSample(a, b) {
 
 // ---- the sampler ----
 
-export function startMetrics() {
+export function startMetrics({ appOf = (project) => project } = {}) {
   let host = null;
   let cont = null;
   let latest = null;
@@ -175,7 +189,7 @@ export function startMetrics() {
     try {
       const now = Date.now();
       const t = now - (now % 60_000);
-      const [h, c] = await Promise.all([readHost(), readContainers()]);
+      const [h, c] = await Promise.all([readHost(), readContainers(appOf)]);
       if (host && cont) {
         const hs = hostSample(host, h);
         const as = appSample(cont, c);

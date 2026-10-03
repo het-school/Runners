@@ -11,6 +11,8 @@ control/test/rebalance.sh   # automatic rebalancing (uses a 20-second hot window
 control/test/replicas.sh    # replica numbers, their routes and DNS names
 control/test/pools.sh       # pool sizes, who starts machines, draining by agent ID
 control/test/auth.sh        # what needs an app's password, the fleet password, or nothing (prints ok/WRONG)
+control/test/clashes.sh     # port and container-name clashes in placement, replica-only deploys, the generated compose, the join guard (ok/WRONG)
+control/test/doubling.sh    # more replicas than machines: second copies with moved ports, their routes, moves by replica (ok/WRONG)
 ```
 
 They need Node, `npx wrangler`, `jq` and `curl`, and use ports 8911 (control plane) and 8790 (mock).

@@ -12,7 +12,8 @@
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
 #   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool github 10)
 #   runnerctl join-token             the token another host joins with (see /install.sh)
-#   runnerctl move <name> <from> [to]  move one copy of a project off a machine (new copy first, old one removed once healthy)
+#   runnerctl move <name> <from> [to] [replica]  move one copy of a project off a machine (new copy first, old one removed once
+#                                    healthy); with two copies there, say which replica
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 #   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names
@@ -21,7 +22,7 @@ set -euo pipefail
 URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
 FLEET_PASSWORD=${FLEET_PASSWORD:-$(cat ~/.config/runnerctl/fleet-password 2>/dev/null || true)}
 api() { curl -sS -H "x-fleet-password: $FLEET_PASSWORD" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,19p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { sed -n '2,20p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -95,7 +96,8 @@ PY
       "Projects:",
       (.projects[] | "  \(.name)  v\(.version)  \(.state)"
         + (if .state == "rolling out" then " (\(.rollout)/\(.machines))" else "" end)
-        + (if (.placed | length) > 0 then "  replicas: " + ([.placed[] | select(.leaving | not) | "\(.replica)→#\(.machine)"] | join(" ")) else "" end)
+        + (if (.placed | length) > 0 then "  replicas: " + ([.placed[] | select(.leaving | not) | "\(.replica)→#\(.machine)\(if .moved then "*" else "" end)"] | join(" ")) else "" end)
+        + (if .blocked then "\n    waiting: \(.blocked)" else "" end)
         + (if (.files | length) > 0 then "  [builds: \(.files | join(", "))]" else "" end)
         + (if .hasPassword == false then "  (no app password)" else "" end)
         + (if .halted then "\n    \(.halted)" else "" end)),
@@ -107,7 +109,7 @@ PY
   roll) api "/roll${1:+?machine=$1}" -X POST | jq . ;;
   pool) [ $# -eq 2 ] || usage; api /settings -X PUT -d "{\"pools\": {\"$1\": $2}}" | jq . ;;
   join-token) api /join-token | jq -r .token ;;
-  move) [ $# -ge 2 ] || usage; api "/projects/$1/move?from=$2${3:+&to=$3}" -X POST | jq -c '.placed' ;;
+  move) [ $# -ge 2 ] || usage; api "/projects/$1/move?from=$2${3:+&to=$3}${4:+&replica=$4}" -X POST | jq -c '.placed' ;;
   evict) [ $# -eq 1 ] || usage; api "/machines/$1/evict" -X POST | jq . ;;
   rebalance) case ${1:-} in on) v=true ;; off) v=false ;; *) usage ;; esac; api /settings -X PUT -d "{\"rebalance\": $v}" | jq . ;;
   retire) [ $# -eq 1 ] || usage; api "/slots/$1" -X DELETE | jq . ;;

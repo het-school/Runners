@@ -8,11 +8,11 @@ Neither the control plane nor the agent knows what a machine is, or how long it 
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and deploying a new app.
   - **Needs the app's password:** changing an app: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name), and changing its password. Whoever deploys an app sets its password; the browser keeps it for the session (or on that device if you tick the box). The fleet password works for every app too. Apps with no password (deployed by a script with the fleet password and none, or from before app passwords) can only be changed with the fleet password until one is set from the app's page or with `runnerctl password <name>`.
   - **Needs the fleet password:** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
-  - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
+  - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours, 10-minute resolution for 3 days and hourly for 30 days.
 
 ## Projects
 
-A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many machines run it (from 1 to 20, default 1; each on a different machine, so with fewer machines than that it runs on all of them). Each replica has its own URL and there's no shared one in front of them: replicas are numbered from 1, and replica *k* is at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does. The port comes from the `port` field, or from `x-runner.port` in the compose file.
+A project is a docker compose file, optionally with Dockerfiles and other files its builds need, plus a replica count: how many copies of it run (from 1 to 20, default 1), spread over the machines with the most room; with more replicas than machines, some machines run two or more copies. Each replica has its own URL and there's no shared one in front of them: replicas are numbered from 1, and replica *k* is at `https://<project>-<k>.billybishop4-workers.xyz`, whichever machine it's on, so these URLs only change when the replica count does. The port comes from the `port` field, or from `x-runner.port` in the compose file.
 
 - **Compose only:** services use published images.
 
@@ -30,13 +30,15 @@ A project is a docker compose file, optionally with Dockerfiles and other files 
 - **Dockerfile only:** a custom image. The control plane wraps it in a one-service compose file (`build: .`) that publishes the port. The app should listen on that port.
 - **Compose plus files:** files sit next to the compose file, so `build: .` or `build: ./web` (with `web/Dockerfile`) find them. You can also include whatever the Dockerfiles `COPY`, as long as it's text. Every machine builds the image when the version changes.
 
-Project names are lowercase letters, digits and dashes, and can't end in `-<number>` or `-m<number>` (those are replica and machine URLs). The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, and file paths must stay inside the project. Ports 2019 and 19080 are taken by the router.
+Project names are lowercase letters, digits and dashes, and can't end in `-<number>` or `-m<number>` (those are replica and machine URLs). The control plane checks a spec before accepting it. It must be valid YAML with a `services:` section, every local `build:` needs its Dockerfile, file paths must stay inside the project, and a `port` given alongside the compose file must agree with its `x-runner.port`. Ports 2019 and 19080 are taken by the router. Apps deployed without the fleet password get an ordinary container only: their compose files can't reach the machine itself (host folders, the Docker socket, privileged mode, host networking and so on are refused with a message naming the setting).
+
+Sending only `{"replicas": N}` (or only a port) for an existing project makes a new version with the latest version's files, so a replica change never puts back files someone else has changed since.
 
 ### Placement
 
-Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest projects already placed on it. A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute, keeping its number and URL. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
+Each replica goes to the machine with the most room: the least CPU and memory in use (from the machine's latest metrics) and the fewest copies already placed on it, machines that don't run the project yet first. Once every machine has a copy, the next replicas double up on the least busy machines: the second copy on a machine runs as compose project `<name>-r<k>` with its published host ports moved out of the first copy's way (the Worker names the replica it wants in a header, and the machine's router picks the copy). A project can't double up if its compose file uses `network_mode: host`, a `container_name` or variables in `ports`; that replica waits and the app's page says why. Two different projects that publish the same host port, or use the same `container_name`, are never placed on one machine either (the second would fail to start). A replica stays on its machine until that machine goes away (its run stops checking in); then it moves to the best machine left, within about a minute, keeping its number and URL. To move one by hand (you're about to remove the machine, say), use **Move** in the project's details or **Move apps off** on the machine: the new copy is placed first, and the old one is removed once the new one is healthy, so nothing goes down.
 
-Rebalancing is automatic (switch it off on the Fleet page or with `runnerctl rebalance off`): a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed project moved off, and a machine carrying 2 or more placed projects than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. The Fleet page lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. Each replica is on a different machine, so more replicas than machines leave the extra ones waiting (their URLs answer 503 until a machine joins). Each app's page shows where each replica landed and why.
+Rebalancing is automatic (switch it off on the Fleet page or with `runnerctl rebalance off`): a machine running two copies of a project while another machine with room runs none of it hands one over; a machine that's hot (CPU over 85% or memory over 90% on every sample for 5 minutes) has its heaviest placed copy moved off; and a machine carrying 2 or more placed copies than the emptiest one hands one over. The destination must have room (CPU under 70%, memory under 80%). It's one move at a time, at most one every 10 minutes, and no project twice in 30 minutes, so it can't thrash. The Fleet page lists what moved and why. Lowering the count removes the highest-numbered replicas; raising it adds the next numbers. Each app's page shows where each replica landed and why.
 
 ### Rollouts
 
@@ -56,7 +58,7 @@ POST   /api/projects/<name>/disable | /enable   stop / start it on every machine
 DELETE /api/projects/<name>                     delete it and its versions
 POST   /api/roll[?machine=N]                    replace machines one at a time
 PUT    /api/settings                            {"pools": {"<pool>": 10}, "rebalance": true}  (machines to keep per pool; automatic rebalancing)
-POST   /api/projects/<name>/move?from=N[&to=M]  move one copy off machine N (to M, or the machine with the most room)
+POST   /api/projects/<name>/move?from=N[&to=M][&replica=K]  move one copy off machine N (to M, or the machine with the most room)
 POST   /api/machines/<n>/evict                  move every placed project off machine n
 DELETE /api/slots/<n>                           retire an empty slot: tunnel, records and DNS names go
 GET    /api/join-token                          the join token (needs the fleet password)
@@ -77,7 +79,7 @@ curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello \
 runnerctl apply examples/hello --port 9000 --replicas 3   # a folder: Dockerfile + what it COPYs (+ compose file, if any)
 runnerctl apply examples/stremio.yml         # a compose file
 runnerctl apply path/to/Dockerfile myapp --port 8000
-runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>
+runnerctl status | get <name> [version] | disable <name> | enable <name> | rm <name>   # status marks a doubled-up copy with *
 runnerctl roll [n] | pool <name> <n>
 ```
 
@@ -103,20 +105,21 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
   - keeps the DNS in line: `<project>` and `<project>-<k>` are answered by the Worker, which reaches machine *n* at `<project>-m<n>`, pointed at tunnel `runner-<n>`
 - **Agent** ([`agent/agent.mjs`](agent/agent.mjs)), on every machine (run by [`machine.yml`](.github/workflows/machine.yml) on GitHub Actions, by `install.sh` on a host). It's configured by environment variables (listed at the top of the file) and:
   - checks in every 20 seconds, describing its machine: pool, label, whether it starts machines
-  - writes each project's files and runs `docker compose up -d --build --wait`
+  - writes each project's files and runs `docker compose up -d --build --wait`; a project that fails is tried again (every 30 seconds while the machine is starting up, every 3 minutes once it's online), and a project that stops answering is recreated
+  - opens its tunnel only once every project it was given is up and answering (or after 10 minutes), so a fresh machine never takes traffic it can't serve
   - removes what's no longer wanted
-  - restarts projects that stop answering
-  - routes `<project>-m<n>` hostnames through a local Caddy router behind the tunnel
+  - routes `<project>-m<n>` hostnames through a local Caddy router behind the tunnel, passing the visitor's address and the replica's public host and scheme through to the app (so apps that build links from them get `https://<project>-<k>…`)
+  - keeps going through the ordinary mishaps: a tunnel that won't connect or a router image that won't pull is tried again, a slow `START_CMD` runs in the background, and files a container left behind as root are deleted from a container
 - **Self-healing**:
   - A drained machine hands over to a replacement, one machine at a time, without downtime: with a `START_CMD` it starts one for its own slot; without, it restarts its agent.
   - If a pool member dies, members that can start machines start a replacement within about 2 minutes; for a pool whose members can't, whatever watches it starts the slots `POST /api/claim?pool=<name>` returns.
-  - On GitHub Actions, the workflow drains each machine 4h15m-5h15m in (at random, so machines that were replaced together drift apart) and stops the agent before the 6-hour limit.
-  - [`watchdog.yml`](.github/workflows/watchdog.yml) runs every 10 minutes and starts machines if none are left.
+  - On GitHub Actions, the workflow drains each machine 4h15m-5h15m in (at random, so machines that were replaced together drift apart) and stops the agent before the 6-hour limit. A run that ends on its own then asks the control plane what's missing and starts it; if the control plane can't be reached at all, it starts a replacement for its own slot, so the pool outlives a control-plane outage. (A cancelled run doesn't: cancelling the runs is how a pool is stopped by hand.)
+  - [`watchdog.yml`](.github/workflows/watchdog.yml) is scheduled every 10 minutes and starts machines if none are left. GitHub runs scheduled workflows late or skips them when it's busy (hours apart has been seen), so it's the backstop, not the mechanism.
   - [`roll.yml`](.github/workflows/roll.yml) restarts the fleet one machine at a time when the agent changes.
 
 ## Tests
 
-`control/test/*.sh` run the control plane locally with `wrangler dev` against a fake Cloudflare API and drive it the way the agents and the web app do; see [`control/test/README.md`](control/test/README.md).
+`control/test/*.sh` run the control plane locally with `wrangler dev` against a fake Cloudflare API and drive it the way the agents and the web app do; see [`control/test/README.md`](control/test/README.md). The agent has no suite of its own: it was exercised with a fake `docker` and a mock control plane (hung apps, failures that used to end it, leftovers it couldn't delete, join refusals).
 
 ## Setup notes
 
@@ -124,6 +127,8 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 - **Worker secrets:** two you use, `FLEET_PASSWORD` (the owner's: the web app asks for it, and `runnerctl` and scripts send it) and `JOIN_TOKEN` (machines join with it: `install.sh` takes it, and the GitHub repos have it as the secret `JOIN_TOKEN`), plus `CF_API_TOKEN`, which only the Worker uses: a Cloudflare token with Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone. App passwords are kept by the control plane.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Web app:** changes sent from other sites are refused.
-- **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
-- **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `JOIN_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`.
+- **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). Change sizes there rather than through the repos' `POOL_SIZE` variable: machines keep re-sending the size they started with, so a change there only takes hold as they're replaced. GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
+- **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `JOIN_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`. Workflow changes do need copying there (merge this repo's main into its main; it isn't a fast-forward).
+- **The machines are pinned to `ubuntu-24.04`**, not `ubuntu-latest`, so a new Ubuntu release doesn't change the machines under the fleet; move the pin on purpose. The run logs show only the router's and tunnel's logs, never the apps' (the repos are public).
+- **The join token only joins.** A machine started for a slot that's live gets that slot only if the control plane asked for a machine there (a handover's replacement, or a claimed start); otherwise it's given a free slot instead, so the token alone can't take over a live machine's tunnel.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

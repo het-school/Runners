@@ -19,14 +19,17 @@ permissions:
 jobs:
   agent:
     name: machine ${{ inputs.machine }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to a new release now and then, and a machine shouldn't change under the fleet
     timeout-minutes: 360 # GitHub's limit; the agent leaves at about 355 minutes
     steps:
       - uses: actions/checkout@v7
         with:
           repository: ${{ vars.AGENT_REPO || github.repository }} # another account's copy runs this repo's agent (README: Another GitHub account)
+          persist-credentials: false # the agent never uses git, so the job's token needn't be left on disk for the apps to find
 
       - name: Agent
+        id: agent
+        shell: bash
         env:
           CONTROL_URL: https://control.billybishop4-workers.xyz
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
@@ -36,24 +39,66 @@ jobs:
           POOL: ${{ vars.POOL || 'github' }} # this repo's pool on the control plane (set the POOL variable in a second account's copy)
           POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
           MACHINE: ${{ inputs.machine }}
-          # How a machine of this pool starts another: a run of this workflow for slot $SLOT.
-          START_CMD: gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
+          # How a machine of this pool starts another: a run of this workflow for slot $SLOT, unless one is already queued for it
+          # (a run that can't start yet would otherwise be asked for again and again).
+          START_CMD: >-
+            gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $SLOT"
+            || gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
         run: |
+          [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
           # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down
-          # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved.
-          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --retry 5 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
-              -H 'Content-Type: application/json' -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
+          # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved. The ping
+          # keeps trying for up to 15 minutes: losing it would mean a cold restart of this machine's replicas elsewhere.
+          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
+              -X POST -H "Authorization: Bearer $JOIN_TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
           # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
           # exec: the agent is the step's own process, so a cancelled run's signal reaches it too (timeout passes it on and keeps its exit status).
-          exec timeout --preserve-status 355m node agent/agent.mjs
+          exec timeout -k 2m --preserve-status 355m node agent/agent.mjs
 
-      - name: Container logs
+      # A run that ended on its own (its time was up, or it was told to leave): make sure the pool is whole. Running
+      # machines start each other within a couple of minutes, but when every machine of the pool ends at about the
+      # same time (after a long control-plane outage, say) there's nobody left to do it, and the watchdog's schedule
+      # isn't reliable. If the control plane can't be reached at all, this machine starts a replacement for its own
+      # slot, so the pool outlives the outage. Not after a cancel: cancelling the runs is how a pool is stopped by hand.
+      - name: Keep the pool whole
+        if: ${{ !cancelled() && steps.agent.outcome == 'success' }}
+        shell: bash
+        env:
+          CONTROL_URL: https://control.billybishop4-workers.xyz
+          JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          POOL: ${{ vars.POOL || 'github' }}
+          POOL_SIZE: ${{ vars.POOL_SIZE }}
+          MACHINE: ${{ inputs.machine }}
+        run: |
+          if start=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
+              "$CONTROL_URL/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -er '.start[]?'); then
+            [ -n "$start" ] || echo "every machine of the pool is running or starting"
+          else
+            echo "::warning::the control plane didn't answer; starting a replacement for machine $MACHINE"
+            start=$MACHINE
+          fi
+          rc=0
+          for m in $start; do
+            if gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $m"; then
+              echo "machine $m is already queued"
+            elif gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$m"; then
+              echo "started machine $m"
+            else
+              echo "::error::couldn't start machine $m"; rc=1
+            fi
+          done
+          exit $rc
+
+      # The agent's own containers only: what the apps log is theirs, and these run logs are public.
+      - name: Router and tunnel logs
         if: always()
         run: |
           docker stop -t 10 tunnel > /dev/null 2>&1 || true
-          docker ps -a
-          for c in $(docker ps -a --format '{{.Names}}'); do
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+          for c in router tunnel; do
             echo "::group::$c"
-            docker logs --tail 100 "$c" 2>&1
+            docker logs --tail 100 "$c" 2>&1 || true
             echo "::endgroup::"
           done

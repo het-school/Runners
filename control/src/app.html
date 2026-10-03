@@ -9,7 +9,7 @@
     color-scheme: light dark;
     --bg: #f6f6f4; --surface: #fff; --soft: #f0eeea; --line: #e4e1dc; --fg: #1d1c1a; --fg-2: #4f4c47; --muted: #6e6a64;
     --accent: #2f5bd3; --on-accent: #fff; --focus: #2f5bd3;
-    --healthy: #177245; --deploying: #a15c00; --failed: #b42318; --leaving: #4a55c9; --gone: #6e6a64;
+    --healthy: #177245; --deploying: #8d5100; --failed: #b42318; --leaving: #4a55c9; --gone: #5f5b55;
     --s1: #2a78d6; --s2: #d97a00; --s3: #0f9d76; --s4: #c0559b; --s5: #6b5bd2; --s-other: #9a968f;
     --grid: #e6e3de; --axis: #c3c0b8;
     --heat-0: #e3eefc; --heat-1: #b9d4f6; --heat-2: #86b4ee; --heat-3: #5293e3; --heat-4: #2f74cc; --heat-5: #1d58a3; --heat-6: #0f3c74; --heat-none: #f0eeea;
@@ -22,7 +22,7 @@
     :root {
       --bg: #121110; --surface: #1b1a18; --soft: #24221f; --line: #2e2c29; --fg: #f1efec; --fg-2: #cfcac3; --muted: #a29d97;
       --accent: #7b9cff; --on-accent: #0b1020; --focus: #9fb4ff;
-      --healthy: #5bd394; --deploying: #f2b84b; --failed: #ff8a7a; --leaving: #a7b2ff; --gone: #8d8882;
+      --healthy: #5bd394; --deploying: #f5c15c; --failed: #ff8a7a; --leaving: #a7b2ff; --gone: #9d9892;
       --s1: #5b9cf0; --s2: #f0a43a; --s3: #2fc495; --s4: #e07fbf; --s5: #9b8cf5; --s-other: #77726c;
       --grid: #2c2a27; --axis: #3d3a36;
       /* low recedes into the surface, high climbs to light blue */
@@ -83,13 +83,13 @@
   .pill { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); font-weight: 650; padding: 3px 9px; border-radius: var(--r-pill);
           white-space: nowrap; color: var(--k); background: color-mix(in srgb, var(--k) 14%, transparent); }
   .pill i, .chip i { font-style: normal; }
-  .healthy { --k: var(--healthy); } .deploying { --k: var(--deploying); } .failed { --k: var(--failed); } .leaving { --k: var(--leaving); } .gone { --k: var(--gone); }
+  .healthy { --k: var(--healthy); } .deploying { --k: var(--deploying); } .failed { --k: var(--failed); } .leaving { --k: var(--leaving); } .gone { --k: var(--gone); } .plain { --k: var(--fg-2); }
   @media (prefers-reduced-motion: no-preference) { .pill.deploying i { display: inline-block; animation: spin 2.4s linear infinite; } }
   @keyframes spin { to { transform: rotate(360deg); } }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
   .chip { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; min-width: 40px; justify-content: center; padding: 0 10px; border-radius: var(--r-sm);
           font-size: var(--fs-sm); font-weight: 600; text-decoration: none; color: var(--k, var(--fg-2)); background: color-mix(in srgb, var(--k, var(--muted)) 13%, transparent); }
-  .chip sub { font-weight: 500; opacity: .8; }
+  .chip sub { font-weight: 500; }
   .progress { margin-top: 8px; font-size: var(--fs-sm); color: var(--fg-2); }
   .bars { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--soft); margin-top: 6px; }
   .bars i { display: block; }
@@ -112,6 +112,7 @@
   .danger { color: var(--failed); border-color: color-mix(in srgb, var(--failed) 40%, var(--line)); }
   .primary.danger { background: var(--failed); border-color: var(--failed); color: #fff; }
   button.small, .btn.small { min-height: 32px; padding: 0 10px; font-size: var(--fs-xs); }
+  @media (pointer: coarse) { button.small, .btn.small, #lock { min-height: 40px; } label.check { min-height: 44px; } }
   button:disabled { opacity: .5; cursor: default; }
   button.icon { min-width: 40px; padding: 0; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -121,6 +122,7 @@
   input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
   label.f { display: block; font-weight: 650; font-size: var(--fs-sm); margin: 18px 0 6px; }
   label.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: var(--fs-sm); }
+  label.check input { width: 18px; height: 18px; margin: 0; }
   .hint { color: var(--muted); font-size: var(--fs-xs); margin: 5px 0 0; }
   .hint.bad { color: var(--failed); font-weight: 600; }
   button.link { background: none; border: 0; padding: 6px 0; min-height: 0; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
@@ -151,7 +153,7 @@
     table.rl tr { border-bottom: 1px solid var(--line); padding: 10px 12px; }
     table.rl tr:last-child { border-bottom: 0; }
     table.rl td { border: 0; padding: 3px 0; text-align: left !important; white-space: normal; }
-    table.rl td[data-label]:not(:first-child)::before { content: attr(data-label); display: inline-block; min-width: 96px; color: var(--muted); font-size: var(--fs-xs); }
+    table.rl td[data-label]:not(:first-child)::before { content: attr(data-label); display: inline-block; min-width: 96px; padding-right: 10px; color: var(--muted); font-size: var(--fs-xs); }
     table.rl td:first-child { font-size: var(--fs-md); }
   }
 
@@ -159,7 +161,7 @@
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px 14px; }
   .tile .label { color: var(--fg-2); font-size: var(--fs-xs); }
-  .tile .value { font-size: var(--fs-num); font-weight: 650; margin-top: 2px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tile .value { font-size: var(--fs-num); font-weight: 650; margin-top: 2px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
   .tile .subv { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr)); gap: 12px; }
   .ccard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 12px 14px 8px; min-width: 0; }
@@ -212,7 +214,8 @@
   .guide ol { margin: 4px 0; padding-left: 22px; }
   .guide code { font: 13px var(--mono); background: var(--soft); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
   .codebox { position: relative; margin: 8px 0; }
-  .codebox pre.code { border-radius: var(--r-md); padding-right: 70px; white-space: pre-wrap; word-break: break-all; }
+  .codebox pre.code { border-radius: var(--r-md); padding-right: 70px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .codebox.plain pre.code { padding-right: 12px; }
   .codebox button { position: absolute; top: 6px; right: 6px; }
   .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
   .kv div { background: var(--soft); border-radius: var(--r-md); padding: 8px 10px; }
@@ -239,12 +242,12 @@
   .dlg .err { margin-top: 12px; color: var(--failed); font-size: var(--fs-sm); font-weight: 600; }
   .opt { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
   .opt.dis { opacity: .55; }
-  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 10px;
+  #toast { position: fixed; left: 12px; right: 12px; bottom: 20px; width: fit-content; margin-inline: auto; z-index: 30; display: flex; align-items: center; gap: 10px;
            background: var(--fg); color: var(--bg); padding: 8px 8px 8px 14px; border-radius: var(--r-md); font-size: var(--fs-sm); max-width: calc(100vw - 24px); box-shadow: 0 8px 28px rgba(0,0,0,.2); }
   #toast[hidden] { display: none; }
   #toast.failed { background: var(--failed); color: #fff; }
   #toast button { background: transparent; color: inherit; border-color: color-mix(in srgb, currentColor 40%, transparent); }
-  @media (max-width: 760px) { #toast { bottom: calc(70px + env(safe-area-inset-bottom)); } }
+  @media (max-width: 760px) { #toast { bottom: auto; top: 60px; } } /* under the header: clear of the tab bar and the editor's buttons */
 </style>
 </head>
 <body>
@@ -313,6 +316,30 @@ const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const MAX_REPLICAS = 20;
 const MIN_APP_PASSWORD = 6;
 
+// Replaces a box's contents on a refresh without disturbing whoever's using it: nothing happens when the markup is
+// the same, a text selection inside it is left alone (the next refresh catches up), and keyboard focus goes back to
+// the control it was on, found again by what it is and does.
+const focusKey = (x) => x.id || `${x.tagName}|${x.dataset.act ?? ""}|${x.dataset.v ?? ""}|${x.dataset.machine ?? ""}|${x.dataset.d ?? ""}|${x.dataset.tab ?? ""}|${x.getAttribute("href") ?? ""}`;
+function setHtml(el, html) {
+  if (!el || el.__html === html) return;
+  const sel = getSelection();
+  if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
+  const a = document.activeElement;
+  const key = a && el.contains(a) ? focusKey(a) : null;
+  el.innerHTML = html;
+  el.__html = html;
+  if (key) $$("button,a[href],input,select,textarea,[tabindex]", el).find((x) => focusKey(x) === key)?.focus({ preventScroll: true });
+}
+// Redraws a box without moving the page: its height is held while it's empty, so the page doesn't shrink and jump.
+function rebuild(box, fn) {
+  box.style.minHeight = `${box.offsetHeight}px`;
+  box.replaceChildren();
+  fn();
+  requestAnimationFrame(() => (box.style.minHeight = ""));
+}
+// The compose file the control plane makes for a Dockerfile on its own; the editor leaves it out, since it's made again on every deploy.
+const GENERATED = /^(?:x-runner:\n(?:  port: \d+\n)?(?:  replicas: \d+\n)?)?services:\n  app:\n    build: \.\n(?:    ports: \["\d+:\d+"\]\n)?    restart: unless-stopped\n?$/;
+
 // ======================================================================== state
 const S = {
   status: null, statusAt: 0, statusErr: null,
@@ -336,6 +363,7 @@ function savePw(v, remember) {
 }
 function forgetPw() {
   pw = "";
+  joinInfo = null; // the join command carries the token
   sessionStorage.removeItem("fleet-password");
   localStorage.removeItem("fleet-password");
   renderChrome();
@@ -407,7 +435,7 @@ async function unlockApp(name) {
   let useFleet = false;
   const ok = await sheet({
     title: `Password for ${name}`, ok: "Unlock",
-    html: `<p class="meta">Changing ${esc(name)} needs the password it was deployed with.</p>
+    html: `<p class="meta">Changing ${esc(name)} needs its app password.</p>
       <label class="f" for="apw-in">Password</label><input id="apw-in" type="password" autocomplete="current-password" required>
       <label class="check"><input type="checkbox" id="apw-remember"> Remember on this device</label>
       <p class="hint"><button type="button" class="link" id="apw-fleet">Use the fleet password instead</button></p>`,
@@ -500,6 +528,8 @@ async function loadStatus() {
     S.status = await api("GET", "/status");
     S.statusAt = Date.now();
     S.statusErr = null;
+    // An app deleted and deployed again under the same name has new versions: forget the old ones.
+    for (const key of specCache.keys()) if (!S.status.projects.some((p) => p.name === key.split("@")[0])) specCache.delete(key);
   } catch (e) {
     S.statusErr = e.message;
   }
@@ -510,8 +540,9 @@ let metricsBusy = false;
 async function loadMetrics() {
   if (metricsBusy) return;
   metricsBusy = true;
+  const range = S.range;
   try {
-    const res = await fetch(`/api/metrics?range=${S.range}`, { cache: "no-store" });
+    const res = await fetch(`/api/metrics?range=${range}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     S.metrics = await res.json();
     S.metricsAt = Date.now();
@@ -522,6 +553,7 @@ async function loadMetrics() {
   } finally {
     metricsBusy = false;
   }
+  if (S.range !== range) loadMetrics(); // the range was switched meanwhile: get that one
 }
 
 // ======================================================================== UI pieces
@@ -540,7 +572,7 @@ function toast(message, { kind = "", action = null, sticky = false } = {}) {
     if (b.dataset.t === "act") action.fn();
   };
   clearTimeout(toast.timer);
-  if (!sticky && kind !== "failed") toast.timer = setTimeout(() => (t.hidden = true), action ? 9000 : 4500);
+  if (!sticky && kind !== "failed") toast.timer = setTimeout(() => (t.hidden = true), action ? 15000 : 4500);
 }
 const fail = (e) => toast(e.message, { kind: "failed" });
 
@@ -550,7 +582,8 @@ function sheet({ title, html, ok = "OK", okKind = "primary", cancel = "Cancel", 
   return new Promise((resolve) => {
     const d = $("#sheet");
     d.className = wide ? "wide" : "";
-    d.innerHTML = `<form class="dlg" method="dialog"><div class="dlg-head"><h3>${esc(title)}</h3><button type="button" class="icon" data-x aria-label="Close">✕</button></div>
+    d.setAttribute("aria-labelledby", "sheet-title");
+    d.innerHTML = `<form class="dlg" method="dialog"><div class="dlg-head"><h3 id="sheet-title">${esc(title)}</h3><button type="button" class="icon" data-x aria-label="Close">✕</button></div>
       <div class="dlg-body">${html}<div class="err" role="alert" hidden></div></div>
       <div class="dlg-foot">${cancel ? `<button type="button" data-x>${esc(cancel)}</button>` : ""}${ok ? `<button type="submit" class="${okKind}">${esc(ok)}</button>` : ""}</div></form>`;
     let done = false;
@@ -574,6 +607,8 @@ function sheet({ title, html, ok = "OK", okKind = "primary", cancel = "Cancel", 
       } catch (e) {
         err.textContent = e.message;
         err.hidden = false;
+        if (submit) submit.disabled = false;
+        if (!d.contains(document.activeElement) || document.activeElement === document.body) $("input,select,textarea", d)?.focus(); // not lost to the page
       } finally {
         if (submit) submit.disabled = false;
       }
@@ -595,34 +630,47 @@ const meter = (pct) => {
   const p = Math.max(0, Math.min(100, pct || 0));
   return `<span class="meter" aria-hidden="true"><i class="${p >= 90 ? "crit" : p >= 75 ? "warn" : ""}" style="width:${p}%"></i></span>`;
 };
-const codebox = (text) => `<div class="codebox"><pre class="code">${esc(text)}</pre><button type="button" class="small" data-copy>Copy</button></div>`;
+const codebox = (text, { copy = true } = {}) => `<div class="codebox${copy ? "" : " plain"}"><pre class="code">${esc(text)}</pre>${copy ? `<button type="button" class="small" data-copy>Copy</button>` : ""}</div>`;
 const rangeSeg = () => `<span class="seg" role="group" aria-label="Time range">${["1h", "6h", "24h", "7d", "30d"].map((r) =>
   `<button type="button" data-range="${r}" aria-pressed="${r === S.range}">${r}</button>`).join("")}</span>`;
 
 // ======================================================================== fleet facts
-// The run that speaks for each machine: its newest live one.
+// The run that speaks for each machine: its newest live one that's ready, or its newest if none is ready yet. While a
+// newer run is still starting (the machine replacing itself), the older one is still the one serving, so it's shown.
 function runsBy() {
+  const by = new Map();
+  for (const r of S.status.runs) if (r.live && !r.retiring) (by.get(r.machine) ?? by.set(r.machine, []).get(r.machine)).push(r);
   const out = new Map();
-  for (const r of S.status.runs) if (r.live && !r.retiring && (!out.has(r.machine) || out.get(r.machine).started < r.started)) out.set(r.machine, r);
+  for (const [m, list] of by) {
+    list.sort((a, b) => b.started - a.started);
+    const pick = list.find((r) => r.ready) ?? list[0];
+    out.set(m, pick === list[0] ? pick : { ...pick, replacing: true });
+  }
   return out;
 }
+// A slot whose only live run is on its way out.
+const leavingSlot = (n) => S.status.runs.some((r) => r.machine === n && r.live && r.retiring);
 function machineState(n, r) {
   if (!r && (S.status.starting ?? []).includes(n)) return { kind: "deploying", text: "being started" };
+  if (!r && leavingSlot(n)) return { kind: "leaving", text: "leaving" };
   if (!r) return { kind: "gone", text: "down" };
-  if (r.handover) return { kind: "deploying", text: "replacing itself" };
+  if (r.handover || r.replacing) return { kind: "deploying", text: "replacing itself" };
   if (r.draining) return { kind: "leaving", text: "going down soon" };
   if (!r.ready) return { kind: "deploying", text: "starting up" };
   if (S.status.rebalance.hot.includes(n)) return { kind: "failed", text: "hot" };
   return { kind: "healthy", text: `online · ${ago(S.status.now - r.started)}` };
 }
 const APP_STATE = { live: ["healthy", "live"], deploying: ["deploying", "deploying"], failing: ["failed", "failing"], disabled: ["gone", "disabled"] };
-// What an app is doing, from its replicas: failing if any machine reports it failed, deploying until every replica
-// that can run is healthy on the latest version. (A failing version stays until it's fixed or rolled back by hand.)
+// A machine reports each copy it runs by key: the app's name for replica 1, <name>-r<k> for another copy of it there.
+const copyKey = (name, k) => (k === 1 ? name : `${name}-r${k}`);
+const copyOf = (name, key) => (key === name ? 1 : key.startsWith(`${name}-r`) && /^\d+$/.test(key.slice(name.length + 2)) ? Number(key.slice(name.length + 2)) : null);
+// What an app is doing, from its replicas: failing if any machine reports a copy failed, deploying until every replica
+// is healthy on the latest version. (A failing version stays until it's fixed or rolled back by hand.)
 function appState(p, runs) {
   if (!p.enabled) return "disabled";
   if (!runs) return "live";
   if (appFailures(p, runs).length) return "failing";
-  return progress(p, runs).ok < Math.min(p.replicas, placeable(p)) ? "deploying" : "live";
+  return progress(p, runs).ok < p.replicas ? "deploying" : "live";
 }
 const appPill = (p, runs) => pill(...APP_STATE[appState(p, runs)]);
 const runKind = (s) => (!s ? "gone" : s.s === "healthy" ? "healthy" : s.s === "failed" ? "failed" : "deploying");
@@ -638,21 +686,25 @@ function progress(p, runs) {
   const target = p.version;
   let ok = 0, busy = 0, bad = 0;
   for (const x of copies(p)) {
-    const s = x.machine != null ? runs.get(x.machine)?.projects[p.name] : null;
+    const s = x.machine != null ? runs.get(x.machine)?.projects[copyKey(p.name, x.replica)] : null;
     if (s?.s === "failed") bad++;
     else if (s?.s === "healthy" && s.v === target) ok++;
     else busy++;
   }
   return { target, ok, busy, bad, total: p.replicas };
 }
-// Every machine where the app is failing, with its error.
+// Every copy of the app that's failing, with its machine and error.
 function appFailures(p, runs) {
-  return [...runs.values()].map((r) => ({ machine: r.machine, s: r.projects[p.name] })).filter((x) => x.s?.s === "failed")
-    .map((x) => ({ machine: x.machine, v: x.s.v, e: x.s.e || "failed" }));
+  const out = [];
+  for (const r of runs.values()) {
+    for (const [key, s] of Object.entries(r.projects)) {
+      const k = copyOf(p.name, key);
+      if (k != null && s?.s === "failed") out.push({ machine: r.machine, replica: k, v: s.v, e: s.e || "failed" });
+    }
+  }
+  return out;
 }
 const upCount = () => [...runsBy().values()].filter((r) => r.ready).length;
-// Replicas that can be placed now: one per machine, so never more than there are machines.
-const placeable = (p) => Math.min(p.replicas, upCount());
 const replicaUrl = (p, k) => `https://${p.name}-${k}.${S.status.domain}/`;
 // An app's URLs, one per replica: replica 1's as a link, and the range when there are more.
 const appUrls = (p, bold = false) => {
@@ -666,21 +718,24 @@ const machineHref = (n) => `#/machines/${n}`;
 function problems() {
   const st = S.status, runs = runsBy(), out = [];
   if (st.dnsError) out.push({ kind: "failed", text: `DNS: ${st.dnsError}` });
-  for (const n of st.dnsNotes ?? []) out.push({ kind: "deploying", text: `DNS: ${n}` });
+  for (const n of st.dnsNotes ?? []) out.push({ kind: "failed", text: `DNS: ${n}` }); // a URL that can't work until someone acts
   for (const p of st.projects) {
     const href = appHref(p.name);
     const state = appState(p, runs);
-    if (state === "failing") out.push({ kind: "failed", href, text: `${p.name}: failing on machine ${appFailures(p, runs).map((x) => x.machine).join(", ")}` });
+    if (state === "failing") out.push({ kind: "failed", href, text: `${p.name}: failing on machine ${[...new Set(appFailures(p, runs).map((x) => x.machine))].join(", ")}` });
     else if (state === "deploying") {
       const g = progress(p, runs);
-      out.push({ kind: "deploying", href, text: `${p.name}: deploying v${p.version} (${g.ok} of ${Math.min(p.replicas, placeable(p))} healthy)` });
+      out.push({ kind: "deploying", href, text: `${p.name}: deploying v${p.version} (${g.ok} of ${p.replicas} healthy)` });
     }
-    if (p.enabled && p.staying < placeable(p)) out.push({ kind: "deploying", href, text: `${p.name}: ${plural(placeable(p) - p.staying, "replica")} waiting for a machine` });
+    if (p.enabled && p.staying < p.replicas && upCount()) {
+      out.push({ kind: "deploying", href, text: `${p.name}: ${plural(p.replicas - p.staying, "replica")} waiting for a machine${p.blocked ? `: ${p.blocked}` : ""}` });
+    }
   }
-  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
+  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n) && !leavingSlot(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
   for (const n of st.rebalance.hot) out.push({ kind: "failed", href: machineHref(n), text: `Machine ${n} is hot (CPU or memory high for 5 minutes)` });
   const short = st.pools.reduce((n, x) => n + Math.max(0, x.size - x.live), 0); // the machines the fleet should have that aren't up
-  if (short) out.push({ kind: "deploying", href: "#/machines", text: `${plural(short, "machine")} missing; ${short === 1 ? "a replacement is" : "replacements are"} starting` });
+  const starting = (st.starting ?? []).length;
+  if (short) out.push({ kind: "deploying", href: "#/machines", text: `${plural(short, "machine")} missing${starting ? `; ${plural(starting, "replacement")} starting` : ""}` });
   return out;
 }
 const problemList = (list) => list.length
@@ -691,7 +746,7 @@ const problemList = (list) => list.length
 function appStatusBlock(p, runs, { full = false } = {}) {
   let html = "";
   const g = p.enabled ? progress(p, runs) : null;
-  if (g && g.ok < Math.min(p.replicas, placeable(p))) {
+  if (g && g.ok < p.replicas) {
     const w = (n) => (100 * n) / Math.max(1, g.total);
     html += `<div class="progress">v${g.target}: ${g.ok} of ${g.total} healthy${g.busy ? ` · ${g.busy} starting` : ""}${g.bad ? ` · ${g.bad} failed` : ""}
       <div class="bars" aria-hidden="true"><i style="width:${w(g.ok)}%;background:var(--healthy)"></i><i style="width:${w(g.bad)}%;background:var(--failed)"></i><i style="width:${w(g.busy)}%;background:var(--deploying);opacity:.5"></i></div></div>`;
@@ -699,20 +754,19 @@ function appStatusBlock(p, runs, { full = false } = {}) {
   const f = p.enabled ? appFailures(p, runs) : [];
   if (f.length) {
     html += `<div class="errbox"><b>Failing on ${plural(f.length, "machine")}.</b>${full ? " It stays on this version until it's fixed: edit it, or roll back from Versions." : ""}
-      ${f.map((x) => `<div class="item"><a href="${machineHref(x.machine)}">Machine ${x.machine}</a> (v${esc(x.v)})<pre>${esc(x.e)}</pre></div>`).join("")}
+      ${f.map((x) => `<div class="item"><a href="${machineHref(x.machine)}">Machine ${x.machine}</a>, replica ${x.replica} (v${esc(x.v)})<pre>${esc(x.e)}</pre></div>`).join("")}
       ${full ? `<div class="actions"><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit v${p.version}${appLockmark(p.name)}</a></div>` : ""}</div>`;
   }
   return html;
 }
-// "2 of 3 replicas placed", or "on all 5 machines (8 replicas asked)" when there are fewer machines than replicas.
-const placedText = (p) => (p.replicas > upCount() && p.staying >= placeable(p)
-  ? `on all ${plural(p.staying, "machine")} (${p.replicas} replicas asked)` : `${p.staying} of ${plural(p.replicas, "replica")} placed`);
+// "2 of 3 replicas placed".
+const placedText = (p) => (!p.enabled ? "disabled: runs nowhere" : `${p.staying} of ${plural(p.replicas, "replica")} placed`);
 function replicaChips(p, runs, { links = true } = {}) {
   if (!p.enabled) return "";
   return `<div class="chips">${copies(p).map((x) => {
-    const s = x.machine != null ? runs.get(x.machine)?.projects[p.name] : null;
+    const s = x.machine != null ? runs.get(x.machine)?.projects[copyKey(p.name, x.replica)] : null;
     const kind = x.machine == null ? "gone" : runKind(s);
-    const where = x.machine == null ? (x.replica > upCount() ? "not placed: fewer machines than replicas" : "not placed yet") : !s ? `machine ${x.machine}, not running` : `machine ${x.machine}, v${s.v} ${s.s}`;
+    const where = x.machine == null ? "not placed yet" : !s ? `machine ${x.machine}, not running` : `machine ${x.machine}, v${s.v} ${s.s}`;
     const inner = `<i aria-hidden="true">${ICON[kind]}</i>${x.replica}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
     const label = `replica ${x.replica}: ${where}`;
     return links && p.port
@@ -976,9 +1030,12 @@ function heatmap(body, rows, opts = {}) {
   const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": body.dataset.title ?? "" });
   rows.forEach((r, ri) => {
     const yy = T + ri * (rowH + gap);
-    const lab = el("text", { x: L - 8, y: yy + rowH / 2 + 4, "text-anchor": "end", class: r.href ? "lab" : "" }, svg);
+    const lab = el("text", { x: L - 8, y: yy + rowH / 2 + 4, "text-anchor": "end", class: r.href ? "lab" : "", ...(r.href ? { tabindex: "0", role: "link" } : {}) }, svg);
     lab.textContent = r.name;
-    if (r.href) lab.addEventListener("click", () => (location.hash = r.href));
+    if (r.href) {
+      lab.addEventListener("click", () => (location.hash = r.href));
+      lab.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); location.hash = r.href; } });
+    }
     el("rect", { x: L, y: yy, width: W - L - R, height: rowH, fill: "var(--heat-none)", rx: 3 }, svg);
     for (let c = 0; c < cols; c++) {
       const v = bucket(r.values, c);
@@ -1019,7 +1076,10 @@ function moreSection(box, drawInto) {
     S.moreOpen = more.open;
     if (more.open && !mg.childElementCount) drawInto(mg);
   };
-  if (S.moreOpen) more.open = true;
+  if (S.moreOpen) { // drawn now, not in the toggle event later, so the page doesn't change height after the redraw
+    more.open = true;
+    drawInto(mg);
+  }
 }
 // A 64x20 line of the last hour or so, with a dot at the end.
 function spark(vals) {
@@ -1077,7 +1137,7 @@ function fleetTiles() {
   const live = liveRows();
   const memTotal = sumLive((r) => r.h.memTotal), memUsed = sumLive((r) => r.h.memUsed);
   return tiles([
-    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: M().expected ? `${live.length} of ${M().expected} machines reporting` : `${plural(live.length, "machine")} reporting` },
+    { label: "CPU, fleet average", value: F.pct(live.length ? sumLive((r) => r.h.cpu) / live.length : null), sub: S.status && runsBy().size !== live.length ? `${live.length} of ${plural(runsBy().size, "machine")} reporting` : `${plural(live.length, "machine")} reporting` },
     { label: "Memory used", value: memTotal ? F.pct((100 * memUsed) / memTotal) : "–", sub: `${bytes(memUsed)} of ${bytes(memTotal)}` },
     { label: "Disk read", value: F.rate(sumLive((r) => r.h.diskRead)), sub: `write ${F.rate(sumLive((r) => r.h.diskWrite))}` },
     { label: "Network in", value: F.rate(sumLive((r) => r.h.netRx)), sub: `out ${F.rate(sumLive((r) => r.h.netTx))}` },
@@ -1142,6 +1202,7 @@ async function deploySpec(name, body, message) {
 }
 async function rollback(name, version) {
   const p = S.status.projects.find((x) => x.name === name);
+  if (!(await ensureApp(name))) return;
   const [old, latest] = await Promise.all([getSpec(name, version), getSpec(name, p.version)]);
   const d = specChanges(latest, { ...old, replicas: p.replicas });
   const ok = await sheet({
@@ -1181,7 +1242,7 @@ async function deleteApp(name) {
   if (!(await ensureApp(name))) return;
   const ok = await sheet({
     title: `Delete ${name}?`, ok: "Delete for good", okKind: "primary danger",
-    html: `<p>It stops on every machine, ${p.port ? "its URLs stop answering, " : ""}and all ${plural(p.version, "version")} are deleted. This can't be undone.</p>
+    html: `<p>It stops on every machine, ${p.port ? "its URLs stop answering, " : ""}and ${p.version === 1 ? "its only version is" : `all ${p.version} versions are`} deleted. This can't be undone.</p>
       <label class="f" for="del-name">Type <b>${esc(name)}</b> to confirm</label><input id="del-name" autocomplete="off" autocapitalize="off" spellcheck="false">`,
     onOpen: (d) => $("#del-name", d).focus(),
     onOk: async (d) => {
@@ -1192,6 +1253,7 @@ async function deleteApp(name) {
   });
   if (!ok) return;
   forgetAppPw(name);
+  for (const key of specCache.keys()) if (key.startsWith(`${name}@`)) specCache.delete(key);
   toast(`${name} deleted`);
   location.hash = "#/apps";
   loadStatus();
@@ -1220,45 +1282,50 @@ async function changeAppPassword(name) {
   toast(p.hasPassword ? `${name}'s password is changed` : `${name} has a password now`);
   loadStatus();
 }
-async function moveSheet(name, from) {
+async function moveSheet(name, from, replica) {
   const p = S.status.projects.find((x) => x.name === name);
   if (!(await ensureApp(name))) return;
   const runs = runsBy(), live = S.metrics?.live ?? {};
-  const on = new Set(p.placed.map((x) => x.machine));
+  const on = new Set(p.placed.filter((x) => !x.leaving).map((x) => x.machine));
   const opts = [...runs.values()].filter((r) => r.ready).sort((a, b) => a.machine - b.machine).map((r) => {
     const h = live[r.machine]?.h;
-    const count = S.status.projects.filter((q) => q.placed.some((x) => x.machine === r.machine)).length;
-    const dis = on.has(r.machine);
+    const count = S.status.projects.reduce((n, q) => n + q.placed.filter((x) => x.machine === r.machine && !x.leaving).length, 0);
+    const dis = r.machine === from;
     return `<label class="opt${dis ? " dis" : ""}"><input type="radio" name="to" value="${r.machine}"${dis ? " disabled" : ""}>
-      <span><b>Machine ${r.machine}</b> <span class="meta">${h ? `CPU ${F.pct(h.cpu)} · memory ${F.pct(pctOf(h.memUsed, h.memTotal))} · ` : ""}${plural(count, "app")}${dis ? " · already runs it" : ""}</span></span></label>`;
+      <span><b>Machine ${r.machine}</b> <span class="meta">${h ? `CPU ${F.pct(h.cpu)} · memory ${F.pct(pctOf(h.memUsed, h.memTotal))} · ` : ""}${count} ${count === 1 ? "copy" : "copies"} placed${dis ? " · where it is now" : on.has(r.machine) ? " · already runs a copy of it" : ""}</span></span></label>`;
   }).join("");
   const res = await sheet({
-    title: `Move ${name} off machine ${from}`, ok: "Move",
-    html: `<p class="meta">The new copy starts first and the old one is removed once the new one is healthy, so nothing goes down. The replica keeps its number and URL.</p>
+    title: `Move replica ${replica} of ${name} off machine ${from}`, ok: "Move",
+    html: `<p class="meta">The new copy starts first and the old one is removed once the new one is healthy, so nothing goes down. The replica keeps its number and URL. A machine that already runs a copy of ${esc(name)} gets a second one with its ports moved aside.</p>
       <label class="opt"><input type="radio" name="to" value="" checked><span><b>The machine with the most room</b></span></label>${opts}`,
     onOk: async (d) => {
       const to = $("input[name=to]:checked", d).value;
-      await inSheet(name, () => api("POST", `/projects/${enc(name)}/move?from=${from}${to ? `&to=${to}` : ""}`, null, { app: name }));
+      await inSheet(name, () => api("POST", `/projects/${enc(name)}/move?from=${from}&replica=${replica}${to ? `&to=${to}` : ""}`, null, { app: name }));
       return { to };
     },
   });
   if (!res) return;
   fast();
-  toast(`Moving ${name} off machine ${from}${res.to ? ` to machine ${res.to}` : ""}`);
+  toast(`Moving replica ${replica} of ${name} off machine ${from}${res.to ? ` to machine ${res.to}` : ""}`);
   loadStatus();
 }
 async function saveReplicas(name) {
   const p = S.status.projects.find((x) => x.name === name);
   const want = pending.replicas[name];
   try {
-    const spec = await getSpec(name, p.version);
-    if (await deploySpec(name, { compose: spec.compose, files: spec.files, port: spec.port, replicas: want }, `${name}: ${p.replicas} → ${want} replicas`)) delete pending.replicas[name];
+    // Just the count: the control plane keeps the latest version's files as they are now.
+    if (await deploySpec(name, { replicas: want }, `${name}: ${p.replicas} → ${want} replicas`)) delete pending.replicas[name];
   } catch (e) { fail(e); }
 }
 
 // ======================================================================== fleet actions
+// A machine that can start its own replacement hands over to it; a contributed machine (no pool) restarts its agent
+// in place, and its replicas are unreachable meanwhile.
+const inPlace = (r) => r && !r.pool;
 async function restartMachine(n) {
-  if (!(await confirmSheet(`Restart machine ${n}?`, "A replacement takes over before the old one leaves, so nothing goes down.", "Restart"))) return;
+  const text = inPlace(runsBy().get(n)) ? "This is a contributed machine, so its agent restarts in place: the replicas on it are unreachable for a minute or two."
+    : "A replacement takes over before the old one leaves, so nothing goes down.";
+  if (!(await confirmSheet(`Restart machine ${n}?`, text, "Restart"))) return;
   try {
     if (await fleet(() => api("POST", `/roll?machine=${n}`, null, { fleet: true }))) { fast(); toast(`Machine ${n} is being replaced`); loadStatus(); }
   } catch (e) { fail(e); }
@@ -1283,7 +1350,10 @@ async function retireSlot(n) {
   } catch (e) { fail(e); }
 }
 async function restartAll() {
-  if (!(await confirmSheet("Restart every machine?", `They're replaced one at a time, each by a fresh one that takes over before it leaves, so nothing goes down. With ${plural(runsBy().size, "machine")} this takes a while.`, "Restart all"))) return;
+  const runs = [...runsBy().values()], own = runs.filter(inPlace).length;
+  const text = `They're replaced one at a time, each by a fresh one that takes over before it leaves, so nothing goes down.${own
+    ? ` ${plural(own, "contributed machine")} restart${own === 1 ? "s" : ""} in place instead, so the replicas there are unreachable for a minute or two.` : ""} With ${plural(runs.length, "machine")} this takes a while.`;
+  if (!(await confirmSheet("Restart every machine?", text, "Restart all"))) return;
   try {
     if (await fleet(() => api("POST", "/roll", null, { fleet: true }))) { fast(); toast("Restarting machines one at a time"); loadStatus(); }
   } catch (e) { fail(e); }
@@ -1320,15 +1390,15 @@ function vOverview() {
     status() {
       const st = S.status, runs = runsBy();
       $("#ov-sub").textContent = `${plural(runs.size, "machine")} up · ${plural(st.projects.length, "app")} · ${st.domain}`;
-      $("#ov-problems").innerHTML = problemList(problems());
-      $("#ov-apps").innerHTML = st.projects.map((p) => `<a class="card" href="${appHref(p.name)}">
+      setHtml($("#ov-problems"), problemList(problems()));
+      setHtml($("#ov-apps"), st.projects.map((p) => `<a class="card" href="${appHref(p.name)}">
           <div class="row"><span class="name grow">${esc(p.name)}</span>${appPill(p, runs)}</div>
           <div class="meta">v${p.version} · ${placedText(p)}</div>${replicaChips(p, runs, { links: false })}</a>`).join("")
-        || `<div class="card empty">No apps yet. <a href="#/apps/new">Deploy your first app</a></div>`;
-      $("#ov-machines").innerHTML = machineCards(true) || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`;
-      $("#ov-activity").innerHTML = rebalanceLog(5);
+        || `<div class="card empty">No apps yet. <a href="#/apps/new">Deploy your first app</a></div>`);
+      setHtml($("#ov-machines"), machineCards(true) || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`);
+      setHtml($("#ov-activity"), rebalanceLog(5));
     },
-    charts() { $("#ov-tiles").innerHTML = fleetTiles(); },
+    charts() { setHtml($("#ov-tiles"), fleetTiles()); },
   };
 }
 
@@ -1345,7 +1415,7 @@ function machineCards(compact = false) {
     const r = runs.get(n), ms = machineState(n, r), h = live[n]?.h;
     const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
     const chips = apps.map(({ p, x }) => {
-      const s = r?.projects[p.name];
+      const s = r?.projects[copyKey(p.name, x.replica)];
       const kind = x.leaving ? "leaving" : runKind(s);
       return `<span class="chip ${kind}"><i aria-hidden="true">${ICON[kind]}</i>${esc(p.name)}<sub>#${x.replica}</sub></span>`;
     }).join("");
@@ -1364,7 +1434,7 @@ function vApps() {
   return {
     title: "Apps",
     html: `<div class="row"><h1 class="grow">Apps</h1><a class="btn primary" href="#/apps/new">New app</a></div>
-      <div class="sub">Anyone can deploy an app; changing or removing one needs the password it was deployed with, or the fleet password. Each app runs as many replicas as it asks for, on the machines with the most room.</div>
+      <div class="sub">Anyone can deploy an app; changing or removing one needs the password it was deployed with, or the fleet password. Each app runs as many replicas as it asks for, on the machines with the most room (two on one machine when there are more replicas than machines).</div>
       <div id="apps-filter"></div><div class="cards" id="apps-list" style="margin-top:14px"></div>`,
     status() {
       const st = S.status, runs = runsBy();
@@ -1373,15 +1443,15 @@ function vApps() {
         $("#apps-filter input").oninput = (e) => { S.filter = e.target.value; this.status(); };
       }
       const list = st.projects.filter((p) => p.name.includes(S.filter.trim().toLowerCase()));
-      $("#apps-list").innerHTML = list.map((p) => `<div class="card">
+      setHtml($("#apps-list"), list.map((p) => `<div class="card">
           <div class="row"><a class="name grow" href="${appHref(p.name)}">${esc(p.name)}</a>${appPill(p, runs)}</div>
           <div class="meta">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · ${placedText(p)} · ${p.files.length ? "built from files" : "published images"}</div>
-          ${p.port ? `<div class="meta url" style="margin-top:4px">${appUrls(p)}</div>` : ""}
+          ${p.port && p.enabled ? `<div class="meta url" style="margin-top:4px">${appUrls(p)}</div>` : ""}
           ${appStatusBlock(p, runs)}${replicaChips(p, runs)}
-          <div class="actions"><a class="btn small" href="${appHref(p.name)}">Open</a><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit</a></div>
+          <div class="actions"><a class="btn small" href="${appHref(p.name)}">Open</a><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit${appLockmark(p.name)}</a></div>
         </div>`).join("")
         || (st.projects.length ? `<div class="card empty">No app matches “${esc(S.filter)}”</div>`
-          : `<div class="card empty">No apps yet.<div class="actions" style="justify-content:center"><a class="btn primary" href="#/apps/new">Deploy your first app</a><a class="btn" href="#/apps/new?sample=whoami">Try an example</a></div></div>`);
+          : `<div class="card empty">No apps yet.<div class="actions" style="justify-content:center"><a class="btn primary" href="#/apps/new">Deploy your first app</a><a class="btn" href="#/apps/new?sample=whoami">Try an example</a></div></div>`));
     },
   };
 }
@@ -1438,53 +1508,56 @@ function vApp(name) {
         if (follow) loadSpec(p.version);
       }
       document.title = `${name} · Runner`;
-      $("#ad-head").innerHTML = `<div class="row"><h1 class="grow">${esc(name)}</h1>${appPill(p, runs)}</div>
+      setHtml($("#ad-head"), `<div class="row"><h1 class="grow">${esc(name)}</h1>${appPill(p, runs)}</div>
         <div class="sub">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · updated ${ago(S.status.now - p.updated)} ago · ${p.files.length ? "built from files" : "published images"}</div>
-        ${p.port ? `<div class="url" style="margin-top:4px">${appUrls(p, true)}</div>` : ""}
+        ${p.port ? `<div class="url" style="margin-top:4px">${p.enabled ? appUrls(p, true) : `<span class="meta">Disabled: its URLs answer 503 until it's enabled again.</span>`}</div>` : ""}
         <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit${appLockmark(name)}</a>
           <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}${appLockmark(name)}</button>
           <button type="button" class="danger" data-act="delete">Delete${appLockmark(name)}</button>
           <button type="button" data-act="password">${p.hasPassword ? "Change password" : "Set a password"}${appLockmark(name)}</button></div>
         <p class="hint">${LOCK(canChange(name))} ${!p.hasPassword ? "No app password: only the fleet password can change this app."
-          : appPw(name) ? `Unlocked here with its password. <button type="button" class="link" data-act="forgetpw">Forget it on this device</button>`
-          : pw ? "Unlocked here with the fleet password." : "Changing this app needs its password, or the fleet password."}</p>`;
-      $("#ad-status").innerHTML = appStatusBlock(p, runs, { full: true });
+          : appPw(name) ? `Unlocked here with its app password. <button type="button" class="link" data-act="forgetpw">Forget it on this device</button>`
+          : pw ? "Unlocked here with the fleet password." : "Changing this app needs its app password, or the fleet password."}</p>`);
+      setHtml($("#ad-status"), appStatusBlock(p, runs, { full: true }));
       const want = pending.replicas[name] ?? p.replicas;
       const up = [...runs.values()].filter((r) => r.ready).length;
       const rows = copies(p, true).map((x) => {
         const r = x.machine != null ? runs.get(x.machine) : null;
-        const s = r?.projects[p.name];
+        const s = r?.projects[copyKey(p.name, x.replica)];
         const target = !p.enabled ? null : p.version;
-        const kind = x.leaving ? "leaving" : x.machine == null ? "gone" : !r ? "gone" : runKind(s);
-        const text = x.leaving ? `moving to machine ${x.leaving.to}` : x.machine == null ? (x.replica > up ? "no machine free (starts when one joins)" : "waiting for a machine") : !r ? "machine down" : s ? s.s : "not running yet";
+        const kind = x.leaving ? "leaving" : !p.enabled || x.machine == null || !r ? "gone" : runKind(s);
+        const text = !p.enabled ? "disabled" : x.leaving ? `moving to machine ${x.leaving.to}` : x.machine == null ? "waiting for a machine" : !r ? "machine down" : s ? s.s : "not running yet";
         return { cells: [
           `<b><span class="mob">Replica </span>${x.replica}</b>`,
           x.machine != null ? `<a href="${machineHref(x.machine)}">Machine ${x.machine}</a>` : "–",
           `${s ? `v${esc(s.v)}` : "–"}${target != null && s && s.v !== target ? ` <span class="s">→ v${target}</span>` : ""}`,
-          `${pill(kind, text)}${x.since && !x.leaving ? `<div class="s">placed ${esc(ago(S.status.now - x.since))} ago: ${esc(x.reason)}</div>` : ""}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`,
-          p.port && !x.leaving ? `<a class="url" href="${esc(replicaUrl(p, x.replica))}" target="_blank" rel="noopener">${esc(replicaUrl(p, x.replica).slice(8, -1))}</a>` : `<span class="s">${p.port ? "" : "no port"}</span>`,
-          x.since && !x.leaving ? `<button type="button" class="small" data-act="move" data-machine="${x.machine}">Move</button>` : "",
+          `${pill(kind, text)}${x.since && !x.leaving ? `<div class="s">placed ${esc(ago(S.status.now - x.since))} ago: ${esc(x.reason)}</div>` : ""}${
+            p.enabled && x.machine == null && p.blocked ? `<div class="s">${esc(p.blocked)}</div>` : ""}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`,
+          p.port && p.enabled && !x.leaving ? `<a class="url" href="${esc(replicaUrl(p, x.replica))}" target="_blank" rel="noopener">${esc(replicaUrl(p, x.replica).slice(8, -1))}</a>` : `<span class="s">${p.port ? "" : "no port"}</span>`,
+          x.since && !x.leaving && p.enabled ? `<button type="button" class="small" data-act="move" data-machine="${x.machine}" data-replica="${x.replica}" aria-label="Move replica ${x.replica} off machine ${x.machine}">Move${appLockmark(name)}</button>` : "",
         ] };
       });
-      $("#ad-replicas").innerHTML = `<div class="card" style="margin-bottom:10px"><div class="row">
-          <span class="grow"><b>Replicas</b><div class="meta">1–${MAX_REPLICAS}, each on a different machine; replica k is always at ${esc(name)}-k.</div></span>
+      setHtml($("#ad-replicas"), `<div class="card" style="margin-bottom:10px"><div class="row">
+          <span style="flex:1 1 14em;min-width:0"><b>Replicas</b><div class="meta">1–${MAX_REPLICAS}, spread over the machines with the most room; replica k is always at ${esc(name)}-k.</div></span>
           <span class="stepper"><button type="button" data-act="rep" data-d="-1" aria-label="Fewer replicas"${want <= 1 ? " disabled" : ""}>−</button><b aria-live="polite">${want}</b><button type="button" data-act="rep" data-d="1" aria-label="More replicas"${want >= MAX_REPLICAS ? " disabled" : ""}>+</button></span>
-          ${want !== p.replicas ? `<button type="button" class="primary" data-act="saverep">Save (${p.replicas} → ${want})</button><button type="button" data-act="cancelrep">Cancel</button>` : ""}</div>
-          ${want > up ? `<div class="hint">${plural(up, "machine")} up, so it runs on all ${up}; replica${want - up > 1 ? `s ${up + 1}–${want} start` : ` ${want} starts`} when more machines join (until then ${want - up > 1 ? "their URLs answer" : "its URL answers"} 503).</div>` : ""}
+          ${want !== p.replicas ? `<button type="button" class="primary" data-act="saverep">Save (${p.replicas} → ${want})${appLockmark(name)}</button><button type="button" data-act="cancelrep">Cancel</button>` : ""}</div>
+          ${!p.enabled ? `<div class="hint">Disabled: it runs nowhere until it's enabled again.</div>` : ""}
+          ${want > up && up ? `<div class="hint">${plural(up, "machine")} up, so ${want - up === 1 ? "one machine runs two copies" : `${want - up} machines run two copies`} (the least busy ones), each copy with its own URL.</div>` : ""}
           ${want !== p.replicas ? `<div class="hint">Saving makes a new version with the same files.</div>` : ""}</div>
-        ${table(["Replica", "Machine", "Version", "State", "URL", ""], rows)}`;
+        ${table(["Replica", "Machine", "Version", "State", "URL", ""], rows)}`);
       const versions = st.spec?.versions ?? [];
-      $("#ad-versions").innerHTML = table(["Version", "", "Port", "Replicas", "Created", ""], [...versions].reverse().map((v) => ({
+      setHtml($("#ad-versions"), table(["Version", "", "Port", "Replicas", "Created", ""], [...versions].reverse().map((v) => ({
         cls: v.version === st.shown ? "shown" : "",
-        cells: [`<b>v${v.version}</b>`, `${v.version === p.version ? `<span class="pill gone">latest</span>` : ""}`,
+        cells: [`<b>v${v.version}</b>`, `${v.version === p.version ? `<span class="pill plain">latest</span>` : ""}`,
           esc(v.port ?? "–"), esc(v.replicas), `<span class="s">${esc(new Date(v.created).toLocaleString())}</span>`,
-          `<span class="row"><button type="button" class="small" data-act="view" data-v="${v.version}">View</button>${v.version !== p.version ? `<button type="button" class="small" data-act="diff" data-v="${v.version}">Changes</button><button type="button" class="small" data-act="rollback" data-v="${v.version}">Roll back</button>` : ""}</span>`],
-      })), { empty: "Loading…" });
+          `<span class="row"><button type="button" class="small" data-act="view" data-v="${v.version}" aria-label="View v${v.version}">View</button>${v.version !== p.version
+            ? `<button type="button" class="small" data-act="diff" data-v="${v.version}" aria-label="Changes since v${v.version}">Changes</button><button type="button" class="small" data-act="rollback" data-v="${v.version}" aria-label="Roll back to v${v.version}">Roll back${appLockmark(name)}</button>` : ""}</span>`],
+      })), { empty: "Loading…" }));
     },
     charts() {
       const box = $("#ad-charts");
       if (!box) return;
-      box.replaceChildren();
+      rebuild(box, () => {
       const ms = machineNums();
       const inst = liveRows().filter((r) => r.a?.[name]).map((r) => ({ r, v: r.a[name] }));
       const total = (k) => inst.reduce((s, x) => s + (x.v[k] ?? 0), 0);
@@ -1505,6 +1578,7 @@ function vApp(name) {
         lineChart(ccard(mg, "Disk I/O"), [{ name: "read", values: A("diskRead") }, { name: "write", values: A("diskWrite") }], { unit: "rate" });
         lineChart(ccard(mg, "Network I/O", "apps on host networking aren't counted"), [{ name: "in", values: A("netRx") }, { name: "out", values: A("netTx") }], { unit: "rate" });
       });
+      });
     },
     async click(e) {
       const b = e.target.closest("[data-act],[data-tab]");
@@ -1517,7 +1591,7 @@ function vApp(name) {
       if (act === "delete") return deleteApp(name);
       if (act === "password") return changeAppPassword(name);
       if (act === "forgetpw") { forgetAppPw(name); toast(`${name}'s password is forgotten on this device`); return this.status(); }
-      if (act === "move") return moveSheet(name, Number(b.dataset.machine));
+      if (act === "move") return moveSheet(name, Number(b.dataset.machine), Number(b.dataset.replica));
       if (act === "rep") { pending.replicas[name] = Math.max(1, Math.min(MAX_REPLICAS, (pending.replicas[name] ?? p.replicas) + Number(b.dataset.d))); if (pending.replicas[name] === p.replicas) delete pending.replicas[name]; return this.status(); }
       if (act === "cancelrep") { delete pending.replicas[name]; return this.status(); }
       if (act === "saverep") return saveReplicas(name);
@@ -1540,15 +1614,21 @@ let dirty = false;
 
 function vEditor(name, sample) {
   let latest = null;
+  let pwHint = "";
   const fileRow = (path = "", content = "") => `<div class="file"><div class="row"><input class="grow f-path" placeholder="path, e.g. web/Dockerfile" autocapitalize="off" spellcheck="false" value="${esc(path)}">
     <button type="button" class="small danger" data-act="rmfile">Remove</button></div><textarea class="f-content" spellcheck="false">${esc(content)}</textarea></div>`;
+  const taken = (v) => Boolean(S.status?.projects.some((p) => p.name === v));
+  // An example's name, or a variation of it when an app already has that name.
+  const freeName = (base) => (taken(base) ? `${base}-${Array.from({ length: 4 }, () => "abcdefghijklmnopqrstuvwxyz"[Math.floor(Math.random() * 26)]).join("")}` : base);
   function fill(spec) {
     const files = { ...(spec.files || {}) };
-    if (spec.name && !name) $("#ed-name").value = spec.name;
+    const dockerfile = spec.dockerfile ?? files.Dockerfile ?? "";
+    if (spec.name && !name) $("#ed-name").value = freeName(spec.name);
     $("#ed-port").value = spec.port ?? "";
     $("#ed-replicas").value = spec.replicas ?? "";
-    $("#ed-compose").value = spec.compose || "";
-    $("#ed-dockerfile").value = spec.dockerfile ?? files.Dockerfile ?? "";
+    // The compose file made for a Dockerfile on its own isn't shown: it's made again from the port and replicas on every deploy.
+    $("#ed-compose").value = dockerfile && GENERATED.test(spec.compose || "") ? "" : spec.compose || "";
+    $("#ed-dockerfile").value = dockerfile;
     delete files.Dockerfile;
     $("#ed-files").innerHTML = Object.entries(files).map(([p, c]) => fileRow(p, c)).join("");
     checkName();
@@ -1565,21 +1645,32 @@ function vEditor(name, sample) {
     if ($("#ed-replicas").value.trim()) body.replicas = Number($("#ed-replicas").value);
     return body;
   }
-  // The form as a spec for comparing: the Dockerfile counts as a file.
+  // The form as a spec for comparing: the Dockerfile counts as a file, and a compose box left empty for a Dockerfile-only
+  // app stands for the one the control plane makes.
   const formAsSpec = () => {
     const b = formSpec();
-    return { compose: b.compose, files: { ...b.files, ...(b.dockerfile ? { Dockerfile: b.dockerfile } : {}) }, port: b.port ?? latest?.port ?? null, replicas: b.replicas ?? latest?.replicas ?? 1 };
+    const compose = b.compose || (b.dockerfile && latest && GENERATED.test(latest.compose || "") ? latest.compose : "");
+    return { compose, files: { ...b.files, ...(b.dockerfile ? { Dockerfile: b.dockerfile } : {}) }, port: b.port ?? latest?.port ?? null, replicas: b.replicas ?? latest?.replicas ?? 1 };
   };
   function checkName() {
     if (name) return true;
     const v = $("#ed-name").value.trim();
     const msg = !v ? "" : !NAME.test(v) ? "Lowercase letters, digits and dashes; it can't start or end with a dash"
       : /-m?\d+$/.test(v) ? "It can't end in -<number> or -m<number>: those are the URLs of replicas and machines"
-      : S.status?.projects.some((p) => p.name === v) ? "There's already an app with this name; open it to edit it" : "";
-    $("#ed-name-hint").textContent = msg || `Replica k will be at https://${v || "name"}-k.${S.status?.domain ?? "…"}`;
+      : taken(v) ? `There's already an app with this name: <a href="${appHref(v)}">open it</a> to edit it` : "";
+    $("#ed-name-hint").innerHTML = msg || `Replica k will be at https://${esc(v || "name")}-k.${esc(S.status?.domain ?? "…")}`;
     $("#ed-name-hint").className = "hint" + (msg ? " bad" : "");
     return !msg && Boolean(v);
   }
+  // The replica count typed in: a whole number from 1 to MAX_REPLICAS, or nothing (which means 1).
+  function checkReplicas() {
+    const v = $("#ed-replicas").value.trim();
+    const ok = !v || (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= MAX_REPLICAS);
+    $("#ed-replicas-hint").textContent = ok ? "" : `Replicas is a whole number from 1 to ${MAX_REPLICAS}`;
+    $("#ed-replicas-hint").hidden = ok;
+    return ok;
+  }
+  const badPw = (msg) => { $("#ed-pw-hint").textContent = msg; $("#ed-pw-hint").className = "hint bad"; };
   async function addUploads(list) {
     let n = 0;
     const skipped = [];
@@ -1606,16 +1697,19 @@ function vEditor(name, sample) {
     title: name ? `Edit ${name}` : "New app",
     html: `<a class="back" href="${name ? appHref(name) : "#/apps"}">← ${name ? esc(name) : "Apps"}</a>
       <h1>${name ? `Edit ${esc(name)}` : "New app"}</h1>
-      <div class="sub">${name ? `Deploying makes a new version, and every replica switches to it. If it fails, its page shows each machine's error; edit it again, or roll back from Versions.${canChange(name) ? "" : " It needs the app's password (or the fleet password): you'll be asked."}` : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
-      ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button></div>`}
+      <div class="sub">${name ? `Deploying makes a new version, and every replica switches to it. If it fails, its page shows each machine's error; edit it again, or roll back from Versions.${canChange(name) ? ""
+          : S.status?.projects.find((x) => x.name === name)?.hasPassword === false ? " It needs the fleet password: you'll be asked." : " It needs the app's password (or the fleet password): you'll be asked."}`
+        : "An app is a Docker Compose file, a Dockerfile, or both, plus any text files the build needs."}</div>
+      ${name ? "" : `<div class="row" style="margin-top:12px"><span class="meta">Start from an example:</span><button type="button" class="small" data-act="sample" data-s="whoami">whoami (an image)</button><button type="button" class="small" data-act="sample" data-s="hello">hello (a Dockerfile)</button><a class="meta" href="#/guide">Deploy guide →</a></div>`}
       <div class="errbox" id="ed-error" role="alert" hidden></div>
       <form id="ed-form" novalidate>
-        ${name ? "" : `<label class="f" for="ed-name">Name</label><input id="ed-name" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app"><p class="hint" id="ed-name-hint"></p>`}
+        ${name ? "" : `<label class="f" for="ed-name">Name</label><input id="ed-name" maxlength="40" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="my-app" aria-describedby="ed-name-hint"><p class="hint" id="ed-name-hint" aria-live="polite"></p>`}
         <div class="row" style="gap:16px;align-items:flex-start">
-          <div><label class="f" for="ed-port">Port</label><input id="ed-port" type="number" min="1" max="65535" placeholder="8080" style="width:130px" inputmode="numeric"></div>
-          <div><label class="f" for="ed-replicas">Replicas</label><input id="ed-replicas" inputmode="numeric" placeholder="1" style="width:100px" autocomplete="off"></div>
+          <div><label class="f" for="ed-port">Port</label><input id="ed-port" type="number" min="1" max="65535" placeholder="e.g. 8080" style="width:130px" inputmode="numeric" aria-describedby="ed-fields-hint"></div>
+          <div><label class="f" for="ed-replicas">Replicas</label><input id="ed-replicas" inputmode="numeric" placeholder="1" style="width:100px" autocomplete="off" aria-describedby="ed-replicas-hint ed-fields-hint"></div>
         </div>
-        <p class="hint">Port: what the app listens on (or <code>x-runner.port</code> in the compose file; none keeps it offline). Replicas: 1–20 (default 1), each on a different machine; with fewer machines than that, it runs on all of them.</p>
+        <p class="hint bad" id="ed-replicas-hint" aria-live="polite" hidden></p>
+        <p class="hint" id="ed-fields-hint">Port: what the app listens on (or <code>x-runner.port</code> in the compose file); without one the app has no URL. Replicas: 1–20 (default 1), spread over the machines with the most room; more replicas than machines means some machines run two.</p>
         <label class="f" for="ed-compose">Docker Compose</label>
         <textarea id="ed-compose" spellcheck="false" placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports: [&quot;8080:80&quot;]&#10;    restart: unless-stopped"></textarea>
         <p class="hint">Optional with a Dockerfile: then one service is made that builds it and publishes the port.</p>
@@ -1630,18 +1724,23 @@ function vEditor(name, sample) {
           <input type="file" id="ed-up" multiple hidden><input type="file" id="ed-updir" webkitdirectory hidden>
         </div>
         <p class="hint">Anything the builds need, such as <code>web/Dockerfile</code> or <code>nginx.conf</code>, with paths relative to the compose file. A compose file and a top-level Dockerfile from an upload go in their boxes. Text only: 30 files, 250 KB in all.</p>
-        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : `<label class="f" for="ed-pw">Password</label>
-        <input id="ed-pw" type="password" autocomplete="new-password" maxlength="200">
-        <label class="f" for="ed-pw2">Password again</label>
-        <input id="ed-pw2" type="password" autocomplete="new-password" maxlength="200">
+        ${name ? `<div id="ed-diff" style="margin-top:16px"></div>` : `<label class="f" for="ed-pw">App password (new)</label>
+        <input id="ed-pw" type="password" autocomplete="new-password" maxlength="200" aria-describedby="ed-pw-hint">
+        <label class="f" for="ed-pw2">App password again</label>
+        <input id="ed-pw2" type="password" autocomplete="new-password" maxlength="200" aria-describedby="ed-pw-hint">
         <label class="check"><input type="checkbox" id="ed-pw-remember"> Remember on this device</label>
-        <p class="hint" id="ed-pw-hint"></p>`}
+        <p class="hint" id="ed-pw-hint" aria-live="polite"></p>`}
         <div class="formfoot">${name ? `<button type="button" data-act="changes">Show changes</button><span class="spacer"></span>` : ""}<a class="btn" href="${name ? appHref(name) : "#/apps"}">Cancel</a><button type="submit" class="primary" id="ed-save">Deploy</button></div>
       </form>`,
     async mount() {
       dirty = false;
       const form = $("#ed-form");
-      form.addEventListener("input", (e) => { dirty = true; if (e.target.id === "ed-name") checkName(); });
+      form.addEventListener("input", (e) => {
+        dirty = true;
+        if (e.target.id === "ed-name") checkName();
+        if (e.target.id === "ed-replicas") checkReplicas();
+        if ((e.target.id === "ed-pw" || e.target.id === "ed-pw2") && $("#ed-pw-hint").className !== "hint") { $("#ed-pw-hint").textContent = pwHint; $("#ed-pw-hint").className = "hint"; }
+      });
       $("#ed-up").onchange = (e) => addUploads(e.target.files);
       $("#ed-updir").onchange = (e) => addUploads(e.target.files);
       form.onsubmit = async (ev) => {
@@ -1650,6 +1749,7 @@ function vEditor(name, sample) {
         err.hidden = true;
         const n = name || $("#ed-name").value.trim();
         if (!name && !checkName()) { $("#ed-name").focus(); $("#ed-name-hint").className = "hint bad"; if (!n) $("#ed-name-hint").textContent = "Give the app a name"; return; }
+        if (!checkReplicas()) { $("#ed-replicas").focus(); return; }
         const body = formSpec();
         if (!name) {
           // A new app's password: needed to change it later. With the fleet unlocked it's optional.
@@ -1657,9 +1757,13 @@ function vEditor(name, sample) {
           if (p1 || p2 || !pw) {
             const bad = p1.length < MIN_APP_PASSWORD ? ["#ed-pw", `Give the app a password of ${MIN_APP_PASSWORD} characters or more`]
               : p1 !== p2 ? ["#ed-pw2", "The two passwords don't match"] : null;
-            if (bad) { $(bad[0]).focus(); $("#ed-pw-hint").textContent = bad[1]; $("#ed-pw-hint").className = "hint bad"; return; }
+            if (bad) { $(bad[0]).focus(); badPw(bad[1]); return; }
             body.password = p1;
           }
+        }
+        // No port anywhere means no URL; make sure that's meant.
+        if (!body.port && !/^x-runner:\s*\n(?:[ \t]+\S.*\n)*?[ \t]+port:/m.test(body.compose) && !(latest && !latest.port)) {
+          if (!(await confirmSheet("Deploy without a URL?", "No port is set, so the app gets no URL; it still runs. Give it the port it listens on (or <code>x-runner.port</code> in the compose file) to reach it.", "Deploy anyway"))) return;
         }
         $("#ed-save").disabled = true;
         $("#ed-save").textContent = "Deploying…";
@@ -1687,12 +1791,28 @@ function vEditor(name, sample) {
           const p = await api("GET", `/projects/${enc(name)}`);
           latest = p;
           fill(p);
-        } catch (e) { fail(e); }
+        } catch (e) {
+          if (e.status === 404) { // deleted meanwhile: say so instead of showing an empty form
+            dirty = false;
+            main.innerHTML = `<a class="back" href="#/apps">← Apps</a><h1>No app called ${esc(name)}</h1><p class="meta">It may have been deleted. <a href="#/apps/new">Deploy a new app</a></p>`;
+            return;
+          }
+          fail(e);
+        }
       } else if (sample && SAMPLES[sample]) fill(SAMPLES[sample]);
       else checkName();
-      if (!name) $("#ed-pw-hint").textContent = pw
-        ? "Optional while the fleet is unlocked: without one, only the fleet password can change the app."
-        : `Changing, disabling or deleting the app later needs it. ${MIN_APP_PASSWORD} characters or more; if it's lost, only the fleet's owner can set a new one.`;
+      if (!name) {
+        pwHint = pw ? "Optional while the fleet is unlocked: without one, only the fleet password can change the app."
+          : `Changing, disabling or deleting the app later needs it. ${MIN_APP_PASSWORD} characters or more; if it's lost, only the fleet's owner can set a new one.`;
+        $("#ed-pw-hint").textContent = pwHint;
+      }
+    },
+    status() {
+      // The first status after the page opened: the domain in the name hint, and whether the name is taken.
+      if (!name && !this.sawStatus && $("#ed-name")) {
+        this.sawStatus = true;
+        if ($("#ed-name-hint").className === "hint" || $("#ed-name").value) checkName();
+      }
     },
     async click(e) {
       const b = e.target.closest("[data-act]");
@@ -1703,6 +1823,7 @@ function vEditor(name, sample) {
       if (act === "upload") $("#ed-up").click();
       if (act === "uploaddir") $("#ed-updir").click();
       if (act === "sample") { fill(SAMPLES[b.dataset.s]); dirty = true; }
+      if (act === "sample" && !$("#ed-pw").value) $("#ed-pw").focus();
       if (act === "changes" && latest) {
         const box = $("#ed-diff");
         if (box.innerHTML) { box.innerHTML = ""; b.textContent = "Show changes"; return; }
@@ -1720,8 +1841,8 @@ function vMachines() {
     html: `<h1>Machines</h1><div class="sub" id="mc-sub"></div><div class="cards two" id="mc-list" style="margin-top:14px"></div>`,
     status() {
       const runs = runsBy();
-      $("#mc-sub").innerHTML = `${plural(runs.size, "machine")} up · <a href="#/fleet">Fleet settings</a>`;
-      $("#mc-list").innerHTML = machineCards() || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`;
+      setHtml($("#mc-sub"), `${plural(runs.size, "machine")} up · <a href="#/fleet">Fleet settings</a>`);
+      setHtml($("#mc-list"), machineCards() || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`);
     },
   };
 }
@@ -1736,23 +1857,27 @@ function vMachine(n) {
     status() {
       const st = S.status, runs = runsBy(), r = runs.get(n), ms = machineState(n, r);
       const known = st.slots.includes(n) || r;
-      $("#md-head").innerHTML = `<div class="row"><h1 class="grow">Machine ${n}</h1>${pill(ms.kind, ms.text)}</div>
-        <div class="sub">${r ? `${r.label ? `${esc(r.label)} · ` : ""}up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
+      const startingHere = !r && ((st.starting ?? []).includes(n) || leavingSlot(n));
+      setHtml($("#md-head"), `<div class="row"><h1 class="grow">Machine ${n}</h1>${pill(ms.kind, ms.text)}</div>
+        <div class="sub">${r ? `${r.label ? `${esc(r.label)} · ` : ""}up ${ago(st.now - r.started)}${r.replacing ? " · a fresh machine is starting to take over" : ""}`
+          : (st.starting ?? []).includes(n) ? "A machine is being started for this slot." : leavingSlot(n) ? "On its way out."
+          : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`);
       const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
-      $("#md-apps").innerHTML = table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
-        const s = r?.projects[p.name];
+      setHtml($("#md-apps"), table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
+        const s = r?.projects[copyKey(p.name, x.replica)];
         const kind = x.leaving ? "leaving" : !r ? "gone" : runKind(s);
         return { href: appHref(p.name), cells: [`<a href="${appHref(p.name)}"><b>${esc(p.name)}</b></a>`, `#${x.replica}`, s ? `v${esc(s.v)}` : "–",
           `${pill(kind, x.leaving ? `moving to machine ${x.leaving.to}` : !r ? "machine down" : s ? s.s : "not running yet")}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`] };
-      }), { empty: "No apps are placed here" });
-      $("#md-actions").innerHTML = `<div class="card"><p class="meta" style="margin-top:0">These change the fleet, so they need the password.</p><div class="actions">
+      }), { empty: "No apps are placed here" }));
+      setHtml($("#md-actions"), `<div class="card"><p class="meta" style="margin-top:0">These change the fleet, so they need the password.</p><div class="actions">
         ${r ? `<button type="button" data-act="restart">Restart${lockmark()}</button><button type="button" data-act="evict">Move apps off${lockmark()}</button>`
-          : `<button type="button" class="danger" data-act="retire">Retire slot ${n}${lockmark()}</button>`}</div></div>`;
+          : startingHere ? `<span class="meta">Nothing to do while a machine is on its way.</span>`
+          : `<button type="button" class="danger" data-act="retire">Retire slot ${n}${lockmark()}</button>`}</div></div>`);
     },
     charts() {
       const box = $("#md-charts");
       if (!box) return;
-      box.replaceChildren();
+      rebuild(box, () => {
       const live = M().live[n], x = live?.h ?? {};
       const H = (k) => hcol(n, k);
       if (live) box.insertAdjacentHTML("beforeend", tiles([
@@ -1780,6 +1905,7 @@ function vMachine(n) {
         lineChart(ccard(mg, "Disk I/O"), [{ name: "read", values: H("diskRead") }, { name: "write", values: H("diskWrite") }], { unit: "rate" });
         lineChart(ccard(mg, "Network I/O"), [{ name: "in", values: H("netRx") }, { name: "out", values: H("netTx") }], { unit: "rate" });
       });
+      });
     },
     click(e) {
       const b = e.target.closest("[data-act]");
@@ -1798,7 +1924,7 @@ function vMetrics() {
     charts() {
       const box = $("#mx");
       if (!box) return;
-      box.replaceChildren();
+      rebuild(box, () => {
       $("#mx-sub").textContent = `${S.metrics.step / 60000}-minute points · updated ${ago(Date.now() - S.metricsAt)} ago`;
       box.insertAdjacentHTML("beforeend", `<h2>Fleet now</h2>${fleetTiles()}<h2>Machines now</h2>`);
       box.insertAdjacentHTML("beforeend", table(["Machine", "CPU", "Memory", "Disk read / write", "Network in / out"], liveRows().map((r) => ({
@@ -1822,6 +1948,7 @@ function vMetrics() {
         lineChart(ccard(mg, "Disk I/O", "all machines"), [{ name: "read", values: fleetH("diskRead") }, { name: "write", values: fleetH("diskWrite") }], { unit: "rate" });
         lineChart(ccard(mg, "Network I/O", "all machines"), [{ name: "in", values: fleetH("netRx") }, { name: "out", values: fleetH("netTx") }], { unit: "rate" });
       });
+      });
     },
     click(e) {
       const b = e.target.closest("[data-heat]");
@@ -1838,14 +1965,14 @@ function vFleet() {
     title: "Fleet",
     html: `<h1>Fleet</h1><div class="sub">Everyone can see this page; changing anything here needs the fleet password.</div>
       <h2>Rebalancing</h2><div id="fl-rebalance"></div>
-      <h2>Restart</h2><div class="card"><div class="row"><span class="grow meta">Replace every machine, one at a time, without downtime (for example after changing the agent).</span><button type="button" data-act="rollall" id="fl-roll"></button></div></div>
+      <h2>Restart</h2><div class="card"><div class="row"><span class="grow meta">Restart every machine, one at a time (for example after changing the agent). A machine that can start its own replacement hands over to it first; a contributed machine restarts its agent in place.</span><button type="button" data-act="rollall" id="fl-roll"></button></div></div>
       <h2>Add a machine</h2><div id="fl-join"></div>`,
     status() {
       const st = S.status;
-      $("#fl-rebalance").innerHTML = `<div class="card"><div class="row"><span class="grow"><b>Automatic rebalancing</b></span>
-        <button type="button" class="switch" data-act="rebalance" aria-pressed="${st.rebalance.on}">${st.rebalance.on ? "✓ On" : "○ Off"}${lockmark()}</button></div>${rebalanceLog(10)}</div>`;
-      $("#fl-roll").innerHTML = `Restart all${lockmark()}`;
-      $("#fl-join").innerHTML = `<div class="card"><p class="meta" style="margin:0">Any Linux machine with Docker can join the fleet with one command.</p><div class="actions"><a class="btn" href="#/contribute">How to contribute a machine</a></div></div>`;
+      setHtml($("#fl-rebalance"), `<div class="card"><div class="row"><span class="grow"><b>Automatic rebalancing</b></span>
+        <button type="button" class="switch" role="switch" data-act="rebalance" aria-checked="${st.rebalance.on}" aria-pressed="${st.rebalance.on}" aria-label="Automatic rebalancing">${st.rebalance.on ? "✓ On" : "○ Off"}${lockmark()}</button></div>${rebalanceLog(10)}</div>`);
+      setHtml($("#fl-roll"), `Restart all${lockmark()}`);
+      setHtml($("#fl-join"), `<div class="card"><p class="meta" style="margin:0">Any Linux machine with Docker can join the fleet with one command.</p><div class="actions"><a class="btn" href="#/contribute">How to contribute a machine</a></div></div>`);
     },
     click(e) {
       const b = e.target.closest("[data-act]");
@@ -1884,8 +2011,8 @@ function vContribute() {
         <div id="cj-join"></div>
         <h3>2. Run it on the machine</h3>
         <p>It runs <a href="/install.sh" target="_blank" rel="noopener">install.sh</a> from the control plane (read it first if you like), which starts the agent in the container <code>runner-agent</code>. The agent downloads its latest code each time it starts, joins, and keeps its machine number across restarts.</p>
-        ${codebox(`curl -fsSL ${o}/install.sh | sudo JOIN_TOKEN=<token> sh`)}
-        <p>Options, as more <code>NAME=value</code> before <code>sh</code>:</p>
+        ${codebox(`curl -fsSL ${o}/install.sh | sudo JOIN_TOKEN=<token> sh`, { copy: false })}
+        <p>That's the shape of it; copy the real one, token filled in, from step 1. Options, as more <code>NAME=value</code> before <code>sh</code>:</p>
         <ul><li><code>LABEL=&lt;name&gt;</code>: what the pages call it (default: its hostname).</li>
           <li><code>RUNNER_DATA=&lt;folder&gt;</code>: where it keeps its files (default <code>/var/lib/runner</code>).</li></ul>
         <h3>3. Check it joined</h3>
@@ -1897,8 +2024,8 @@ function vContribute() {
     status() {
       // A poll mustn't redraw the form while someone's typing in it; once the command is shown, it follows newcomers.
       const box = $("#cj-join");
-      if (joinInfo || !$("#cj-label", box)) box.innerHTML = joinBlock();
-      else $("[data-act=join]", box).innerHTML = `Show the join command${lockmark()}`;
+      if (joinInfo || !$("#cj-label", box)) setHtml(box, joinBlock());
+      else setHtml($("[data-act=join]", box), `Show the join command${lockmark()}`);
     },
     click(e) {
       const b = e.target.closest("[data-act=join]");
@@ -1917,7 +2044,7 @@ function vGuide() {
       if ($("#guide").childElementCount) return;
       const d = esc(dom());
       $("#guide").innerHTML = `
-      <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 20, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
+      <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 20, 1 by default), spread over the machines with the most free CPU and memory, one per machine while there are machines without one; with more replicas than machines, some machines run two copies (the second one's ports are moved aside for it).
         Each replica has its own URL: replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code>, whichever machine it's on. There's no shared URL that spreads visitors across replicas, so hand out the replica URL you want people on.
         Each deploy is a new version, and every replica switches to it at once. If it fails, it stays failing (the app's page shows each machine's error) until you deploy a fix or roll back.</p>
       <h3>From this site</h3>
@@ -1929,14 +2056,14 @@ function vGuide() {
         <li><b>Deploy.</b> The app's page shows each replica come up, and every machine's error if one fails.</li></ol>
       <p class="hint">Roll back from the app's Versions list: <b>Roll back</b> deploys that version's files again (it becomes the newest version) and keeps the replica count. The app's page also has <b>Change password</b>.</p>
       <h3>With the API</h3>
-      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–20, default 1; with fewer machines than replicas, it runs on every machine), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more).
+      <p>Send JSON to <code>PUT ${esc(o)}/admin/api/projects/&lt;name&gt;</code>. Fields: <code>compose</code>, <code>dockerfile</code>, <code>files</code> (<code>{"path": "text"}</code>), <code>port</code>, <code>replicas</code> (1–20, default 1), and for a new app <code>password</code> (${MIN_APP_PASSWORD} characters or more). Sending only <code>{"replicas": N}</code> to an existing app changes the count and keeps its files.
         After that, every change to the app (<code>PUT</code>, <code>/disable</code>, <code>/enable</code>, <code>/move</code>, <code>DELETE</code>) needs the header <code>x-app-password</code>; <code>PUT …/projects/&lt;name&gt;/password</code> with <code>{"password": "new"}</code> changes it.
         The fleet password, in <code>x-fleet-password</code>, can change any app, and fleet changes (<code>/settings</code>, <code>/roll</code>, <code>/machines/&lt;n&gt;/evict</code>, <code>/slots/&lt;n&gt;</code>, <code>/join-token</code>) need it.</p>
       ${codebox(`curl -X PUT ${o}/admin/api/projects/whoami \\\n  -H 'Content-Type: application/json' \\\n  -d '{"port": 8080, "replicas": 2, "password": "choose-one", "compose": "services:\\n  web:\\n    image: traefik/whoami\\n    command: [\\"--port\\", \\"8080\\"]\\n    ports: [\\"8080:8080\\"]\\n"}'`)}
       <p class="hint">Files on disk: let <code>jq</code> build the body. Updating an app that exists: drop <code>password</code> and send <code>-H "x-app-password: $PW"</code>.</p>
       ${codebox(`jq -n --rawfile df my-app/Dockerfile --rawfile app my-app/app.py --arg pw "$PW" \\\n  '{port: 8000, dockerfile: $df, files: {"app.py": $app}, password: $pw}' |\ncurl -X PUT ${o}/admin/api/projects/my-app -H 'Content-Type: application/json' --data-binary @-`)}
       ${codebox(`B=${o}/admin/api; P="x-app-password: $PW"\ncurl $B/status                                  # every app and machine\ncurl $B/projects/my-app                         # the current spec and its versions\ncurl $B/projects/my-app?version=2               # an earlier version\ncurl -X POST $B/projects/my-app/disable -H "$P" # stop it everywhere, keep its versions\ncurl -X POST $B/projects/my-app/enable -H "$P"\ncurl -X DELETE $B/projects/my-app -H "$P"       # delete it and its versions`)}
-      <p class="hint">With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does this for you. Limits: 30 files, 250 KB, text only; ports 2019 and 19080 are taken.</p>
+      <p class="hint">With the repo checked out, <code>bin/runnerctl apply &lt;folder or file&gt; [name] --port N</code> does this for you. Limits: 30 files, 250 KB, text only; ports 2019 and 19080 are taken. Two apps that publish the same host port are never placed on the same machine.</p>
       <h3>Add a machine</h3>
       <p>Any Linux machine with Docker can join: see <a href="#/contribute">Contribute a machine</a>.</p>`;
     },
@@ -1989,7 +2116,7 @@ function draw() {
 }
 function renderChrome() {
   const lock = $("#lock");
-  lock.innerHTML = `${LOCK(Boolean(pw))} ${pw ? "Unlocked" : "Locked"}`;
+  lock.innerHTML = `${LOCK(Boolean(pw))} ${pw ? "Fleet unlocked" : "Fleet locked"}`;
   lock.className = pw ? "open" : "";
   lock.title = pw ? "Lock: forget the fleet password on this browser" : "Unlock fleet changes with the password";
   const banner = $("#banner");
@@ -1997,7 +2124,7 @@ function renderChrome() {
   if (S.statusErr) banner.textContent = `${S.statusErr}. ${S.status ? `Showing what it said ${ago(Date.now() - S.statusAt)} ago.` : ""}`;
   if (!S.status) { $("#summary").textContent = S.statusErr ? "" : "Loading…"; return; }
   const n = problems().filter((x) => x.kind === "failed" || x.kind === "gone").length;
-  $("#summary").innerHTML = `${pill(n ? "failed" : "healthy", `${runsBy().size} up${n ? ` · ${n} problem${n === 1 ? "" : "s"}` : ""}`)}`;
+  setHtml($("#summary"), `${pill(n ? "failed" : "healthy", `${runsBy().size} up${n ? ` · ${n} problem${n === 1 ? "" : "s"}` : ""}`)}`);
 }
 
 // Global controls: copy buttons, the time range, the lock.
