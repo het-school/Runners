@@ -41,7 +41,6 @@ const describe = () => ({
   label: env.LABEL || hostname(),
   starts: Boolean(env.START_CMD),
 });
-const JOIN_TOKEN = env.JOIN_TOKEN || env.CONTROL_TOKEN; // CONTROL_TOKEN: its name in workflows from before
 // Commands run without secrets (anything named like a token, key or password), so a compose file can't read them.
 const cleanEnv = Object.fromEntries(Object.entries(env).filter(([k]) => !/TOKEN|SECRET|PASSWORD|KEY/i.test(k)));
 
@@ -249,7 +248,7 @@ async function join() {
     try {
       const res = await fetch(`${env.CONTROL_URL}/api/join`, {
         method: "POST",
-        headers: { authorization: `Bearer ${JOIN_TOKEN}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${env.JOIN_TOKEN}`, "content-type": "application/json" },
         body: JSON.stringify({ agent, ...describe(), want: env.MACHINE ? Number(env.MACHINE) : undefined }),
         signal: AbortSignal.timeout(30_000),
       });
@@ -279,7 +278,7 @@ async function sync() {
   const sent = metrics.payload();
   const res = await fetch(`${env.CONTROL_URL}/api/sync`, {
     method: "POST",
-    headers: { authorization: `Bearer ${JOIN_TOKEN}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${env.JOIN_TOKEN}`, "content-type": "application/json" },
     body: JSON.stringify({ machine, run, agent, ...describe(), started, ready, status, leaving, metrics: sent }),
     signal: AbortSignal.timeout(15_000),
   });
