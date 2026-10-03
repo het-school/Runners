@@ -7,7 +7,7 @@ Neither the control plane nor the agent knows what a machine is, or how long it 
 - **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments) and deploying a new app.
   - **Needs the app's password:** changing an app: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name), and changing its password. Whoever deploys an app sets its password; the browser keeps it for the session (or on that device if you tick the box). The fleet password works for every app too. Apps with no password (deployed with the admin token and none, or from before app passwords) can only be changed with the fleet password until one is set from the app's page or with `runnerctl password <name>`.
-  - **Needs the fleet password:** changing the fleet, which covers pool sizes, automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
+  - **Needs the fleet password:** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
   - **Metrics:** CPU, memory, disk I/O and network I/O for the whole fleet, for each machine and for each app. History is kept at 1-minute resolution for 48 hours and at 10-minute resolution for 30 days.
 
 ## Projects
@@ -89,7 +89,7 @@ Any Linux machine with Docker can join. Get the command, token included, from th
 curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
 ```
 
-Add `POOL=<name>` (and `POOL_SIZE=<n>`) to make it a member of a pool, and `LABEL=<name>` to name it on the status pages.
+Add `LABEL=<name>` to name it on the status pages. A machine joined this way stands on its own (no pool) and keeps its slot across restarts; the web app doesn't show pools at all, it's just one set of machines.
 
 It runs the agent in the container `runner-agent`, takes the lowest free slot (and gets the same one back after a restart), and fetches the latest agent code whenever it starts; restarting it from the web app restarts the agent. A host without `POOL` is standalone and doesn't count toward any pool's size. Remove one with `docker rm -f runner-agent tunnel router`, then retire its slot from the web app or with `runnerctl retire <n>` so its tunnel and `<app>-m<n>` names go too.
 
@@ -124,6 +124,6 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 - **Worker secrets:** `ADMIN_PASSWORD` (the fleet password the web app asks for; without it, the admin token is the password), `ADMIN_TOKEN`, `NODE_TOKEN` and `CF_API_TOKEN`: a token with Cloudflare Tunnel edit on the account and DNS edit plus Workers Routes edit on the zone.
 - **Deploy:** run `npm install && wrangler deploy` in `control/`.
 - **Web app:** changes sent from other sites are refused.
-- **More machines:** raise a pool's size on the Fleet page or with `runnerctl pool github <n>` (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
+- **More machines:** raise a pool's size with `runnerctl pool github <n>` (the web app doesn't show pools) (tunnels are made as needed, up to `MAX_SLOTS`). GitHub Free runs 20 jobs at once, and handovers overlap briefly, so stay at about 18 or fewer. Cloudflare allows 1,000 tunnels per account. The default sizes are the `POOLS` var in `wrangler.toml`.
 - **Another GitHub account:** a copy of this repo there (public, so Actions minutes are free) is a pool of its own in the same fleet. Give it the `CONTROL_NODE_TOKEN` secret and the repo variables `POOL` (the pool's name), `POOL_SIZE` (how many machines it keeps) and `AGENT_REPO=hetp4401/runner`, so its machines run this repo's agent and agent changes need no copying. Disable its `roll` workflow: a roll from here already restarts every pool. `leonardo34554/runner` is set up this way, as pool `leonardo`.
 - **Watchdog pausing:** GitHub pauses scheduled workflows in public repos after 60 days without repo activity.

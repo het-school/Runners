@@ -321,7 +321,7 @@ const S = {
   heat: localStorage.getItem("metrics-heat") || "cpu",
   fastUntil: 0, filter: "",
 };
-const pending = { replicas: {}, pools: {} }; // stepper values not saved yet
+const pending = { replicas: {} }; // stepper values not saved yet
 const specCache = new Map(); // "name@version" -> spec (versions never change)
 let joinInfo = null; // { command, slots }: the join command shown in Fleet, and the slots that existed then
 const fast = () => (S.fastUntil = Date.now() + 5 * 60_000); // poll every 3s for a while after a change
@@ -347,7 +347,7 @@ const lockmark = () => (pw ? "" : ` <span class="lockmark" title="needs the flee
 async function unlock(intro) {
   const ok = await sheet({
     title: "Fleet password", ok: "Unlock",
-    html: `${intro ? `<p>${esc(intro)}</p>` : ""}<p class="meta">Changing the fleet (pool sizes, rebalancing, restarting machines, moving apps off a machine, retiring slots, the join command) needs the fleet password. It can also change every app.</p>
+    html: `${intro ? `<p>${esc(intro)}</p>` : ""}<p class="meta">Changing the fleet (rebalancing, restarting machines, moving apps off a machine, retiring slots, the join command) needs the fleet password. It can also change every app.</p>
       <label class="f" for="pw-in">Password</label><input id="pw-in" type="password" autocomplete="current-password" required>
       <label class="check"><input type="checkbox" id="pw-remember"> Remember on this device</label>`,
     onOpen: (d) => $("#pw-in", d).focus(),
@@ -673,7 +673,8 @@ function problems() {
   }
   for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
   for (const n of st.rebalance.hot) out.push({ kind: "failed", href: machineHref(n), text: `Machine ${n} is hot (CPU or memory high for 5 minutes)` });
-  for (const pool of st.pools) if (pool.live < pool.size) out.push({ kind: "deploying", href: "#/fleet", text: `Pool ${pool.name}: ${pool.live} of ${pool.size} machines up` });
+  const short = st.pools.reduce((n, x) => n + Math.max(0, x.size - x.live), 0); // the machines the fleet should have that aren't up
+  if (short) out.push({ kind: "deploying", href: "#/machines", text: `${plural(short, "machine")} missing; ${short === 1 ? "a replacement is" : "replacements are"} starting` });
   return out;
 }
 const problemList = (list) => list.length
@@ -1298,22 +1299,11 @@ async function setRebalance(on) {
     if (r) { toast(`Automatic rebalancing is ${r.rebalance ? "on" : "off"}`); loadStatus(); }
   } catch (e) { fail(e); }
 }
-async function savePool(name) {
-  const want = pending.pools[name];
-  try {
-    const r = await fleet(() => api("PUT", "/settings", { pools: { [name]: want } }, { fleet: true }));
-    if (!r) return;
-    delete pending.pools[name];
-    fast();
-    toast(`Pool ${name} keeps ${plural(r.pools[name], "machine")}`);
-    loadStatus();
-  } catch (e) { fail(e); }
-}
-async function showJoin(pool, label) {
+async function showJoin(label) {
   try {
     const r = await fleet(() => api("GET", "/join-token", null, { fleet: true }));
     if (!r) return;
-    const vars = [`JOIN_TOKEN=${r.token}`, pool && `POOL=${pool}`, label && `LABEL=${JSON.stringify(label)}`].filter(Boolean).join(" ");
+    const vars = [`JOIN_TOKEN=${r.token}`, label && `LABEL=${JSON.stringify(label)}`].filter(Boolean).join(" ");
     joinInfo = { command: `curl -fsSL ${location.origin}/install.sh | sudo ${vars} sh`, slots: new Set(S.status.runs.map((x) => x.id)) };
     view?.status?.();
   } catch (e) { fail(e); }
@@ -1334,7 +1324,7 @@ function vOverview() {
       <h2>Rebalancing</h2><div class="card" id="ov-activity"></div>`,
     status() {
       const st = S.status, runs = runsBy();
-      $("#ov-sub").textContent = `${plural(runs.size, "machine")} up${st.pools.length ? ` (pools want ${st.expected})` : ""} · ${plural(st.projects.length, "app")} · ${st.domain}`;
+      $("#ov-sub").textContent = `${plural(runs.size, "machine")} up · ${plural(st.projects.length, "app")} · ${st.domain}`;
       $("#ov-problems").innerHTML = problemList(problems());
       $("#ov-apps").innerHTML = st.projects.map((p) => `<a class="card" href="${appHref(p.name)}">
           <div class="row"><span class="name grow">${esc(p.name)}</span>${appPill(p, runs)}</div>
@@ -1353,7 +1343,7 @@ function rebalanceLog(limit) {
     ${r.log.length ? `<div class="log">${r.log.slice(0, limit).map((x) => `<div>${esc(ago(S.status.now - x.t))} ago: ${esc(x.text)}</div>`).join("")}</div>` : `<div style="margin-top:8px" class="meta">Nothing moved yet.</div>`}`;
 }
 
-// Machine cards: state, label, pool, live CPU and memory, and what runs there.
+// Machine cards: state, label, live CPU and memory, and what runs there.
 function machineCards(compact = false) {
   const st = S.status, runs = runsBy(), live = S.metrics?.live ?? {};
   return st.slots.map((n) => {
@@ -1367,7 +1357,7 @@ function machineCards(compact = false) {
     const errs = r ? Object.entries(r.projects).filter(([, s]) => s.s === "failed") : [];
     return `<a class="card" href="${machineHref(n)}">
       <div class="row"><span class="name grow">Machine ${n}</span>${pill(ms.kind, ms.text)}</div>
-      <div class="meta">${r ? `${esc(r.label || r.id)} · ${r.pool ? `pool ${esc(r.pool)}` : "standalone"}` : ms.kind === "deploying" ? "a pool member was asked to start one for this slot" : "not checking in"}</div>
+      <div class="meta">${r ? esc(r.label || r.id) : ms.kind === "deploying" ? "a replacement is starting" : "not checking in"}</div>
       ${h ? `<div class="meta" style="margin-top:6px">CPU ${F.pct(h.cpu)}${meter(h.cpu)} &nbsp; memory ${F.pct(pctOf(h.memUsed, h.memTotal))}${meter(pctOf(h.memUsed, h.memTotal))} ${compact ? "" : spark(hcol(n, "cpu"))}</div>` : ""}
       ${chips ? `<div class="chips">${chips}</div>` : compact ? "" : `<div class="meta" style="margin-top:6px">No apps placed here</div>`}
       ${!compact && errs.length ? `<div class="errbox">${errs.map(([name, s]) => `<div class="item"><b>${esc(name)}</b> v${esc(s.v)}<pre>${esc(s.e || "failed")}</pre></div>`).join("")}</div>` : ""}
@@ -1737,7 +1727,7 @@ function vMachines() {
     html: `<h1>Machines</h1><div class="sub" id="mc-sub"></div><div class="cards two" id="mc-list" style="margin-top:14px"></div>`,
     status() {
       const runs = runsBy();
-      $("#mc-sub").innerHTML = `${plural(runs.size, "machine")} up · ${S.status.pools.map((p) => `pool ${esc(p.name)}: ${p.live} of ${p.size}`).join(" · ") || "no pools"} · <a href="#/fleet">Fleet settings</a>`;
+      $("#mc-sub").innerHTML = `${plural(runs.size, "machine")} up · <a href="#/fleet">Fleet settings</a>`;
       $("#mc-list").innerHTML = machineCards() || `<div class="card empty">No machines have checked in. <a href="#/fleet">Add a machine</a></div>`;
     },
   };
@@ -1754,7 +1744,7 @@ function vMachine(n) {
       const st = S.status, runs = runsBy(), r = runs.get(n), ms = machineState(n, r);
       const known = st.slots.includes(n) || r;
       $("#md-head").innerHTML = `<div class="row"><h1 class="grow">Machine ${n}</h1>${pill(ms.kind, ms.text)}</div>
-        <div class="sub">${r ? `${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : esc(r.label || r.id)} · ${r.pool ? `pool ${esc(r.pool)}` : "standalone"} · up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
+        <div class="sub">${r ? `${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.label || r.id)}</a>` : esc(r.label || r.id)} · up ${ago(st.now - r.started)}` : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`;
       const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
       $("#md-apps").innerHTML = table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
         const s = r?.projects[p.name];
@@ -1854,32 +1844,20 @@ function vFleet() {
   return {
     title: "Fleet",
     html: `<h1>Fleet</h1><div class="sub">Everyone can see this page; changing anything here needs the fleet password.</div>
-      <h2>Pools</h2><div id="fl-pools"></div>
       <h2>Rebalancing</h2><div id="fl-rebalance"></div>
       <h2>Restart</h2><div class="card"><div class="row"><span class="grow meta">Replace every machine, one at a time, without downtime (for example after changing the agent).</span><button type="button" data-act="rollall" id="fl-roll"></button></div></div>
       <h2>Add a machine</h2><div id="fl-join"></div>`,
     status() {
       const st = S.status;
-      $("#fl-pools").innerHTML = `<div class="cards">${st.pools.map((p) => {
-        const want = pending.pools[p.name] ?? p.size;
-        return `<div class="card"><div class="row"><span class="grow"><b>Pool ${esc(p.name)}</b><div class="meta">${p.live} of ${p.size} machines up</div></span>
-          <span class="stepper"><button type="button" data-act="pool" data-pool="${esc(p.name)}" data-d="-1" aria-label="Fewer machines in ${esc(p.name)}"${want <= 0 ? " disabled" : ""}>−</button><b aria-live="polite">${want}</b><button type="button" data-act="pool" data-pool="${esc(p.name)}" data-d="1" aria-label="More machines in ${esc(p.name)}">+</button></span>
-          ${want !== p.size ? `<button type="button" class="primary" data-act="savepool" data-pool="${esc(p.name)}">Save (${p.size} → ${want})${lockmark()}</button><button type="button" data-act="cancelpool" data-pool="${esc(p.name)}">Cancel</button>` : ""}</div></div>`;
-      }).join("") || `<div class="card empty">No pools. Machines that join without a pool are standalone and keep their slot.</div>`}</div>
-        <p class="hint">A pool is a set of interchangeable machines; the control plane keeps it at its size by having members (or whatever watches the pool) start replacements.</p>`;
       $("#fl-rebalance").innerHTML = `<div class="card"><div class="row"><span class="grow"><b>Automatic rebalancing</b></span>
         <button type="button" class="switch" data-act="rebalance" aria-pressed="${st.rebalance.on}">${st.rebalance.on ? "✓ On" : "○ Off"}${lockmark()}</button></div>${rebalanceLog(10)}</div>`;
       $("#fl-roll").innerHTML = `Restart all${lockmark()}`;
-      $("#fl-join").innerHTML = `<div class="card"><div class="row"><span class="grow meta">Any Linux machine with Docker can join the fleet with one command.</span><a class="btn" href="#/contribute">How to contribute a machine</a></div></div>`;
+      $("#fl-join").innerHTML = `<div class="card"><p class="meta" style="margin:0">Any Linux machine with Docker can join the fleet with one command.</p><div class="actions"><a class="btn" href="#/contribute">How to contribute a machine</a></div></div>`;
     },
     click(e) {
       const b = e.target.closest("[data-act]");
       if (!b) return;
-      const act = b.dataset.act, pool = b.dataset.pool;
-      const p = S.status.pools.find((x) => x.name === pool);
-      if (act === "pool") { pending.pools[pool] = Math.max(0, (pending.pools[pool] ?? p.size) + Number(b.dataset.d)); if (pending.pools[pool] === p.size) delete pending.pools[pool]; this.status(); }
-      if (act === "cancelpool") { delete pending.pools[pool]; this.status(); }
-      if (act === "savepool") savePool(pool);
+      const act = b.dataset.act;
       if (act === "rebalance") setRebalance(b.getAttribute("aria-pressed") !== "true");
       if (act === "rollall") restartAll();
     },
@@ -1893,7 +1871,6 @@ function joinBlock() {
   if (joinInfo) return `${codebox(joinInfo.command)}<p class="hint">The token in it is a secret: anyone who has it can add a machine to the fleet.</p>
     <div style="margin-top:10px">${newcomers.length ? newcomers.map((r) => `<div class="ok-line">✓ Machine ${r.machine} joined (${esc(r.label || r.id)}) <a href="${machineHref(r.machine)}">Open</a></div>`).join("") : `<span class="meta">${pill("deploying", "waiting")} for a new machine to check in…</span>`}</div>`;
   return `<div class="row" style="align-items:flex-end">
-      <div><label class="f" for="cj-pool">Pool (optional)</label><input id="cj-pool" placeholder="standalone" autocapitalize="off" spellcheck="false" style="width:180px"></div>
       <div><label class="f" for="cj-label">Name (optional)</label><input id="cj-label" placeholder="its hostname" style="width:180px"></div>
       <button type="button" class="primary" data-act="join">Show the join command${lockmark()}</button></div>
     <p class="hint">Showing it needs the fleet password, because the command carries the join token. Without the password, ask the fleet's owner for the command.</p>`;
@@ -1903,7 +1880,7 @@ function vContribute() {
   const o = location.origin;
   return {
     title: "Contribute a machine",
-    html: `<h1>Contribute a machine</h1><div class="sub">Add a computer to the fleet: it takes a slot, gets its own Cloudflare tunnel, and runs the app replicas placed on it.</div>
+    html: `<h1>Contribute a machine</h1><div class="sub">Add a computer to the fleet: it gets a machine number and its own Cloudflare tunnel, and runs the app replicas placed on it.</div>
       <div class="card guide" style="margin-top:12px">
         <h3 style="margin-top:4px">What you need</h3>
         <ol><li>A Linux machine (a VM, a server, a spare PC) with <a href="https://docs.docker.com/engine/install/" target="_blank" rel="noopener">Docker</a> installed. 2 CPU cores and 2 GB of memory or more is a good start.</li>
@@ -1913,28 +1890,27 @@ function vContribute() {
         <h3>1. Get the join command</h3>
         <div id="cj-join"></div>
         <h3>2. Run it on the machine</h3>
-        <p>It runs <a href="/install.sh" target="_blank" rel="noopener">install.sh</a> from the control plane (read it first if you like), which starts the agent in the container <code>runner-agent</code>. The agent downloads its latest code each time it starts, joins, and keeps its slot across restarts.</p>
+        <p>It runs <a href="/install.sh" target="_blank" rel="noopener">install.sh</a> from the control plane (read it first if you like), which starts the agent in the container <code>runner-agent</code>. The agent downloads its latest code each time it starts, joins, and keeps its machine number across restarts.</p>
         ${codebox(`curl -fsSL ${o}/install.sh | sudo JOIN_TOKEN=<token> sh`)}
         <p>Options, as more <code>NAME=value</code> before <code>sh</code>:</p>
-        <ul><li><code>POOL=&lt;name&gt;</code>: join a pool, a set of interchangeable machines the control plane keeps at a size. Without one, the machine is <b>standalone</b>: it doesn't count toward a pool, and keeps its slot when it restarts.</li>
-          <li><code>POOL_SIZE=&lt;n&gt;</code>: how many machines that pool should have.</li>
-          <li><code>LABEL=&lt;name&gt;</code>: what the status pages call it (default: its hostname).</li>
+        <ul><li><code>LABEL=&lt;name&gt;</code>: what the pages call it (default: its hostname).</li>
           <li><code>RUNNER_DATA=&lt;folder&gt;</code>: where it keeps its files (default <code>/var/lib/runner</code>).</li></ul>
         <h3>3. Check it joined</h3>
         <p>Within a minute it shows up under <a href="#/machines">Machines</a>, and new replicas start going to it. Follow it on the machine with <code>docker logs -f runner-agent</code>.</p>
         <h3>Leave the fleet</h3>
         ${codebox("docker rm -f runner-agent tunnel router")}
         <p>Its replicas move to other machines within about a minute. Then the fleet's owner can retire its slot (on its machine page) so its tunnel and DNS names are removed.</p>
-        <h3>Contribute a GitHub Actions pool</h3>
-        <p>A GitHub account can run a pool of machines as Actions jobs: copy the <a href="https://github.com/hetp4401/runner" target="_blank" rel="noopener">runner</a> repo into the account (public, so the minutes are free), then in its settings add the secret <code>CONTROL_NODE_TOKEN</code> (the join token) and the variables <code>POOL</code> (the pool's name), <code>POOL_SIZE</code> (how many machines) and <code>AGENT_REPO=hetp4401/runner</code>, and turn off its <code>roll</code> workflow. Its <code>watchdog</code> workflow starts the machines, and each one hands over to a fresh job before GitHub's 6-hour limit.</p>
       </div>`,
-    status() { $("#cj-join").innerHTML = joinBlock(); },
+    status() {
+      // A poll mustn't redraw the form while someone's typing in it; once the command is shown, it follows newcomers.
+      const box = $("#cj-join");
+      if (joinInfo || !$("#cj-label", box)) box.innerHTML = joinBlock();
+      else $("[data-act=join]", box).innerHTML = `Show the join command${lockmark()}`;
+    },
     click(e) {
       const b = e.target.closest("[data-act=join]");
       if (!b) return;
-      const name = $("#cj-pool").value.trim().toLowerCase();
-      if (name && !/^[a-z0-9-]{1,30}$/.test(name)) return toast("A pool name is lowercase letters, digits and dashes", { kind: "failed" });
-      showJoin(name, $("#cj-label").value.trim());
+      showJoin($("#cj-label").value.trim());
     },
   };
 }

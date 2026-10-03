@@ -274,7 +274,7 @@ function installScript(origin) {
   return `#!/bin/sh
 # Adds this machine to the runner fleet (https://github.com/hetp4401/runner). Needs Docker.
 #   curl -fsSL ${origin}/install.sh | sudo JOIN_TOKEN=<token> sh
-# Optional: POOL=<name> (and POOL_SIZE) makes it a member of that pool; LABEL names it on the status page.
+# Optional: LABEL=<name> names it on the status pages (default: its hostname).
 # The agent runs in the container runner-agent, takes a free slot n, and runs the replicas placed on this
 # machine. It fetches the latest agent code each time it starts.
 # Remove the machine:  docker rm -f runner-agent tunnel router
@@ -287,7 +287,7 @@ docker rm -f runner-agent >/dev/null 2>&1 || true
 docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --network host --hostname "$(hostname)" \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$DATA:$DATA" \\
   -e CONTROL_URL=${origin} -e CONTROL_TOKEN="$JOIN_TOKEN" -e RUNNER_DATA="$DATA" \\
-  -e POOL="\${POOL:-}" -e POOL_SIZE="\${POOL_SIZE:-}" -e LABEL="\${LABEL:-}" \\
+  -e LABEL="\${LABEL:-}" \\
   docker:cli sh -c '
     set -e
     apk add --no-cache nodejs >/dev/null
