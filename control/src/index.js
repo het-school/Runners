@@ -44,7 +44,7 @@ const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const REPLICA_DNS = "100::"; // <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
-const MAX_REPLICAS = 20; // each replica on a different machine; with fewer machines, it runs on all of them
+const MAX_REPLICAS = 50; // as many as the fleet can have machines; with more replicas than machines, machines run two or more copies
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
 // Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
@@ -247,9 +247,13 @@ function claimsOf(compose) {
   return [...out];
 }
 
-// Copy k of a project on a machine runs as compose project <name> for k = 1 and <name>-r<k> for the others: that's
-// its key in what the agent is told and reports back.
-const copyKey = (name, k) => (k === 1 ? name : `${name}-r${k}`);
+// What a machine calls the copies of a project it runs (its keys in what the agent is told and reports back): the
+// lowest-numbered replica there is plain <name>, so a machine with one copy (the usual case) calls it by its name, as
+// agents always have; any further copy there is <name>-r<k>.
+function keysOn(replicas, name) {
+  const sorted = [...replicas].sort((a, b) => a - b);
+  return new Map(sorted.map((k, i) => [k, i === 0 ? name : `${name}-r${k}`]));
+}
 
 // Why a second copy of this compose file couldn't run next to a first one on the same machine (null: it could). Only
 // published ports can be moved out of the way; the machine's network itself and fixed container names can't.
@@ -1043,11 +1047,16 @@ export class Control extends DurableObject {
       const v = p.halted ? p.stable : p.version;
       if (v == null) continue;
       const spec = this.version(p.name, v);
-      for (const x of this.copiesOn(p.name, machine)) {
-        out[copyKey(p.name, x.replica)] = { v, ...this.composeFor(p.name, v, spec, x), files: spec.files, app: p.name, replica: x.replica };
-      }
+      const here = this.copiesOn(p.name, machine);
+      const keys = keysOn(here.map((x) => x.replica), p.name);
+      for (const x of here) out[keys.get(x.replica)] = { v, ...this.composeFor(p.name, v, spec, x), files: spec.files, app: p.name, replica: x.replica };
     }
     return out;
+  }
+
+  // The key machine n knows copy k of a project by (see keysOn).
+  keyOn(name, machine, k) {
+    return keysOn(this.copiesOn(name, machine).map((x) => x.replica), name).get(k) ?? name;
   }
 
   // What a copy runs: its spec as it is, or, for a copy whose published ports were moved (it shares its machine with
@@ -1153,7 +1162,7 @@ export class Control extends DurableObject {
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
       for (const x of [...list]) {
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
-        const moved = x.leaving && (up.get(x.leaving.to)?.status[copyKey(name, x.replica)]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
+        const moved = x.leaving && (up.get(x.leaving.to)?.status[this.keyOn(name, x.leaving.to, x.replica)]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
         if (!p || !p.enabled || x.replica > replicas || !up.has(x.machine) || moved) {
           this.dropCopy(name, x.machine, x.replica);
           changed = true;
@@ -1311,9 +1320,9 @@ export class Control extends DurableObject {
         if (x.machine !== machine || x.leaving) continue;
         try {
           this.move(name, machine, null, x.replica);
-          moved.push(copyKey(name, x.replica));
+          moved.push(`${name} (replica ${x.replica})`);
         } catch (e) {
-          failed.push(`${copyKey(name, x.replica)}: ${e.message}`);
+          failed.push(`${name} (replica ${x.replica}): ${e.message}`);
         }
       }
     }
@@ -1375,9 +1384,9 @@ export class Control extends DurableObject {
         x.reason = `moved here from machine ${from} automatically: ${why}; ${reasonOnDest}`;
         this.saveCopy(name, x);
         this.autoMoved.set(name, now);
-        this.logRebalance(now, `moved ${copyKey(name, replica)} from machine ${from} to machine ${dest.machine}: ${why}`);
+        this.logRebalance(now, `moved replica ${replica} of ${name} from machine ${from} to machine ${dest.machine}: ${why}`);
       } catch (e) {
-        this.logRebalance(now, `couldn't move ${copyKey(name, replica)} off machine ${from}: ${e.message}`);
+        this.logRebalance(now, `couldn't move replica ${replica} of ${name} off machine ${from}: ${e.message}`);
       }
     };
     // First: a machine running two copies of a project while a settled machine with room runs none of it.
@@ -1676,7 +1685,7 @@ export class Control extends DurableObject {
       for (let k = 1; k <= spec.replicas; k++) replicas[`${p.name}-${k}`] = [];
       if (!p.enabled) continue;
       const copies = [...this.copiesOf(p.name)].sort((a, b) => Boolean(a.leaving) - Boolean(b.leaving));
-      for (const x of copies) if (healthy(copyKey(p.name, x.replica), x.machine)) replicas[`${p.name}-${x.replica}`]?.push(x.machine);
+      for (const x of copies) if (healthy(this.keyOn(p.name, x.machine, x.replica), x.machine)) replicas[`${p.name}-${x.replica}`]?.push(x.machine);
     }
     return { replicas };
   }

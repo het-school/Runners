@@ -51,7 +51,7 @@ tick; tick
 check "the old copy is dropped once machine 3 reports it healthy" "4,6" "$(onMachine web 3)"
 check "machine 5 runs only replica 1 now" "1" "$(onMachine web 5)"
 echo "== 'move apps off' machine 2 moves both of its copies, by replica"
-check "evict names both copies" '["web-r7","web-r2"]' "$(curl -s -X POST $B/api/machines/2/evict -H "$A" | jq -c '.moved | sort | reverse')"
+check "evict names both copies" '["web (replica 7)","web (replica 2)"]' "$(curl -s -X POST $B/api/machines/2/evict -H "$A" | jq -c '.moved | sort | reverse')"
 tick; tick
 check "machine 2 is empty" "" "$(onMachine web 2)"
 echo "== down to 5 replicas: the extra copies go"
