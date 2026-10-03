@@ -646,7 +646,12 @@ const upCount = () => [...runsBy().values()].filter((r) => r.ready).length;
 // Replicas that can be placed now: one per machine, so never more than there are machines.
 const placeable = (p) => Math.min(p.replicas, upCount());
 const replicaUrl = (p, k) => `https://${p.name}-${k}.${S.status.domain}/`;
-const sharedUrl = (p) => `https://${p.name}.${S.status.domain}/`;
+// An app's URLs, one per replica: replica 1's as a link, and the range when there are more.
+const appUrls = (p, bold = false) => {
+  const u = replicaUrl(p, 1), text = esc(u.slice(8, -1));
+  return `<a href="${esc(u)}" target="_blank" rel="noopener">${bold ? `<b>${text}</b>` : text}</a>${p.replicas > 1
+    ? ` <span class="meta">… ${esc(p.name)}-${p.replicas}: one URL per replica</span>` : ""}`;
+};
 const appHref = (name) => `#/apps/${enc(name)}`;
 const machineHref = (n) => `#/machines/${n}`;
 
@@ -1386,7 +1391,7 @@ function vApps() {
       $("#apps-list").innerHTML = list.map((p) => `<div class="card">
           <div class="row"><a class="name grow" href="${appHref(p.name)}">${esc(p.name)}</a>${appPill(p, runs)}</div>
           <div class="meta">v${p.version}${p.stable && p.stable !== p.version ? ` (v${p.stable} still running)` : ""} · ${p.port ? `port ${p.port}` : "no port"} · ${placedText(p)} · ${p.files.length ? "built from files" : "published images"}</div>
-          ${p.port ? `<div class="meta url" style="margin-top:4px"><a href="${esc(sharedUrl(p))}" target="_blank" rel="noopener">${esc(sharedUrl(p).slice(8, -1))}</a></div>` : ""}
+          ${p.port ? `<div class="meta url" style="margin-top:4px">${appUrls(p)}</div>` : ""}
           ${appStatusBlock(p, runs)}${replicaChips(p, runs)}
           <div class="actions"><a class="btn small" href="${appHref(p.name)}">Open</a><a class="btn small" href="#/apps/${enc(p.name)}/edit">Edit</a></div>
         </div>`).join("")
@@ -1450,7 +1455,7 @@ function vApp(name) {
       document.title = `${name} · Runner`;
       $("#ad-head").innerHTML = `<div class="row"><h1 class="grow">${esc(name)}</h1>${appPill(p, runs)}</div>
         <div class="sub">v${p.version} · ${p.port ? `port ${p.port}` : "no port"} · updated ${ago(S.status.now - p.updated)} ago · ${p.files.length ? "built from files" : "published images"}</div>
-        ${p.port ? `<div class="url" style="margin-top:4px"><a href="${esc(sharedUrl(p))}" target="_blank" rel="noopener"><b>${esc(sharedUrl(p).slice(8, -1))}</b></a> <span class="meta">sends each visitor to one healthy replica</span></div>` : ""}
+        ${p.port ? `<div class="url" style="margin-top:4px">${appUrls(p, true)}</div>` : ""}
         <div class="actions"><a class="btn primary" href="#/apps/${enc(name)}/edit">Edit${appLockmark(name)}</a>
           ${p.halted ? `<button type="button" data-act="retry">Retry v${p.version}${appLockmark(name)}</button>` : ""}
           <button type="button" data-act="${p.enabled ? "disable" : "enable"}">${p.enabled ? "Disable" : "Enable"}${appLockmark(name)}</button>
@@ -1944,7 +1949,7 @@ function vGuide() {
       const d = esc(dom());
       $("#guide").innerHTML = `
       <p>An app is a <b>Docker Compose file</b>, a <b>Dockerfile</b>, or both, plus any text files the build needs. It runs as many <b>replicas</b> as it asks for (1 to 10, 1 by default), each on a different machine, picked by the most free CPU and memory. With fewer machines than replicas, it runs on every machine, and the rest start as machines join.
-        It's at <code>https://&lt;name&gt;.${d}</code>, which sends each visitor to one healthy replica, and replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code> whichever machine it's on.
+        Each replica has its own URL: replica <i>k</i> is always at <code>https://&lt;name&gt;-<i>k</i>.${d}</code>, whichever machine it's on. There's no shared URL that spreads visitors across replicas, so hand out the replica URL you want people on.
         Each deploy is a new version; if it fails, the replicas go back to the last good one.</p>
       <h3>From this site</h3>
       <ol><li>Open <a href="#/apps/new">New app</a>, or start from one of its examples.</li>

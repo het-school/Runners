@@ -12,10 +12,10 @@
 // and whatever runs the machine pings POST /api/drain when it's going down soon (a timer, a cron before
 // maintenance, a cloud termination notice): the control plane then hands the machine over, one at a time, the same
 // way as for a requested roll. Nothing here predicts lifetimes.
-// It also keeps DNS in line. The public URLs are this Worker's: <project> passes each request on to a machine where
-// the project is healthy, and <project>-<k> to the machine running replica k (replicas are numbered 1 to N and keep
-// their number when they move, so these URLs only change with the replica count). The Worker reaches machine n at
-// <project>-m<n>, which points at tunnel runner-<n>.
+// It also keeps DNS in line. The public URLs are this Worker's, one per replica: <project>-<k> passes each request on
+// to the machine running replica k (replicas are numbered 1 to N and keep their number when they move, so these URLs
+// only change with the replica count). There's no shared URL in front of a project's replicas. The Worker reaches
+// machine n at <project>-m<n>, which points at tunnel runner-<n>.
 //   /            the UI (everything public)  /api/*        API, Bearer token (admin, or node for join/sync/claim)
 //                                            /admin/api/*  the UI's API: anyone can see everything and deploy a new
 //                                                          app, which sets that app's password; changing an app needs
@@ -40,7 +40,7 @@ const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
-const SHARED_DNS = "100::"; // <project>.DOMAIN and <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
+const REPLICA_DNS = "100::"; // <project>-<k>.DOMAIN are proxied placeholder records; Worker routes answer them
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
 const MAX_REPLICAS = 10; // each replica on a different machine; with fewer machines, it runs on all of them
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
@@ -211,7 +211,7 @@ function buildSpec(body) {
   return { compose, port, replicas, files: sorted };
 }
 
-// ---- public URLs: <project>.DOMAIN goes to a machine where the project is healthy, <project>-<k> to replica k's ----
+// ---- public URLs: <project>-<k>.DOMAIN goes to the machine running replica k ----
 
 let routeCache = { at: 0, data: null, pending: null };
 function healthyRoutes(env) {
@@ -230,31 +230,20 @@ function healthyRoutes(env) {
   return routeCache.pending;
 }
 
-// FNV-1a; with it each visitor sticks to one machine while that machine stays healthy.
-function hash(s) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
-  return h >>> 0;
-}
-
 async function proxy(request, env, label) {
   const routes = await healthyRoutes(env);
-  const replica = routes.replicas[label];
-  const slots = replica ?? routes.shared[label];
+  // A replica's machine: one, or two while the replica moves (the new copy first, then the old one).
+  const slots = routes.replicas[label];
   if (!slots) return new Response(`nothing is served at ${label}\n`, { status: 404 });
   if (!slots.length) {
     return new Response(`${label} isn't healthy on any machine right now\n`, { status: 503, headers: { "retry-after": "10" } });
   }
-  const project = replica ? label.replace(/-\d+$/, "") : label;
-  // A replica's URL has one machine (two while the replica moves, the new copy first); the shared URL keeps each
-  // visitor on one of the project's machines.
-  const visitor = request.headers.get("cf-connecting-ip") ?? "";
-  const order = replica ? slots : slots.map((n) => [n, hash(`${visitor}|${n}`)]).sort((a, b) => b[1] - a[1]).map(([n]) => n);
-  // Requests without a body can try another machine when one doesn't answer.
+  const project = label.replace(/-\d+$/, "");
+  // Requests without a body can try the other copy when one doesn't answer.
   const retry = request.method === "GET" || request.method === "HEAD";
   const host = new URL(request.url).hostname;
   let res = null;
-  for (const n of order.slice(0, retry ? 3 : 1)) {
+  for (const n of slots.slice(0, retry ? 3 : 1)) {
     const url = new URL(request.url);
     url.hostname = `${project}-m${n}.${env.DOMAIN}`;
     const req = new Request(url, request);
@@ -269,7 +258,7 @@ async function proxy(request, env, label) {
     // there); the app never saw the request, so another machine can take it whatever the method.
     if (res.status === 404 && res.headers.get("x-runner-route") === "none") continue;
     if (retry && [502, 503, 504, 530].includes(res.status)) continue;
-    // Keep visitors on the shared hostname when the app redirects to the machine's own one.
+    // Keep visitors on the replica's URL when the app redirects to the machine's own hostname.
     const location = res.headers.get("location");
     if (location?.includes(url.hostname)) {
       res = new Response(res.body, res);
@@ -286,8 +275,8 @@ function installScript(origin) {
 # Adds this machine to the runner fleet (https://github.com/hetp4401/runner). Needs Docker.
 #   curl -fsSL ${origin}/install.sh | sudo JOIN_TOKEN=<token> sh
 # Optional: POOL=<name> (and POOL_SIZE) makes it a member of that pool; LABEL names it on the status page.
-# The agent runs in the container runner-agent, takes a free slot n, and serves every project at
-# https://<project>-n.<domain>. It fetches the latest agent code each time it starts.
+# The agent runs in the container runner-agent, takes a free slot n, and runs the replicas placed on this
+# machine. It fetches the latest agent code each time it starts.
 # Remove the machine:  docker rm -f runner-agent tunnel router
 set -eu
 : "\${JOIN_TOKEN:?set JOIN_TOKEN; the fleet's owner gets it with: runnerctl join-token}"
@@ -402,7 +391,7 @@ export class Control extends DurableObject {
     this.pendingMetrics = new Map(); // minute -> { machine: { h, a } }, not yet written
     this.lastRollup = 0;
     this.metricsCache = new Map(); // range -> { at, body }
-    // A deploy of this Worker resets its routes to the ones in wrangler.toml, so put the shared ones back.
+    // A deploy of this Worker resets its routes to the ones in wrangler.toml, so put the replica URLs' back.
     this.scheduleDns();
     this.dnsError = null;
   }
@@ -1317,28 +1306,25 @@ export class Control extends DurableObject {
     return { retired: n, tunnel: slot?.tunnel ?? null };
   }
 
-  // For the public URLs, the machines each may go to: those whose current run is online, should run the project, and
-  // has it healthy. shared: project -> its machines; replicas: "<project>-<k>" -> replica k's machine, plus the old
-  // copy while it's being moved, after the new one. Disabled projects are there with no machines.
-  // (A machine keeps reporting a project healthy for a moment after it's told to remove it.)
+  // For the public URLs, the machines each may go to: "<project>-<k>" -> replica k's machine if its current run is
+  // online and has the project healthy, plus the old copy while it's being moved, after the new one. Disabled projects
+  // are there with no machines. (A machine keeps reporting a project healthy for a moment after it's told to remove it.)
   healthyRoutes(now) {
     const newest = new Map();
     for (const r of this.liveRuns(now)) {
       if (r.ready && (newest.get(r.machine)?.started ?? -1) < r.started) newest.set(r.machine, r);
     }
     const healthy = (name, machine) => newest.get(machine)?.status[name]?.s === "healthy";
-    const shared = {};
     const replicas = {};
     for (const p of this.projects.values()) {
       const spec = this.version(p.name, p.version);
       if (!spec?.port) continue;
-      shared[p.name] = p.enabled ? [...newest.keys()].filter((m) => this.runsOn(p.name, m) && healthy(p.name, m)) : [];
       for (let k = 1; k <= spec.replicas; k++) replicas[`${p.name}-${k}`] = [];
       if (!p.enabled) continue;
       const copies = [...(this.placements.get(p.name) ?? [])].sort(([, a], [, b]) => Boolean(a.leaving) - Boolean(b.leaving));
       for (const [machine, x] of copies) if (healthy(p.name, machine)) replicas[`${p.name}-${x.replica}`]?.push(machine);
     }
-    return { shared, replicas };
+    return { replicas };
   }
 
   cleanup(now) {
@@ -1507,10 +1493,11 @@ export class Control extends DurableObject {
   }
 
   // ---- DNS and routes ----
-  // For every project with a port: <project>.DOMAIN and <project>-<k>.DOMAIN (k from 1 to its replica count) -> this
-  // Worker (a proxied placeholder record plus a Worker route), and <project>-m<n>.DOMAIN -> tunnel runner-<n> for every
-  // slot that has a tunnel, which is how the Worker reaches machine n. Disabled projects keep theirs, so turning one
-  // back on is instant. Names already used by records that aren't ours are left alone.
+  // For every project with a port: <project>-<k>.DOMAIN (k from 1 to its replica count) -> this Worker (a proxied
+  // placeholder record plus a Worker route), and <project>-m<n>.DOMAIN -> tunnel runner-<n> for every slot that has a
+  // tunnel, which is how the Worker reaches machine n. Disabled projects keep theirs, so turning one back on is
+  // instant. Names already used by records that aren't ours are left alone; placeholders and routes of ours for names
+  // no longer served (a removed replica, the shared <project>.DOMAIN of before) are deleted.
 
   scheduleDns() {
     this.dnsDue = Date.now() + 2_000;
@@ -1540,14 +1527,13 @@ export class Control extends DurableObject {
     const tunnelOf = new Map([...this.slots.values()].map((x) => [x.n, `${x.tunnel}.cfargotunnel.com`]));
     const ours = new Set(tunnelOf.values());
     const want = new Map(); // name -> CNAME target
-    const shared = new Set(); // names this Worker answers: <project>.DOMAIN and <project>-<k>.DOMAIN
+    const served = new Set(); // names this Worker answers: <project>-<k>.DOMAIN
     for (const p of this.projects.values()) {
       const spec = this.version(p.name, p.version);
       const port = spec?.port ?? (p.stable != null ? this.version(p.name, p.stable)?.port : null);
       if (!port) continue;
-      shared.add(`${p.name}.${domain}`);
       const replicas = spec?.replicas ?? 1;
-      for (let k = 1; k <= replicas; k++) shared.add(`${p.name}-${k}.${domain}`);
+      for (let k = 1; k <= replicas; k++) served.add(`${p.name}-${k}.${domain}`);
       for (const [n, target] of tunnelOf) want.set(`${p.name}-m${n}.${domain}`, target);
     }
     const existing = [];
@@ -1556,8 +1542,8 @@ export class Control extends DurableObject {
       existing.push(...data.result);
       if (page >= (data.result_info?.total_pages ?? 1)) break;
     }
-    const isShared = (r) => r.type === "AAAA" && r.content === SHARED_DNS && r.comment === "hetp4401/runner";
-    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isShared(r) && !shared.has(r.name)));
+    const isPlaceholder = (r) => r.type === "AAAA" && r.content === REPLICA_DNS && r.comment === "hetp4401/runner";
+    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !want.has(r.name)) || (isPlaceholder(r) && !served.has(r.name)));
     // Records on their way out don't keep a name from being used (machine n's old <project>-<n> becomes replica n's).
     const gone = new Set(deletes.map((r) => r.id));
     const byName = new Map();
@@ -1572,10 +1558,10 @@ export class Control extends DurableObject {
       else if (r && r.content !== content && ours.has(r.content)) patches.push({ id: r.id, content });
     }
     const servable = new Set(); // names this Worker may answer
-    for (const name of shared) {
+    for (const name of served) {
       const rs = byName.get(name) ?? [];
-      if (!rs.length) posts.push({ type: "AAAA", name, content: SHARED_DNS, proxied: true, comment: "hetp4401/runner" });
-      else if (!rs.every(isShared)) {
+      if (!rs.length) posts.push({ type: "AAAA", name, content: REPLICA_DNS, proxied: true, comment: "hetp4401/runner" });
+      else if (!rs.every(isPlaceholder)) {
         notes.push(`${name} is already used by another DNS record, so this Worker doesn't answer it`);
         continue;
       }

@@ -1,5 +1,5 @@
 # Stremio streaming server (https://github.com/Stremio/server-docker),
-# online at https://stremio.billybishop4-workers.xyz (and replica k at https://stremio-<k>.billybishop4-workers.xyz).
+# online at https://stremio-1.billybishop4-workers.xyz (replica k at https://stremio-<k>.billybishop4-workers.xyz).
 x-runner:
   port: 11470
 services:

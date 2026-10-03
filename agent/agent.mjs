@@ -172,8 +172,7 @@ function routerJson() {
   const routes = [...projects]
     .filter(([, p]) => p.port && domain)
     .map(([name, p]) => ({
-      // <project>-<n> was the old name, still sent by control planes from before replica URLs.
-      match: [{ host: [machineHost(name), `${name}-${machine}.${domain}`] }],
+      match: [{ host: [machineHost(name)] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1 }],
     }));
   routes.push({
