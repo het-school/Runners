@@ -661,9 +661,12 @@ function machineState(n, r) {
   return { kind: "healthy", text: `online · ${ago(S.status.now - r.started)}` };
 }
 const APP_STATE = { live: ["healthy", "live"], deploying: ["deploying", "deploying"], failing: ["failed", "failing"], disabled: ["gone", "disabled"] };
-// A machine reports each copy it runs by key: the app's name for replica 1, <name>-r<k> for another copy of it there.
-const copyKey = (name, k) => (k === 1 ? name : `${name}-r${k}`);
-const copyOf = (name, key) => (key === name ? 1 : key.startsWith(`${name}-r`) && /^\d+$/.test(key.slice(name.length + 2)) ? Number(key.slice(name.length + 2)) : null);
+// A machine reports each copy it runs by key: the app's name for the lowest-numbered replica it has of the app,
+// <name>-r<k> for any other copy of it there.
+function keyOn(p, machine, k) {
+  const here = p.placed.filter((x) => x.machine === machine).map((x) => x.replica);
+  return here.length && k === Math.min(...here) ? p.name : `${p.name}-r${k}`;
+}
 // What an app is doing, from its replicas: failing if any machine reports a copy failed, deploying until every replica
 // is healthy on the latest version. (A failing version stays until it's fixed or rolled back by hand.)
 function appState(p, runs) {
@@ -686,7 +689,7 @@ function progress(p, runs) {
   const target = p.version;
   let ok = 0, busy = 0, bad = 0;
   for (const x of copies(p)) {
-    const s = x.machine != null ? runs.get(x.machine)?.projects[copyKey(p.name, x.replica)] : null;
+    const s = x.machine != null ? runs.get(x.machine)?.projects[keyOn(p, x.machine, x.replica)] : null;
     if (s?.s === "failed") bad++;
     else if (s?.s === "healthy" && s.v === target) ok++;
     else busy++;
@@ -696,11 +699,9 @@ function progress(p, runs) {
 // Every copy of the app that's failing, with its machine and error.
 function appFailures(p, runs) {
   const out = [];
-  for (const r of runs.values()) {
-    for (const [key, s] of Object.entries(r.projects)) {
-      const k = copyOf(p.name, key);
-      if (k != null && s?.s === "failed") out.push({ machine: r.machine, replica: k, v: s.v, e: s.e || "failed" });
-    }
+  for (const x of p.placed) {
+    const s = runs.get(x.machine)?.projects[keyOn(p, x.machine, x.replica)];
+    if (s?.s === "failed") out.push({ machine: x.machine, replica: x.replica, v: s.v, e: s.e || "failed" });
   }
   return out;
 }
@@ -764,7 +765,7 @@ const placedText = (p) => (!p.enabled ? "disabled: runs nowhere" : `${p.staying}
 function replicaChips(p, runs, { links = true } = {}) {
   if (!p.enabled) return "";
   return `<div class="chips">${copies(p).map((x) => {
-    const s = x.machine != null ? runs.get(x.machine)?.projects[copyKey(p.name, x.replica)] : null;
+    const s = x.machine != null ? runs.get(x.machine)?.projects[keyOn(p, x.machine, x.replica)] : null;
     const kind = x.machine == null ? "gone" : runKind(s);
     const where = x.machine == null ? "not placed yet" : !s ? `machine ${x.machine}, not running` : `machine ${x.machine}, v${s.v} ${s.s}`;
     const inner = `<i aria-hidden="true">${ICON[kind]}</i>${x.replica}${s && s.v !== p.version ? `<sub>v${s.v}</sub>` : ""}`;
@@ -1415,7 +1416,7 @@ function machineCards(compact = false) {
     const r = runs.get(n), ms = machineState(n, r), h = live[n]?.h;
     const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
     const chips = apps.map(({ p, x }) => {
-      const s = r?.projects[copyKey(p.name, x.replica)];
+      const s = r?.projects[keyOn(p, n, x.replica)];
       const kind = x.leaving ? "leaving" : runKind(s);
       return `<span class="chip ${kind}"><i aria-hidden="true">${ICON[kind]}</i>${esc(p.name)}<sub>#${x.replica}</sub></span>`;
     }).join("");
@@ -1523,7 +1524,7 @@ function vApp(name) {
       const up = [...runs.values()].filter((r) => r.ready).length;
       const rows = copies(p, true).map((x) => {
         const r = x.machine != null ? runs.get(x.machine) : null;
-        const s = r?.projects[copyKey(p.name, x.replica)];
+        const s = r?.projects[keyOn(p, x.machine, x.replica)];
         const target = !p.enabled ? null : p.version;
         const kind = x.leaving ? "leaving" : !p.enabled || x.machine == null || !r ? "gone" : runKind(s);
         const text = !p.enabled ? "disabled" : x.leaving ? `moving to machine ${x.leaving.to}` : x.machine == null ? "waiting for a machine" : !r ? "machine down" : s ? s.s : "not running yet";
@@ -1864,7 +1865,7 @@ function vMachine(n) {
           : known ? "Not checking in right now; the charts show what it sent earlier." : "No machine has used this slot recently."}</div>`);
       const apps = st.projects.flatMap((p) => p.placed.filter((x) => x.machine === n).map((x) => ({ p, x })));
       setHtml($("#md-apps"), table(["App", "Replica", "Version", "State"], apps.map(({ p, x }) => {
-        const s = r?.projects[copyKey(p.name, x.replica)];
+        const s = r?.projects[keyOn(p, n, x.replica)];
         const kind = x.leaving ? "leaving" : !r ? "gone" : runKind(s);
         return { href: appHref(p.name), cells: [`<a href="${appHref(p.name)}"><b>${esc(p.name)}</b></a>`, `#${x.replica}`, s ? `v${esc(s.v)}` : "–",
           `${pill(kind, x.leaving ? `moving to machine ${x.leaving.to}` : !r ? "machine down" : s ? s.s : "not running yet")}${s?.e ? `<div class="errbox"><pre>${esc(s.e)}</pre></div>` : ""}`] };

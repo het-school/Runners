@@ -87,7 +87,8 @@ async function answers(name, seconds) {
 
 // ---- projects ----
 
-// Keyed by what the control plane calls each copy (a project's name, or <name>-r<k> for a second copy of it here).
+// Keyed by what the control plane calls each copy: a project's name for the lowest-numbered replica of it here (the
+// usual, only copy), <name>-r<k> for any further copy of it on this machine.
 const projects = new Map(); // key -> { app, replica, v, port, s: "applying" | "healthy" | "failed", e, busy, at, misses }
 let domain = "";
 
@@ -163,27 +164,39 @@ async function remove(name) {
   }
 }
 
-// Start what's new or changed, retry what failed, remove what's no longer wanted.
+// Start what's new or changed, retry what failed, remove what's no longer wanted. Removals go first and new projects
+// wait for them: a project on its way out may still hold the ports the new one publishes (the same copy under a new
+// name, say), and compose would refuse to start it.
+const queued = new Set(); // new projects waiting for removals to finish
 function reconcile(desired) {
+  const removals = [];
+  for (const [name, p] of projects) {
+    if (!(name in desired) && !p.busy) removals.push(remove(name).catch((e) => log(`${name}: ${e.message}`)));
+  }
   for (const [name, want] of Object.entries(desired)) {
     const p = projects.get(name);
-    if (p?.busy) continue;
+    if (p?.busy || queued.has(name)) continue;
+    if (!p) {
+      queued.add(name);
+      Promise.all(removals).then(() => {
+        queued.delete(name);
+        if (!projects.has(name)) return apply(name, want);
+      }).catch((e) => log(`${name}: ${e.message}`));
+      continue;
+    }
     // A failed project is tried again: soon while the machine is still starting up (a hiccup mustn't hold its tunnel
     // back for long), every 3 minutes once it's online.
-    const retry = p?.s === "failed" && Date.now() - p.at > (ready ? 3 * 60_000 : 30_000);
-    if (!p || p.v !== want.v || p.port !== want.port || retry) {
+    const retry = p.s === "failed" && Date.now() - p.at > (ready ? 3 * 60_000 : 30_000);
+    if (p.v !== want.v || p.port !== want.port || retry) {
       apply(name, want, { recreate: retry && p.v === want.v }).catch((e) => log(`${name}: ${e.message}`));
     }
-  }
-  for (const [name, p] of projects) {
-    if (!(name in desired) && !p.busy) remove(name).catch((e) => log(`${name}: ${e.message}`));
   }
 }
 
 // Every wanted project runs its wanted version and answers (a project without a port counts once it's up).
 const settled = (desired) => Object.entries(desired).every(([name, want]) => {
   const p = projects.get(name);
-  return p && p.v === want.v && !p.busy && p.s === "healthy";
+  return p && p.v === want.v && !p.busy && p.s === "healthy" && !queued.has(name);
 });
 
 // A project that stops answering three checks in a row is marked failed, which makes reconcile start it again.
@@ -207,13 +220,13 @@ let routerConfig = "";
 const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRouter).catch((e) => log(`router update failed: ${e.message}`)));
 
 function routerJson() {
-  // Copies other than the first match the replica header too, and come first; the first copy of a project here takes
-  // whatever is left for its host (requests for a copy that isn't here any more included).
-  const routes = [...projects.values()]
-    .filter((p) => p.port && domain)
-    .sort((a, b) => (a.replica === 1) - (b.replica === 1))
-    .map((p) => ({
-      match: [{ host: [machineHost(p.app)], ...(p.replica === 1 ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }],
+  // The copy a project is known here by its plain name takes its host; any further copy of it here (<name>-r<k>) is
+  // matched by the replica header too, and comes first. Requests for a copy that isn't here fall to the plain one.
+  const routes = [...projects]
+    .filter(([, p]) => p.port && domain)
+    .sort(([ka, pa], [kb, pb]) => (ka === pa.app) - (kb === pb.app)) // header routes first, plain ones after
+    .map(([key, p]) => ({
+      match: [{ host: [machineHost(p.app)], ...(key === p.app ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }],
       // stream_close_delay: a config reload would otherwise cut every websocket on the machine.
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }],
     }));
