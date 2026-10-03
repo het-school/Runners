@@ -1,7 +1,8 @@
 name: watchdog
 
-# Starts machines that should be running but aren't. Running machines already restart each other
-# within a couple of minutes; this covers the first start and the case where none are left.
+# Starts machines that should be running but aren't. Running machines already restart each other within a couple
+# of minutes, and a run that ends starts what's missing; this covers the first start and the case where none are
+# left. GitHub runs scheduled workflows late or not at all when it's busy, so don't count on the 10 minutes.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -16,19 +17,29 @@ permissions:
 
 jobs:
   watchdog:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Start missing machines
+        shell: bash # fails the step when a command in a pipeline fails, so a wrong token or an unreachable control plane shows as red
         env:
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           POOL: ${{ vars.POOL || 'github' }}
           POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
         run: |
-          start=$(curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
-            "https://control.billybishop4-workers.xyz/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -r '.start[]')
+          [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
+          start=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
+            "https://control.billybishop4-workers.xyz/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -er '.start[]?')
+          rc=0
           for m in $start; do
-            gh workflow run machine.yml -R "$GITHUB_REPOSITORY" -f machine="$m" && echo "started machine $m"
+            if gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $m"; then
+              echo "machine $m is already queued"
+            elif gh workflow run machine.yml -R "$GITHUB_REPOSITORY" -f machine="$m"; then
+              echo "started machine $m"
+            else
+              echo "::error::couldn't start machine $m"; rc=1
+            fi
           done
           [ -n "$start" ] || echo "every machine is running"
+          exit $rc

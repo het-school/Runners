@@ -1,5 +1,5 @@
 # Control plane: project specs, placement, machine health, DNS. Knows nothing about what machines are; their agents say.
-# Deploy from control/: wrangler deploy (secrets: ADMIN_TOKEN, NODE_TOKEN, and CF_API_TOKEN: Cloudflare Tunnel edit
+# Deploy from control/: wrangler deploy (secrets: FLEET_PASSWORD, JOIN_TOKEN, and CF_API_TOKEN: Cloudflare Tunnel edit
 # on the account, DNS and Workers Routes edit on the zone).
 name = "runner-control"
 main = "src/index.js"
@@ -9,7 +9,6 @@ routes = [{ pattern = "control.billybishop4-workers.xyz", custom_domain = true }
 rules = [{ type = "Text", globs = ["**/*.html"], fallthrough = true }]
 
 [vars]
-REPO = "hetp4401/runner"
 DOMAIN = "billybishop4-workers.xyz"
 ZONE = "44fb65648f475249f22e9d0cffdd393d"
 POOLS = '{"github": 10}' # pools of replaceable machines and their sizes (the portal can change them)
