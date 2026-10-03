@@ -29,7 +29,7 @@ jobs:
       - name: Agent
         env:
           CONTROL_URL: https://control.billybishop4-workers.xyz
-          CONTROL_TOKEN: ${{ secrets.CONTROL_NODE_TOKEN }}
+          JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           # How the agent sees this machine: a member of pool POOL, in slot MACHINE, with this run's page as its link.
           RUNNER_DATA: ${{ runner.temp }}
@@ -44,7 +44,7 @@ jobs:
         run: |
           # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down
           # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved.
-          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --retry 5 -X POST -H "Authorization: Bearer $CONTROL_TOKEN" \
+          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --retry 5 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
               -H 'Content-Type: application/json' -d "{\"agent\": \"$AGENT_ID\"}" "$CONTROL_URL/api/drain" ) &
           # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
           # exec: the agent is the step's own process, so a cancelled run's signal reaches it too (timeout passes it on and keeps its exit status).
