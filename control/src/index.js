@@ -62,6 +62,10 @@ const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<
 const MAX_REPLICAS = 50; // as many as the fleet can have machines; with more replicas than machines, machines run two or more copies
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
 const SETTLE_MS = 5 * 60_000; // after a (re)start, machines that haven't checked in yet aren't gone, and pools aren't short or oversized, for this long
+// The same grace follows a gap in check-ins longer than the liveness window: every machine going quiet at once means the
+// control plane was unreachable (its tunnel dropped, say), not that the fleet died. Without it, the first machine back
+// would be the only live one and get every copy of everything (which happened on 2026-10-04: two tunnel drops, 40-odd
+// copies each time onto one machine, and a stateful app's data gone with its copies recreated at once).
 const MOVE_TIMEOUT_MS = 15 * 60_000; // a move's old copy is dropped once the new one is healthy, or after this long
 // Automatic rebalancing: a machine that's hot (over these for HOT_MS straight) or that carries SPREAD_GAP more placed
 // projects than the emptiest machine has one project moved off it, to a machine with room, at most one move per
@@ -551,6 +555,8 @@ export class Control {
     }
     this.remapped = new Map(); // "name@v|ports" -> compose text with moved ports
     this.bootAt = Date.now();
+    this.settleAt = this.bootAt; // the (re)start, or the end of the last gap in check-ins: SETTLE_MS and ARRIVAL_MS count from here
+    this.lastCheckin = this.bootAt;
     this.setPace(this.bootAt);
     this.samples = new Map(); // machine -> [{ t, cpu, mem }] from the last few minutes, for spotting hot machines
     this.lastRebalance = 0;
@@ -622,7 +628,7 @@ export class Control {
   // be on a slower cadence than this now asks for). Until every one of them has (or SETTLE_MS have passed), a pool
   // looks smaller than it is, so nothing is started or retired on that account.
   settling(now) {
-    return now - this.bootAt < SETTLE_MS && [...this.runs.values()].some((x) => !x.retire && now - x.seen < SETTLE_MS && x.seen < this.bootAt);
+    return now - this.settleAt < SETTLE_MS && [...this.runs.values()].some((x) => !x.retire && now - x.seen < SETTLE_MS && x.seen < this.settleAt);
   }
 
   poolSize(pool) {
@@ -1242,16 +1248,16 @@ export class Control {
     // After a (re)start the first machine to check in would get every replica, because it's the only one with
     // metrics; wait until every machine that's up has reported some (or 3 minutes).
     const measured = (machine) => now - (this.liveMetrics.get(machine)?.t ?? 0) < 3 * this.liveMs;
-    const arrived = now - this.bootAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
+    const arrived = now - this.settleAt > ARRIVAL_MS || (up.size >= this.expectedMachines() && [...up.keys()].every(measured));
     const counts = new Map(); // machine -> copies placed on it
     for (const [name, list] of this.copies) {
       // Projects that are gone or disabled need no copies; neither do machines that have gone, nor replicas
       // numbered above the count (it was lowered), along with any copy of theirs being moved.
       const p = this.projects.get(name);
       const replicas = p ? this.version(name, p.version)?.replicas ?? 1 : null;
-      // Just after a (re)start every machine looks down until it has checked in again: a copy's machine counts as gone
-      // only once the control plane has been up long enough for that.
-      const gone = (machine) => !up.has(machine) && now - this.bootAt > Math.max(this.liveMs, SETTLE_MS);
+      // Just after a (re)start, or a gap in check-ins, every machine looks down until it has checked in again: a copy's
+      // machine counts as gone only once the control plane has been reachable long enough for that.
+      const gone = (machine) => !up.has(machine) && now - this.settleAt > Math.max(this.liveMs, SETTLE_MS);
       for (const x of [...list]) {
         // A copy being moved away goes once its replacement is healthy, or after a while regardless.
         const moved = x.leaving && (up.get(x.leaving.to)?.status[this.keyOn(name, x.leaving.to, x.replica)]?.s === "healthy" || now - x.leaving.at > MOVE_TIMEOUT_MS);
@@ -1535,6 +1541,13 @@ export class Control {
 
   sync(body) {
     const now = Date.now();
+    // Every machine silent for longer than the liveness window: this was unreachable, so give the fleet time to show
+    // up again before anything counts as gone or gets placed (see SETTLE_MS).
+    if (now - this.lastCheckin > this.liveMs) {
+      this.settleAt = now;
+      console.log(`no check-in for ${Math.round((now - this.lastCheckin) / 1000)}s: the control plane was unreachable; nothing counts as gone for ${SETTLE_MS / 60_000} min`);
+    }
+    this.lastCheckin = now;
     const machine = Number(body?.machine);
     const started = Number(body?.started);
     const run = String(body?.run ?? "");
