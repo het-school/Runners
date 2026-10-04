@@ -1,5 +1,5 @@
 // The control plane as one process: SQLite in DATA_DIR, HTTP on 127.0.0.1:PORT (a Cloudflare tunnel in front gives it
-// control.<domain>). Settings and secrets come from the environment (see the README).
+// runners.<domain>). Settings and secrets come from the environment (see the README).
 //   PORT (8920), DATA_DIR (.), DOMAIN, CONTROL_HOST, ZONE, ACCOUNT_ID, POOLS, MAX_SLOTS, FLEET_PASSWORD, JOIN_TOKEN,
 //   CF_API_TOKEN (or CF_API_KEY + CF_API_EMAIL), CF_API_BASE (tests), HOT_MS (tests), POLL_S, DNS=off (no DNS changes)
 import http from "node:http";

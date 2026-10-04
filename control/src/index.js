@@ -1,5 +1,5 @@
 // Control plane for the runner fleet: one Node process with a SQLite file (see ../server.mjs), reached through its own
-// Cloudflare tunnel at control.<domain>. Cloudflare provides nothing else: the machines' tunnels and the DNS names.
+// Cloudflare tunnel at runners.<domain>. Cloudflare provides nothing else: the machines' tunnels and the DNS names.
 // It knows nothing about where machines come from; see the agent's settings for what a machine tells it.
 // Holds the project specs (a docker compose file plus any Dockerfiles and build files) and sends every change to all
 // machines. Machines find it, not the other way round: any agent joins at /api/join, gets the lowest free slot n and

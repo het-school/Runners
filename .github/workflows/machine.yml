@@ -1,7 +1,7 @@
 name: machine
 run-name: machine ${{ inputs.machine }}
 
-# One machine of the fleet. Its agent joins the control plane (https://control.billybishop4-workers.xyz), which
+# One machine of the fleet. Its agent joins the control plane (https://runners.billybishop4-workers.xyz), which
 # gives it slot n and the token for tunnel runner-n, and keeps the projects in line. Everything about GitHub is
 # here, not in the agent: this job's lifetime and how a machine is started (START_CMD).
 # Machines are started by the other machines and by the watchdog workflow; start one here to add it right away.
@@ -31,7 +31,7 @@ jobs:
         id: agent
         shell: bash
         env:
-          CONTROL_URL: https://control.billybishop4-workers.xyz
+          CONTROL_URL: https://runners.billybishop4-workers.xyz
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           # How the agent sees this machine: a member of pool POOL, in slot MACHINE. It names itself (its hostname) and makes up its own ID.
@@ -66,7 +66,7 @@ jobs:
         if: ${{ !cancelled() && steps.agent.outcome == 'success' }}
         shell: bash
         env:
-          CONTROL_URL: https://control.billybishop4-workers.xyz
+          CONTROL_URL: https://runners.billybishop4-workers.xyz
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           POOL: ${{ vars.POOL || 'github' }}

@@ -4,7 +4,7 @@ A self-healing fleet of machines that join a control plane: pools of GitHub Acti
 
 Neither the control plane nor the agent knows what a machine is, where it comes from, or how long it lives; they're told. An agent describes its machine with a **pool** (the name of a replaceable set it belongs to, which the control plane keeps at its size; or none, for a standalone host that keeps its slot across restarts), whether it **starts** machines (it has a `START_CMD`), an optional label (a name for the pages; `install.sh` uses the host's hostname), and sends **leaving** on its last check-in when it's going for good. Whatever runs the machine pings **`POST /api/drain`** when it's going down soon, and the control plane hands the machine over (one at a time, as for a requested roll). Everything about GitHub Actions lives in [`machine.yml`](.github/workflows/machine.yml): the job's 6-hour lifetime, a timer that drains the machine 4h15m-5h15m in at random, and the command that starts another machine.
 
-- **Web app:** https://control.billybishop4-workers.xyz, one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
+- **Web app:** https://runners.billybishop4-workers.xyz (the older name, control.billybishop4-workers.xyz, still works), one page with views for an overview (what needs attention first), apps, machines, metrics, fleet settings and a deploy guide. It works on phones too, with a bottom tab bar. `/admin` and `/metrics` redirect to it, and their old links still land in the right place.
   - **Open to everyone:** seeing everything (apps, machines, metrics, deployments), deploying an app, and changing or removing any app that isn't locked: editing, rolling back (with a diff of what changes), changing replicas, moving a replica, disabling or deleting it (deleting asks you to type the name). No account, no token.
   - **A locked app needs its app password:** whoever deploys an app can give it an app password (optional), or lock it later from its page or with `runnerctl password <name>`; changing it then needs that app password, which the browser keeps for the session (or on that device if you tick the box). The admin password works for every app too.
   - **Needs the admin password (the fleet owner's):** changing the fleet, which covers automatic rebalancing, restarting machines, moving every app off a machine, retiring slots, and showing the join command for a new machine. Those controls show a lock, and using one asks for the password once per browser session (or remembers it on that device if you tick the box).
@@ -68,7 +68,7 @@ POST   /api/drain                               {"agent": id}, {"run": id} or {"
 ```
 
 ```sh
-curl -X PUT https://control.billybishop4-workers.xyz/api/projects/hello -H 'Content-Type: application/json' \
+curl -X PUT https://runners.billybishop4-workers.xyz/api/projects/hello -H 'Content-Type: application/json' \
   -d '{"dockerfile": "FROM python:3.12-alpine\nCMD [\"python\", \"-m\", \"http.server\", \"9000\"]", "port": 9000}'
 ```
 
@@ -87,7 +87,7 @@ runnerctl roll [n] | pool <name> <n>
 Any Linux machine with Docker can join. Get the command, token included, from the Fleet page ("Add a machine"), or the token with `runnerctl join-token`, then on the machine:
 
 ```sh
-curl -fsSL https://control.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
+curl -fsSL https://runners.billybishop4-workers.xyz/install.sh | sudo JOIN_TOKEN=<token> sh
 ```
 
 Add `LABEL=<name>` to name it on the status pages. A machine joined this way stands on its own (no pool) and keeps its slot across restarts; the web app doesn't show pools at all, it's just one set of machines.
@@ -96,7 +96,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 
 ## How it works
 
-- **Control plane** ([`control/`](control)): one Node process (`server.mjs`) with a SQLite file, reached through its own Cloudflare tunnel at `control.<domain>`. It:
+- **Control plane** ([`control/`](control)): one Node process (`server.mjs`) with a SQLite file, reached through its own Cloudflare tunnel at `runners.<domain>`. It:
   - holds every project's versions
   - places each project's replicas on the machines with the most room, and moves them when a machine goes
   - runs the rollouts
@@ -118,7 +118,7 @@ It runs the agent in the container `runner-agent`, takes the lowest free slot (a
 
 ## Running the control plane
 
-`control/server.mjs` needs Node 24 (for `node:sqlite`) and `npm install` in `control/` (the `yaml` package). Settings and secrets come from the environment: `PORT` (8920), `DATA_DIR` (where `control.db` lives), `DOMAIN`, `CONTROL_HOST`, `ZONE`, `ACCOUNT_ID`, `POOLS` (default pool sizes, JSON), `MAX_SLOTS`, `ADMIN_PASSWORD`, `JOIN_TOKEN`, and `CF_API_TOKEN` (a token with DNS edit on the zone and Cloudflare Tunnel edit on the account; or `CF_API_KEY` plus `CF_API_EMAIL`). `AGENT_URL` is where machines joining with `install.sh` fetch the agent's code (default: this repo's main branch). `DNS=off` stops it touching DNS (for a copy you're trying things on). It listens on 127.0.0.1 only; a Cloudflare tunnel (`cloudflared tunnel run`, ingress `control.<domain>` → `http://127.0.0.1:8920`) gives it its name.
+`control/server.mjs` needs Node 24 (for `node:sqlite`) and `npm install` in `control/` (the `yaml` package). Settings and secrets come from the environment: `PORT` (8920), `DATA_DIR` (where `control.db` lives), `DOMAIN`, `CONTROL_HOST`, `ZONE`, `ACCOUNT_ID`, `POOLS` (default pool sizes, JSON), `MAX_SLOTS`, `ADMIN_PASSWORD`, `JOIN_TOKEN`, and `CF_API_TOKEN` (a token with DNS edit on the zone and Cloudflare Tunnel edit on the account; or `CF_API_KEY` plus `CF_API_EMAIL`). `AGENT_URL` is where machines joining with `install.sh` fetch the agent's code (default: this repo's main branch). `DNS=off` stops it touching DNS (for a copy you're trying things on). It listens on 127.0.0.1 only; a Cloudflare tunnel (`cloudflared tunnel run`, ingress `runners.<domain>` → `http://127.0.0.1:8920`) gives it its name.
 
 The live one runs on the owner's VPS as systemd user units `runner-control.service` (the server, from this repo's checkout) and `runner-control-tunnel.service` (cloudflared), with the settings in `~/.config/runner-control/env`. To deploy a change: pull, then `systemctl --user restart runner-control.service`; the agents keep what's running while it's down for the second that takes. `GET /api/export` and `POST /api/import` (admin password) move the whole state to another server.
 

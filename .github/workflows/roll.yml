@@ -16,4 +16,4 @@ jobs:
         env:
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
         run: |
-          curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" https://control.billybishop4-workers.xyz/api/roll
+          curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" https://runners.billybishop4-workers.xyz/api/roll
