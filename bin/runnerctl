@@ -8,6 +8,11 @@
 #   runnerctl disable|enable <name>  stop or start a project on every machine (the spec is kept)
 #   runnerctl rm <name>              delete a project and its versions
 #   runnerctl password <name>        lock an app with an app password (asked for), or change it; changing the app then needs it
+#   runnerctl env <name> [KEY=value|KEY=@file ...] [--unset KEY ...]
+#                                    the app's env: set or remove variables (no arguments: list the names). Every copy
+#                                    gets them in its .env (compose reads ${VAR} from it; env_file: .env passes them
+#                                    on) with FLEET_APP, FLEET_REPLICA, FLEET_MACHINE, FLEET_HOST... Values are never
+#                                    shown again, so secrets go here, not in the compose file. A change is a new version.
 #   runnerctl status                 projects and machines
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
 #   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool main 10)
@@ -23,7 +28,7 @@ set -euo pipefail
 URL=${RUNNER_URL:-https://runners.billybishop4-workers.xyz}
 ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(cat ~/.config/runnerctl/admin-password 2>/dev/null || cat ~/.config/runnerctl/fleet-password 2>/dev/null || true)}
 api() { curl -sS ${ADMIN_PASSWORD:+-H "x-admin-password: $ADMIN_PASSWORD"} -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
-usage() { sed -n '2,20p' "$0" | sed -E 's/^# ?//'; exit 1; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print } NR > 1 && !/^#/ { exit }' "$0"; exit 1; }
 
 cmd=${1:-}
 shift || true
@@ -92,6 +97,21 @@ PY
     read -rsp "New password for $1: " p; echo; read -rsp "Again: " p2; echo
     [ "$p" = "$p2" ] || { echo "They don't match." >&2; exit 1; }
     jq -n --arg p "$p" '{password: $p}' | api "/projects/$1/password" -X PUT --data-binary @- | jq . ;;
+  env)
+    [ $# -ge 1 ] || usage
+    name=$1; shift
+    if [ $# -eq 0 ]; then api "/projects/$name/env" | jq -r 'if .error then .error elif (.keys | length) == 0 then "(no variables)" else .keys[] end'; exit; fi
+    body='{}'
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --unset) body=$(jq -c --arg k "${2:?--unset needs a variable name}" '. + {($k): null}' <<<"$body"); shift ;;
+        *=@*) body=$(jq -c --arg k "${1%%=*}" --rawfile v "${1#*=@}" '. + {($k): ($v | rtrimstr("\n"))}' <<<"$body") ;;
+        *=*) body=$(jq -c --arg k "${1%%=*}" --arg v "${1#*=}" '. + {($k): $v}' <<<"$body") ;;
+        *) usage ;;
+      esac
+      shift
+    done
+    api "/projects/$name/env" -X PUT -d "$body" | jq -r 'if .error then .error else "\(.name) v\(.version): \(.keys | join(", "))" end' ;;
   status | ls)
     curl -sS "$URL/api/status" | jq -r '
       "Projects:",

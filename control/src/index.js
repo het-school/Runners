@@ -23,6 +23,11 @@
 //                                                          changes then need (x-app-password) or the admin password
 //                                                          (x-admin-password); fleet changes need the admin password;
 //                                                          machines send the join token (Bearer): join/sync/claim/drain/roll
+//   PUT /api/projects/<name>/env  the app's env: {KEY: "value"} sets, {KEY: null} removes. Every copy gets it as its
+//                                 .env (compose reads ${VAR} from it; env_file: .env passes it into containers), along
+//                                 with FLEET_APP, FLEET_REPLICA, FLEET_REPLICAS, FLEET_MACHINE, FLEET_HOST, FLEET_DOMAIN
+//                                 and FLEET_VERSION. Values are never sent out again (GET gives the keys), so secrets go
+//                                 here rather than in the compose file, which everyone can read. A change is a new version.
 //                                            /admin/api/*  the same, for the UI (changes from other sites are refused)
 //   /admin, /metrics  redirect to the app      /api/metrics  machine and app metrics (no token needed)
 import { timingSafeEqual } from "node:crypto";
@@ -46,6 +51,9 @@ const NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
+const MAX_ENV = 40; // variables in an app's env (PUT /api/projects/<name>/env), each value at most MAX_ENV_VALUE characters
+const MAX_ENV_VALUE = 8192;
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
 const DNS_COMMENT = "runner fleet"; // on the DNS records this makes, so they can be told apart in the zone
 // Where machines that join with install.sh get the agent's code: a URL serving agent.mjs and metrics.mjs (AGENT_URL).
@@ -362,6 +370,7 @@ function buildSpec(body, { trusted = false } = {}) {
     if (typeof content !== "string") throw new HttpError(400, `${path} must be text`);
     if (!FILE_PATH.test(path) || joinPath(path) !== path) throw new HttpError(400, `${path} isn't a usable file path`);
     if (/^(docker-)?compose\.ya?ml$/.test(path)) throw new HttpError(400, "send the compose file as compose, not as a file");
+    if (path === ".env") throw new HttpError(400, "the app's .env is made from its env (PUT /api/projects/<name>/env): put the values there, not in a file");
     size += path.length + content.length;
   }
   if (size > MAX_SPEC_BYTES) throw new HttpError(400, "the spec is bigger than 250 KB");
@@ -469,7 +478,7 @@ echo "Joined. Follow it with: docker logs -f runner-agent"
 `;
 }
 
-const EXPORT_TABLES = ["projects", "versions", "copies", "runs", "starts", "settings", "slots", "agents", "app_passwords", "metrics_1m", "metrics_10m", "metrics_1h"];
+const EXPORT_TABLES = ["projects", "versions", "copies", "runs", "starts", "settings", "slots", "agents", "app_passwords", "app_env", "metrics_1m", "metrics_10m", "metrics_1h"];
 
 export class Control {
   // sql: { exec(query, ...args) -> { toArray() } } over SQLite; env: settings and secrets; alarm(at): call this.alarm()
@@ -498,6 +507,7 @@ export class Control {
       `CREATE TABLE IF NOT EXISTS metrics_10m (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS metrics_1h (t INTEGER PRIMARY KEY, data TEXT NOT NULL)`,
       `CREATE TABLE IF NOT EXISTS app_passwords (name TEXT PRIMARY KEY, salt TEXT NOT NULL, hash TEXT NOT NULL, updated INTEGER NOT NULL)`,
+      `CREATE TABLE IF NOT EXISTS app_env (name TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (name, key))`,
     ]) {
       this.sql.exec(query);
     }
@@ -546,6 +556,10 @@ export class Control {
     this.lastRebalance = 0;
     this.failures = new Map(); // "address|fleet" or "address|app:<name>" -> { n, at }: wrong passwords
     this.appPasswords = new Map(this.all("SELECT name, salt, hash FROM app_passwords").map((x) => [x.name, x])); // never sent out
+    this.appEnv = new Map(); // project -> Map(key -> value), its env (see putEnv): sent to machines in .env, never out to the API
+    for (const x of this.all("SELECT name, key, value FROM app_env ORDER BY key")) {
+      (this.appEnv.get(x.name) ?? this.appEnv.set(x.name, new Map()).get(x.name)).set(x.key, x.value);
+    }
     this.autoMoved = new Map(); // project -> when it was last moved automatically
     this.rebalanceLog = JSON.parse(this.settings.get("rebalance_log") ?? "[]");
     this.slots = new Map(this.all("SELECT n, tunnel, token FROM slots").map((x) => [x.n, x])); // slot -> its tunnel
@@ -835,10 +849,11 @@ export class Control {
     // Apps are open: anyone can look, deploy a new one, change or remove one. Unless it's locked: a "password" sent
     // with a new app (or set later at /password) locks it, and changing it then needs that password (x-app-password)
     // or the admin password.
-    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password))?$/);
+    const m = route.match(/^\/projects\/([^/]+)(?:\/(enable|disable|move|unlock|password|env))?$/);
     if (m) {
       const [, name, action] = m;
       if (!action && method === "GET") return json(this.getProject(name, url.searchParams.get("version")));
+      if (action === "env" && method === "GET") return json({ name, keys: this.envKeys(name) });
       const input = method === "PUT" ? await body() : null;
       const key = `${ip}|app:${name}`;
       // The hashing comes first, so the checks and the change below run with no await between them and no other
@@ -871,6 +886,7 @@ export class Control {
         this.saveAppPassword(name, secret);
         return json({ ok: true });
       }
+      if (action === "env" && method === "PUT") return json(this.putEnv(name, input));
       if (action === "move" && method === "POST") return json(this.move(name, Number(url.searchParams.get("from")), url.searchParams.get("to"), url.searchParams.get("replica")));
       if ((action === "enable" || action === "disable") && method === "POST") return json(this.setEnabled(name, action === "enable"));
       if (!action && method === "PUT") {
@@ -906,6 +922,7 @@ export class Control {
       files: Object.keys(latest?.files ?? {}),
       enabled: Boolean(p.enabled),
       hasPassword: this.appPasswords.has(p.name), // locked: changing it needs that password (or the fleet's); else anyone can
+      env: [...(this.appEnv.get(p.name)?.keys() ?? [])], // its env's variable names (the values stay here)
       state: !p.enabled ? "disabled" : p.halted ? "halted" : p.stable === p.version ? "live" : "deploying",
       halted: p.halted,
       updated: p.updated,
@@ -928,6 +945,7 @@ export class Control {
       shown: v,
       compose: spec.compose,
       files: spec.files,
+      env: this.envKeys(name), // the keys only
       port: spec.port,
       replicas: spec.replicas,
       versions: this.all("SELECT version, port, replicas, created FROM versions WHERE name = ? ORDER BY version", name)
@@ -952,7 +970,10 @@ export class Control {
     const spec = buildSpec(body, { trusted });
     const t = Date.now();
     const machines = this.expectedMachines();
-    const same = latest && latest.compose === spec.compose && latest.port === spec.port && latest.replicas === spec.replicas &&
+    // env: {KEY: "value"} in the same request sets the app's env (see putEnv) before the version is made, so a new
+    // app's first version already has it (a secret the containers need to start, say).
+    const envChanged = body.env !== undefined ? this.mergeEnv(name, body.env, t) : false;
+    const same = latest && !envChanged && latest.compose === spec.compose && latest.port === spec.port && latest.replicas === spec.replicas &&
       JSON.stringify(latest.files) === JSON.stringify(spec.files);
     let next;
     if (same) {
@@ -984,6 +1005,74 @@ export class Control {
     return this.describe(this.projects.get(name));
   }
 
+  // ---- an app's env ----
+  // KEY=value pairs every copy gets in its .env: compose fills ${VAR} from it, and `env_file: .env` passes it into a
+  // container. Values never leave here again (only the keys do), so this is where secrets belong: the compose file
+  // itself is public. The copy's place in the fleet goes in the same file as FLEET_* variables. A change makes a new
+  // version with the same spec, so every machine rewrites the file and restarts whatever read it.
+  envKeys(name) {
+    this.project(name);
+    return [...(this.appEnv.get(name)?.keys() ?? [])];
+  }
+
+  // Applies {KEY: "value" | null} to an app's env (stored; the project needn't exist yet). True if anything changed.
+  mergeEnv(name, patch, t) {
+    if (!isMap(patch)) throw new HttpError(400, 'env must be an object: {"KEY": "value"} sets a variable, {"KEY": null} removes one');
+    const env = new Map(this.appEnv.get(name) ?? []);
+    for (const [key, value] of Object.entries(patch)) {
+      if (!ENV_KEY.test(key)) throw new HttpError(400, `${key} isn't a usable variable name (letters, digits and _, up to 64)`);
+      if (key.startsWith("FLEET_")) throw new HttpError(400, `${key}: FLEET_ variables are set by the fleet`);
+      if (value === null) env.delete(key);
+      else if (typeof value !== "string") throw new HttpError(400, `${key} must be text (or null to remove it)`);
+      else if (value.length > MAX_ENV_VALUE) throw new HttpError(400, `${key} is longer than ${MAX_ENV_VALUE} characters`);
+      else env.set(key, value);
+    }
+    if (env.size > MAX_ENV) throw new HttpError(400, `at most ${MAX_ENV} variables`);
+    const before = this.appEnv.get(name);
+    const changed = (before?.size ?? 0) !== env.size || [...env].some(([k, v]) => before?.get(k) !== v);
+    if (!changed) return false;
+    this.sql.exec("DELETE FROM app_env WHERE name = ?", name);
+    for (const [k, v] of env) this.sql.exec("INSERT INTO app_env (name, key, value, updated) VALUES (?, ?, ?, ?)", name, k, v, t);
+    if (env.size) this.appEnv.set(name, env);
+    else this.appEnv.delete(name);
+    return true;
+  }
+
+  putEnv(name, body) {
+    const p = this.project(name);
+    if (!isMap(body) || !Object.keys(body).length) throw new HttpError(400, 'send {"KEY": "value"} to set a variable and {"KEY": null} to remove one');
+    const t = Date.now();
+    const changed = this.mergeEnv(name, body, t);
+    const latest = this.version(name, p.version);
+    if (changed && latest) {
+      const version = p.version + 1;
+      this.sql.exec(
+        "INSERT INTO versions (name, version, compose, port, files, replicas, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        name, version, latest.compose, latest.port, JSON.stringify(latest.files), latest.replicas, t,
+      );
+      this.saveProject({ ...p, version, stable: version, rollout: this.expectedMachines(), halted: null, updated: t });
+      this.place(t);
+    }
+    return { ...this.describe(this.project(name)), keys: this.envKeys(name), unchanged: !changed || undefined };
+  }
+
+  // The .env for copy x of a project: where it is in the fleet, then the app's own variables. Written the way compose
+  // reads the file: single quotes keep a value as it is; a value with a quote or a line break is double-quoted and escaped.
+  envFile(name, spec, x, v) {
+    const quote = (s) => (!/['\n\r]/.test(s) ? `'${s}'` : `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "$$$$").replace(/\r?\n/g, "\\n")}"`);
+    const lines = [
+      `FLEET_APP=${name}`,
+      `FLEET_REPLICA=${x.replica}`,
+      `FLEET_REPLICAS=${spec.replicas}`,
+      `FLEET_MACHINE=${x.machine}`,
+      `FLEET_HOST=${name}-${x.replica}.${this.env.DOMAIN}`,
+      `FLEET_DOMAIN=${this.env.DOMAIN}`,
+      `FLEET_VERSION=${v}`,
+    ];
+    for (const [k, val] of this.appEnv.get(name) ?? []) lines.push(`${k}=${quote(val)}`);
+    return `${lines.join("\n")}\n`;
+  }
+
   deleteProject(name) {
     this.project(name);
     this.projects.delete(name);
@@ -991,9 +1080,11 @@ export class Control {
     this.sql.exec("DELETE FROM versions WHERE name = ?", name);
     this.sql.exec("DELETE FROM copies WHERE name = ?", name);
     this.sql.exec("DELETE FROM app_passwords WHERE name = ?", name);
+    this.sql.exec("DELETE FROM app_env WHERE name = ?", name);
     this.copies.delete(name);
     this.blocked.delete(name);
     this.appPasswords.delete(name);
+    this.appEnv.delete(name);
     for (const key of this.versions.keys()) if (key.startsWith(`${name}@`)) this.versions.delete(key);
     this.scheduleDns();
     return { deleted: name };
@@ -1045,7 +1136,9 @@ export class Control {
       const spec = this.version(p.name, v);
       const here = this.copiesOn(p.name, machine);
       const keys = keysOn(here.map((x) => x.replica), p.name);
-      for (const x of here) out[keys.get(x.replica)] = { v, ...this.composeFor(p.name, v, spec, x), files: spec.files, app: p.name, replica: x.replica };
+      for (const x of here) {
+        out[keys.get(x.replica)] = { v, ...this.composeFor(p.name, v, spec, x), files: { ...spec.files, ".env": this.envFile(p.name, spec, x, v) }, app: p.name, replica: x.replica };
+      }
     }
     return out;
   }
