@@ -10,7 +10,7 @@
 #   runnerctl password <name>        lock an app with an app password (asked for), or change it; changing the app then needs it
 #   runnerctl status                 projects and machines
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
-#   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool github 10)
+#   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool main 10)
 #   runnerctl join-token             the token another host joins with (see /install.sh)
 #   runnerctl move <name> <from> [to] [replica]  move one copy of a project off a machine (new copy first, old one removed once
 #                                    healthy); with two copies there, say which replica

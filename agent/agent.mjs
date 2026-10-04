@@ -1,9 +1,9 @@
 // Runner agent: keeps one machine's projects in line with the control plane.
 // It joins the fleet (the control plane gives it a slot n and the token for tunnel runner-n), starts a local router
-// (it serves each project at <project>-m<n>, which is how the control plane's Worker reaches this machine; a machine
-// running two copies of a project tells them apart by the replica number the Worker sends in a header) and the
-// tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's told,
-// and restarts ones that stop answering. It doesn't know what kind of machine it's on: the settings below describe it.
+// (each copy of a project answers its replica's public name, <project>-<k>, which DNS points at this machine's tunnel)
+// and the tunnel, checks in every few seconds, starts, updates and removes docker compose projects to match what it's
+// told, and restarts ones that stop answering. It doesn't know what kind of machine it's on: the settings below
+// describe it.
 // No dependencies: Node's built-ins plus the docker CLI.
 //   CONTROL_URL, JOIN_TOKEN   the control plane and the fleet's join token (required)
 //   RUNNER_DATA   where projects and the agent's ID live (default /var/lib/runner)
@@ -56,17 +56,14 @@ function sh(cmd, args, { timeout = 15 * 60_000, extraEnv = {} } = {}) {
 }
 
 // Each copy answers its replica's public name, <app>-<k>.<domain>, which DNS points at this machine's tunnel while the
-// copy runs here. (It also still answers the older way: <app>-m<n>.<domain> plus a replica header, which is how the
-// control plane's Worker reached machines before the names pointed straight at tunnels.)
+// copy runs here.
 const replicaHost = (app, replica) => `${app}-${replica}.${domain}`;
-const machineHost = (app) => `${app}-m${machine}.${domain}`;
-const REPLICA_HEADER = "X-Runner-Replica";
 
-// GET / for a hostname (and replica) through the local router: { code, routed }, with code 0 if nothing answered.
+// GET / for a hostname through the local router: { code, routed }, with code 0 if nothing answered.
 // The router's own "no such project" 404 carries X-Runner-Route: none, so it isn't mistaken for the project's.
-function probe(host, replica = 1) {
+function probe(host) {
   return new Promise((resolve) => {
-    const req = http.get({ host: "127.0.0.1", port: ROUTER_PORT, path: "/", headers: { host, [REPLICA_HEADER]: String(replica) }, timeout: 5000 }, (res) => {
+    const req = http.get({ host: "127.0.0.1", port: ROUTER_PORT, path: "/", headers: { host }, timeout: 5000 }, (res) => {
       res.resume();
       resolve({ code: res.statusCode, routed: res.headers["x-runner-route"] !== "none" });
     });
@@ -81,7 +78,7 @@ async function answers(name, seconds) {
   const end = Date.now() + seconds * 1000;
   const p = projects.get(name);
   for (;;) {
-    const { code, routed } = await probe(replicaHost(p.app, p.replica), p.replica);
+    const { code, routed } = await probe(replicaHost(p.app, p.replica));
     if (code && routed && code !== 502) return true;
     if (Date.now() >= end) return false;
     await sleep(2000);
@@ -223,16 +220,12 @@ let routerConfig = "";
 const updateRouter = () => (routerChain = routerChain.then(loadRouter, loadRouter).catch((e) => log(`router update failed: ${e.message}`)));
 
 function routerJson() {
-  // Each copy answers its replica's public name. The older way too: the copy a project is known here by its plain
-  // name takes the machine host; any further copy of it here (<name>-r<k>) is matched by the replica header, and comes
-  // first, so requests for a copy that isn't here fall to the plain one.
-  const handle = (p) => [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }]; // stream_close_delay: a config reload would otherwise cut every websocket on the machine
-  const copies = [...projects].filter(([, p]) => p.port && domain);
-  const routes = [
-    ...copies.map(([, p]) => ({ match: [{ host: [replicaHost(p.app, p.replica)] }], handle: handle(p) })),
-    ...copies.sort(([ka, pa], [kb, pb]) => (ka === pa.app) - (kb === pb.app)) // header routes first, plain ones after
-      .map(([key, p]) => ({ match: [{ host: [machineHost(p.app)], ...(key === p.app ? {} : { header: { [REPLICA_HEADER]: [String(p.replica)] } }) }], handle: handle(p) })),
-  ];
+  // Each copy answers its replica's public name. (stream_close_delay: a config reload would otherwise cut every
+  // websocket on the machine.)
+  const routes = [...projects.values()].filter((p) => p.port && domain).map((p) => ({
+    match: [{ host: [replicaHost(p.app, p.replica)] }],
+    handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${p.port}` }], flush_interval: -1, stream_close_delay: "1h" }],
+  }));
   routes.push({
     handle: [{
       handler: "static_response",

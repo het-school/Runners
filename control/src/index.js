@@ -1,5 +1,6 @@
-// Control plane for hetp4401/runner: one Node process with a SQLite file (see ../server.mjs), reached through its own
+// Control plane for the runner fleet: one Node process with a SQLite file (see ../server.mjs), reached through its own
 // Cloudflare tunnel at control.<domain>. Cloudflare provides nothing else: the machines' tunnels and the DNS names.
+// It knows nothing about where machines come from; see the agent's settings for what a machine tells it.
 // Holds the project specs (a docker compose file plus any Dockerfiles and build files) and sends every change to all
 // machines. Machines find it, not the other way round: any agent joins at /api/join, gets the lowest free slot n and
 // the token for tunnel runner-<n> (created through the Cloudflare API the first time a slot is used), then checks in
@@ -46,7 +47,9 @@ const FILE_PATH = /^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/;
 const MAX_FILES = 30;
 const MAX_SPEC_BYTES = 256_000;
 const STANDALONE_HOLD_MS = 30 * 60_000; // a standalone machine that drops out keeps its slot this long, so a restart gets the same one
-const REPLICA_DNS = "100::"; // the placeholder records the Worker of before used for <project>-<k>; deleted when seen
+const DNS_COMMENT = "runner fleet"; // on the DNS records this makes, so they can be told apart in the zone
+// Where machines that join with install.sh get the agent's code: a URL serving agent.mjs and metrics.mjs (AGENT_URL).
+const DEFAULT_AGENT_URL = "https://raw.githubusercontent.com/hetp4401/runner/main/agent";
 const NUMBERED = /-m?\d+$/; // <project>-<k> is replica k's URL and <project>-m<n> machine n's, so no project name ends like that
 const MAX_REPLICAS = 50; // as many as the fleet can have machines; with more replicas than machines, machines run two or more copies
 const ARRIVAL_MS = 3 * 60_000; // after a (re)start, wait this long for the fleet and its metrics before placing anything
@@ -262,8 +265,28 @@ function keysOn(replicas, name) {
   return new Map(sorted.map((k, i) => [k, i === 0 ? name : `${name}-r${k}`]));
 }
 
-// Why a second copy of this compose file couldn't run next to a first one on the same machine (null: it could). Only
-// published ports can be moved out of the way; the machine's network itself and fixed container names can't.
+// Why this compose file's published ports can't be moved to other host ports (null: they can). The machine's network
+// itself can't be shared, and a port written with a variable can't be rewritten.
+function fixedPorts(compose) {
+  let doc;
+  try {
+    doc = YAML.parse(compose, { merge: true });
+  } catch {
+    return "the compose file";
+  }
+  for (const [name, s] of Object.entries(isMap(doc?.services) ? doc.services : {})) {
+    if (!isMap(s)) continue;
+    if (s.network_mode === "host") return `services.${name}.network_mode: host`;
+    for (const p of [s.ports ?? []].flat()) {
+      if (JSON.stringify(p).includes("$")) return `services.${name}.ports: variables`;
+      if (!isMap(p) && !/^(?:(.*):)?(\d+(?:-\d+)?):(\d+(?:-\d+)?)(\/\w+)?$/.test(String(p)) && !/^\d+(?:-\d+)?(\/\w+)?$/.test(String(p))) return `services.${name}.ports: ${JSON.stringify(p)}`;
+    }
+  }
+  return null;
+}
+
+// Why a second copy of this compose file couldn't run next to a first one on the same machine (null: it could):
+// its ports can't be moved, or it names its containers.
 function dupProblem(compose) {
   let doc;
   try {
@@ -416,17 +439,18 @@ function buildSpec(body, { trusted = false } = {}) {
   return { compose, port, replicas, files: sorted };
 }
 
-// Served at /install.sh: runs the agent in a container on any machine with Docker. The token isn't in it.
-function installScript(origin) {
+// Served at /install.sh: runs the agent in a container on any machine with Docker. The token isn't in it; the agent's
+// code comes from agentUrl (the repo's main branch unless AGENT_URL says otherwise).
+function installScript(origin, agentUrl) {
   return `#!/bin/sh
-# Adds this machine to the runner fleet (https://github.com/hetp4401/runner). Needs Docker.
+# Adds this machine to the fleet at ${origin}. Needs Docker.
 #   curl -fsSL ${origin}/install.sh | sudo JOIN_TOKEN=<token> sh
 # Optional: LABEL=<name> names it on the status pages (default: its hostname).
 # The agent runs in the container runner-agent, takes a free slot n, and runs the replicas placed on this
 # machine. It fetches the latest agent code each time it starts.
 # Remove the machine:  docker rm -f runner-agent tunnel router
 set -eu
-: "\${JOIN_TOKEN:?set JOIN_TOKEN; the fleet's owner gets it with: runnerctl join-token}"
+: "\${JOIN_TOKEN:?set JOIN_TOKEN; the fleet's owner gets it from the Contribute page or with: runnerctl join-token}"
 DATA=\${RUNNER_DATA:-/var/lib/runner}
 command -v docker >/dev/null 2>&1 || { echo "Install Docker first: https://docs.docker.com/engine/install/" >&2; exit 1; }
 mkdir -p "$DATA"
@@ -438,9 +462,8 @@ docker run -d --name runner-agent --restart unless-stopped --stop-timeout 180 --
   docker:cli sh -c '
     set -e
     apk add --no-cache nodejs >/dev/null
-    sha=$(wget -qO- https://api.github.com/repos/hetp4401/runner/commits/main | grep -m1 "\\"sha\\"" | cut -d\\" -f4 || true)
     mkdir -p /agent && cd /agent
-    for f in agent.mjs metrics.mjs; do wget -qO $f https://raw.githubusercontent.com/hetp4401/runner/\${sha:-main}/agent/$f; done
+    for f in agent.mjs metrics.mjs; do wget -qO $f ${agentUrl}/$f; done
     exec node agent.mjs'
 echo "Joined. Follow it with: docker logs -f runner-agent"
 `;
@@ -490,7 +513,7 @@ export class Control {
     for (const col of ["pool TEXT", "drain INTEGER"]) if (!runColumns.has(col.split(" ")[0])) this.sql.exec(`ALTER TABLE runs ADD COLUMN ${col}`);
     if (!columns("agents").has("pool")) this.sql.exec("ALTER TABLE agents ADD COLUMN pool TEXT");
     // Working state lives in memory (the object is single-threaded); SQLite keeps it across restarts,
-    // which happen whenever Cloudflare lets the object sleep.
+    // which happen when the process is restarted.
     this.projects = new Map(this.all("SELECT * FROM projects").map((p) => [p.name, p]));
     this.runs = new Map(this.all("SELECT * FROM runs").map((r) => [r.id, { ...r, status: JSON.parse(r.status), savedSeen: r.seen }]));
     this.starts = new Map(this.all("SELECT machine, at FROM starts").map((s) => [s.machine, s.at]));
@@ -616,7 +639,7 @@ export class Control {
       if (!row) return undefined; // not cached: a version asked for before it's deployed mustn't stay missing once it is
       const claims = new Set(claimsOf(row.compose));
       if (row.port) claims.add(`port ${row.port}`);
-      this.versions.set(key, { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}"), claims: [...claims], nodup: dupProblem(row.compose) });
+      this.versions.set(key, { compose: row.compose, port: row.port, replicas: row.replicas ?? 1, files: JSON.parse(row.files ?? "{}"), claims: [...claims], nodup: dupProblem(row.compose), fixed: fixedPorts(row.compose) });
     }
     return this.versions.get(key);
   }
@@ -664,7 +687,7 @@ export class Control {
       if (request.method === "GET" && (path === "/admin" || path === "/metrics")) {
         return new Response(null, { status: 302, headers: { location: `/?from=${path.slice(1)}` } });
       }
-      if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } });
+      if (request.method === "GET" && path === "/install.sh") return new Response(installScript(url.origin, this.env.AGENT_URL || DEFAULT_AGENT_URL), { headers: { "content-type": "text/plain; charset=utf-8" } });
       if (request.method === "GET" && path === "/internal/dns") return json({ names: Object.fromEntries(this.dnsTargets(Date.now())) }); // where each replica's name points (tests)
       if (path.startsWith("/admin/api/")) {
         // The UI: apps are open unless locked with a password; fleet changes need the admin password. Changes sent
@@ -1167,13 +1190,16 @@ export class Control {
     return changed;
   }
 
-  // A copy for machine `best` (from bestMachine), with its ports moved when the project is already there.
+  // A copy for machine `best` (from bestMachine). Published host ports that something on the machine already uses (a
+  // copy of the same project, or another project) are moved aside; the reason says so.
   newCopy(name, spec, k, best, now, reason = best.reason) {
     const x = { machine: best.machine, replica: k, since: now, reason, leaving: null, ports: null };
-    if (best.doubling) {
-      x.ports = this.movedPorts(name, spec, best.machine, k);
-      x.reason = `copy ${best.doubling + 1} on this machine, every machine having one; ${reason}`;
-    }
+    const ports = this.movedPorts(name, spec, best.machine, k);
+    const moved = Object.entries(ports).filter(([a, b]) => Number(a) !== b);
+    if (moved.length) {
+      x.ports = ports;
+      x.reason = `${best.doubling ? `copy ${best.doubling + 1} on this machine, every machine having one; ` : ""}port${moved.length > 1 ? "s" : ""} ${moved.map(([a, b]) => `${a}→${b}`).join(", ")} moved aside; ${reason}`;
+    } else if (best.doubling) x.reason = `copy ${best.doubling + 1} on this machine, every machine having one; ${reason}`;
     return x;
   }
 
@@ -1187,8 +1213,9 @@ export class Control {
     return `every machine already runs it, and it can't run twice on one machine (${spec?.nodup ?? "its compose file"})`;
   }
 
-  // Host ports for an extra copy of a project on a machine: the project's published ports, each moved to one that
-  // nothing on the machine uses. Fixed once chosen, so the copy's containers aren't recreated for a port change.
+  // Host ports for a copy of a project on a machine: each of the project's published ports as it is when nothing on
+  // the machine uses it, else moved to one that's free (30000-54999). Fixed once chosen, so the copy's containers
+  // aren't recreated for a port change.
   movedPorts(name, spec, machine, k) {
     const taken = new Set(RESERVED_PORTS);
     for (const [other, list] of this.copies) {
@@ -1201,28 +1228,33 @@ export class Control {
       }
     }
     const ports = {};
+    if (spec?.fixed) return ports; // these can't be moved; clash() keeps such a copy off a machine where they're taken
     for (const c of spec?.claims ?? []) {
       const m = c.match(/^port (\d+)$/);
       if (!m) continue;
       const P = Number(m[1]);
-      let q = 30000 + ((P * 131 + k * 7919) % 25000);
-      while (taken.has(q) || Object.values(ports).includes(q)) q = q + 1 < 55000 ? q + 1 : 30000;
+      let q = P;
+      if (taken.has(q)) {
+        q = 30000 + ((P * 131 + k * 7919) % 25000);
+        while (taken.has(q) || Object.values(ports).includes(q)) q = q + 1 < 55000 ? q + 1 : 30000;
+      }
       ports[P] = q;
     }
     return ports;
   }
 
-  // What keeps a first copy of a project off a machine: another project placed there publishes one of the same host
-  // ports, or uses the same container name (the second one to start would fail). { what, other }, or null.
+  // What keeps a copy of a project off a machine: another copy placed there (of this project or another) uses one of
+  // its container names, or one of its published ports when this project's ports can't be moved. { what, other }, or null.
   clash(name, machine) {
     const p = this.projects.get(name);
-    const mine = p && this.version(name, p.version)?.claims;
-    if (!mine?.length) return null;
+    const spec = p && this.version(name, p.version);
+    const mine = spec?.claims ?? [];
+    if (!mine.length) return null;
+    const matters = (c) => c.startsWith("container name ") || Boolean(spec.fixed);
     for (const [other, list] of this.copies) {
-      if (other === name) continue;
       for (const x of list) {
         if (x.machine !== machine) continue;
-        const what = this.copyClaims(other, x).find((c) => mine.includes(c));
+        const what = this.copyClaims(other, x).find((c) => matters(c) && mine.includes(c));
         if (what) return { what, other };
       }
     }
@@ -1231,14 +1263,15 @@ export class Control {
 
   // The machine with the most room for a copy of the project: ready machines first, then machines without a copy of
   // it (a second copy there only when every machine has one, and the project can run twice on a machine), then by
-  // load. Machines where a first copy would clash with another project's ports are out.
+  // load. A machine where its ports are taken is fine (they're moved aside); one where they can't be, or where a
+  // container name of its is in use, is out.
   bestMachine(name, up, counts, now) {
     const p = this.projects.get(name);
     const spec = p && this.version(name, p.version);
     const mine = new Map(); // machine -> copies of this project there (ones moving away included: their ports are still in use)
     for (const x of this.copiesOf(name)) mine.set(x.machine, (mine.get(x.machine) ?? 0) + 1);
     return [...up.values()]
-      .filter((r) => (mine.get(r.machine) ? !spec?.nodup : !this.clash(name, r.machine)))
+      .filter((r) => !this.clash(name, r.machine) && !(mine.get(r.machine) && spec?.nodup))
       .map((r) => ({ machine: r.machine, ready: r.ready, doubling: mine.get(r.machine) ?? 0, ...this.load(r.machine, counts.get(r.machine) ?? 0, now) }))
       .sort((a, b) => b.ready - a.ready || a.doubling - b.doubling || a.score - b.score)[0] ?? null;
   }
@@ -1274,7 +1307,7 @@ export class Control {
       if (m === from) throw new HttpError(400, `replica ${x.replica} of ${name} is on machine ${to} already`);
       const doubling = this.copiesOn(name, m).length;
       if (doubling && spec?.nodup) throw new HttpError(409, `machine ${to} already runs ${name}, which can't run twice on one machine (${spec.nodup})`);
-      const clash = !doubling && this.clash(name, m);
+      const clash = this.clash(name, m);
       if (clash) throw new HttpError(409, `machine ${to} already has ${clash.other}, which uses ${clash.what} too`);
       dest = { machine: m, doubling, reason: `moved here from machine ${from} by hand` };
     } else {
@@ -1346,37 +1379,38 @@ export class Control {
   rebalance(now) {
     if (!this.rebalanceOn() || now - this.lastRebalance < 30_000) return;
     this.lastRebalance = now;
-    if (now - (this.rebalanceLog[0]?.t ?? 0) < COOLDOWN_MS) return;
     // One move at a time: wait for any move (by hand or automatic) to finish.
     for (const list of this.copies.values()) for (const x of list) if (x.leaving) return;
     const up = this.liveMachines(now);
     const settled = [...up.values()].filter((r) => r.ready && now - r.started > SETTLED_MS && this.liveMetrics.has(r.machine));
     if (settled.length < 2) return;
     const counts = this.placementCounts();
-    const tryMove = (name, from, dest, replica, why, reasonOnDest) => {
+    const tryMove = (name, from, dest, replica, why, reasonOnDest, { cooldown = true } = {}) => {
       try {
         this.move(name, from, String(dest.machine), replica);
         const x = this.copiesOn(name, dest.machine).find((y) => y.replica === replica);
         x.reason = `moved here from machine ${from} automatically: ${why}; ${reasonOnDest}`;
         this.saveCopy(name, x);
-        this.autoMoved.set(name, now);
+        if (cooldown) this.autoMoved.set(name, now);
         this.logRebalance(now, `moved replica ${replica} of ${name} from machine ${from} to machine ${dest.machine}: ${why}`);
       } catch (e) {
         this.logRebalance(now, `couldn't move replica ${replica} of ${name} off machine ${from}: ${e.message}`);
       }
     };
-    // First: a machine running two copies of a project while a settled machine with room runs none of it.
+    // First: a machine running two or more copies of a project while a settled machine with room runs none of it.
+    // These moves only undo a shortage of machines at placement time, so they go as fast as they complete (one at a
+    // time), with none of the thrash protection the moves below have.
     for (const [name, list] of this.copies) {
-      if (now - (this.autoMoved.get(name) ?? 0) < PROJECT_COOLDOWN_MS) continue;
       const by = new Map();
       for (const x of list) if (!x.leaving) by.set(x.machine, (by.get(x.machine) ?? 0) + 1);
       const from = [...by].filter(([m, n]) => n > 1 && settled.some((r) => r.machine === m)).sort((a, b) => b[1] - a[1])[0];
       if (!from) continue;
-      const dest = settled.find((r) => !by.has(r.machine) && this.hasRoom(r.machine, now) && !this.clash(name, r.machine));
+      const dest = this.bestMachine(name, new Map([...up].filter(([m]) => !by.has(m) && settled.some((r) => r.machine === m) && this.hasRoom(m, now))), counts, now);
       if (!dest) continue;
       const replica = Math.max(...list.filter((x) => x.machine === from[0] && !x.leaving).map((x) => x.replica));
-      return tryMove(name, from[0], dest, replica, `machine ${from[0]} ran ${from[1]} copies of ${name} and machine ${dest.machine} none`, this.load(dest.machine, counts.get(dest.machine) ?? 0, now).reason);
+      return tryMove(name, from[0], dest, replica, `machine ${from[0]} ran ${from[1]} copies of ${name} and machine ${dest.machine} none`, dest.reason, { cooldown: false });
     }
+    if (now - (this.rebalanceLog[0]?.t ?? 0) < COOLDOWN_MS) return;
     // Hot machines first, busiest first; then the most loaded machine if the spread is uneven.
     let from = null;
     let why = "";
@@ -1873,9 +1907,8 @@ export class Control {
   // ---- DNS ----
   // For every project with a port: <project>-<k>.DOMAIN (k from 1 to its replica count) is a proxied CNAME to the tunnel
   // of the machine running replica k, moved when the copy moves. Names whose replica has no copy yet keep their record,
-  // if any. Our records are the CNAMEs pointing at our tunnels: the ones no longer wanted (a removed replica, the
-  // <project>-m<n> machine names of before) are deleted, and so are the placeholder records the Worker of before left
-  // behind. Records that aren't ours are left alone and noted.
+  // if any. Our records are the CNAMEs pointing at our tunnels: the ones no longer wanted (a removed replica) are
+  // deleted. Records that aren't ours are left alone and noted.
 
   scheduleDns() {
     this.dnsDue = Date.now() + 2_000;
@@ -1919,8 +1952,7 @@ export class Control {
       existing.push(...data.result);
       if (page >= (data.result_info?.total_pages ?? 1)) break;
     }
-    const isOldPlaceholder = (r) => r.type === "AAAA" && r.content === REPLICA_DNS && r.comment === "hetp4401/runner";
-    const deletes = existing.filter((r) => (r.type === "CNAME" && ours.has(r.content) && !names.has(r.name)) || isOldPlaceholder(r));
+    const deletes = existing.filter((r) => r.type === "CNAME" && ours.has(r.content) && !names.has(r.name));
     const gone = new Set(deletes.map((r) => r.id));
     const byName = new Map();
     for (const r of existing) if (!gone.has(r.id)) (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(r);
@@ -1930,7 +1962,7 @@ export class Control {
     for (const [name, content] of want) {
       const rs = byName.get(name) ?? [];
       const r = rs.find((x) => x.type === "CNAME");
-      if (!rs.length) posts.push({ type: "CNAME", name, content, proxied: true, comment: "hetp4401/runner" });
+      if (!rs.length) posts.push({ type: "CNAME", name, content, proxied: true, comment: DNS_COMMENT });
       else if (r && r.content !== content && ours.has(r.content)) patches.push({ id: r.id, content });
       else if (!r || !ours.has(r.content)) notes.push(`${name} is already used by another DNS record, so it can't point at its machine`);
     }
