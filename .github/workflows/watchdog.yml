@@ -30,7 +30,7 @@ jobs:
         run: |
           [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
           start=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" \
-            "https://control.billybishop4-workers.xyz/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -r '.start[]?') # empty when nothing is missing
+            "https://runners.billybishop4-workers.xyz/api/claim?pool=$POOL&size=$POOL_SIZE" | jq -r '.start[]?') # empty when nothing is missing
           rc=0
           for m in $start; do
             if gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $m"; then

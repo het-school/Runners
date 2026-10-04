@@ -7,21 +7,22 @@
 #   runnerctl get <name> [version]   print a project's compose file and other files
 #   runnerctl disable|enable <name>  stop or start a project on every machine (the spec is kept)
 #   runnerctl rm <name>              delete a project and its versions
-#   runnerctl password <name>        set an app's password (asked for); changing the app in the web app needs it
+#   runnerctl password <name>        lock an app with an app password (asked for), or change it; changing the app then needs it
 #   runnerctl status                 projects and machines
 #   runnerctl roll [machine]         replace machines one at a time (e.g. after an agent change)
-#   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool github 10)
+#   runnerctl pool <name> <n>        how many machines to keep in a pool (e.g. pool main 10)
 #   runnerctl join-token             the token another host joins with (see /install.sh)
 #   runnerctl move <name> <from> [to] [replica]  move one copy of a project off a machine (new copy first, old one removed once
 #                                    healthy); with two copies there, say which replica
 #   runnerctl evict <machine>        move every placed project off a machine
 #   runnerctl rebalance on|off       automatic rebalancing (hot or overloaded machines move a project off)
 #   runnerctl retire <machine>       retire an empty slot: delete its tunnel and <app>-n names
-# The fleet password comes from $FLEET_PASSWORD or ~/.config/runnerctl/fleet-password.
+# The admin password (the fleet owner's: locked apps and fleet changes need it, nothing else does) comes from
+# $ADMIN_PASSWORD or ~/.config/runnerctl/admin-password.
 set -euo pipefail
-URL=${RUNNER_URL:-https://control.billybishop4-workers.xyz}
-FLEET_PASSWORD=${FLEET_PASSWORD:-$(cat ~/.config/runnerctl/fleet-password 2>/dev/null || true)}
-api() { curl -sS -H "x-fleet-password: $FLEET_PASSWORD" -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
+URL=${RUNNER_URL:-https://runners.billybishop4-workers.xyz}
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-$(cat ~/.config/runnerctl/admin-password 2>/dev/null || cat ~/.config/runnerctl/fleet-password 2>/dev/null || true)}
+api() { curl -sS ${ADMIN_PASSWORD:+-H "x-admin-password: $ADMIN_PASSWORD"} -H 'Content-Type: application/json' "$URL/api$1" "${@:2}"; }
 usage() { sed -n '2,20p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 cmd=${1:-}

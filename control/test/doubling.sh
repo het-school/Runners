@@ -6,12 +6,11 @@
 HERE=$(cd "$(dirname "$0")" && pwd)
 cd "$HERE/.."
 . "$HERE/stop.sh"
-rm -rf /tmp/runner-test-state
 (node "$HERE/cloudflare-mock.mjs" > /tmp/runner-test-mock.log 2>&1 &)
-(setsid npx wrangler dev --port 8911 --var CF_API_BASE:http://127.0.0.1:8790 --var CF_API_TOKEN:x --var FLEET_PASSWORD:adm --var JOIN_TOKEN:node --var 'POOLS:{"main":5}' --persist-to /tmp/runner-test-state > /tmp/runner-test-dev.log 2>&1 &)
+. "$HERE/start.sh" ADMIN_PASSWORD=adm JOIN_TOKEN=node 'POOLS={"main":5}'
 for i in $(seq 1 30); do curl -sf localhost:8911/api/status >/dev/null && break; sleep 1; done
 B=localhost:8911; START=$(date +%s%3N)
-A='x-fleet-password: adm'
+A='x-admin-password: adm'
 J=(-H content-type:application/json)
 check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  WRONG $1: wanted [$2], got [$3]"; fi; }
 put() { curl -s -X PUT $B/api/projects/$1 -H "$A" "${J[@]}" -d "$2" > /dev/null; }
@@ -43,7 +42,7 @@ check "the first copy's compose is untouched" true "$(echo "$d" | jq -r '.desire
 check "the second copy's reason says so" true "$(curl -s $B/api/status | jq '.projects[0].placed[] | select(.replica == 6) | .reason | startswith("copy 2 on this machine")')"
 echo "== routes: replica 6's URL goes to machine 5, like replica 1's"
 tick
-check "routes for replicas 1 and 6" "5 5" "$(curl -s $B/internal/routes | jq -r '.replicas | "\(.["web-1"][0]) \(.["web-6"][0])"')"
+check "the names of replicas 1 and 6 point at machine 5's tunnel" "tun-runner-5 tun-runner-5" "$(curl -s $B/internal/dns | jq -r '.names | "\(.["web-1"]) \(.["web-6"])"')"
 echo "== move replica 6 off machine 5 onto machine 3 (which has replica 4): a second copy there"
 curl -s -X POST "$B/api/projects/web/move?from=5&replica=6&to=3" -H "$A" > /dev/null
 check "replica 6 is on 3 now, with moved ports, while the old copy leaves" "6@3*" "$(curl -s $B/api/status | jq -r '.projects[0].placed[] | select(.replica == 6 and (.leaving | not)) | "\(.replica)@\(.machine)\(if .moved then "*" else "" end)"')"
