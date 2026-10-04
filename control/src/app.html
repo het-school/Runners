@@ -649,10 +649,18 @@ function runsBy() {
 }
 // A slot whose only live run is on its way out.
 const leavingSlot = (n) => S.status.runs.some((r) => r.machine === n && r.live && r.retiring);
+// A slot with no live machine whose last run was a pool member, with that pool whole again: the machine was replaced
+// (pool members are interchangeable; a replacement takes whatever slot is free), which is routine, not a problem. A
+// standalone host, or a member of a pool that's short, is down.
+const replacedSlot = (n) => {
+  const last = S.status.runs.filter((r) => r.machine === n).sort((a, b) => b.seen - a.seen)[0];
+  const pool = last?.pool ? S.status.pools.find((p) => p.name === last.pool) : null;
+  return Boolean(pool && pool.live >= pool.size);
+};
 function machineState(n, r) {
   if (!r && (S.status.starting ?? []).includes(n)) return { kind: "deploying", text: "being started" };
   if (!r && leavingSlot(n)) return { kind: "leaving", text: "leaving" };
-  if (!r) return { kind: "gone", text: "down" };
+  if (!r) return replacedSlot(n) ? { kind: "leaving", text: "replaced" } : { kind: "gone", text: "down" };
   if (r.handover || r.replacing) return { kind: "deploying", text: "replacing itself" };
   if (r.draining) return { kind: "leaving", text: "going down soon" };
   if (!r.ready) return { kind: "deploying", text: "starting up" };
@@ -731,7 +739,7 @@ function problems() {
       out.push({ kind: "deploying", href, text: `${p.name}: ${plural(p.replicas - p.staying, "replica")} waiting for a machine${p.blocked ? `: ${p.blocked}` : ""}` });
     }
   }
-  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n) && !leavingSlot(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
+  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n) && !leavingSlot(n) && !replacedSlot(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
   for (const n of st.rebalance.hot) out.push({ kind: "failed", href: machineHref(n), text: `Machine ${n} is hot (CPU or memory high for 5 minutes)` });
   const short = st.pools.reduce((n, x) => n + Math.max(0, x.size - x.live), 0); // the machines the fleet should have that aren't up
   const starting = (st.starting ?? []).length;
