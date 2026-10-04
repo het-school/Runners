@@ -660,6 +660,7 @@ const replacedSlot = (n) => {
 function machineState(n, r) {
   if (!r && (S.status.starting ?? []).includes(n)) return { kind: "deploying", text: "being started" };
   if (!r && leavingSlot(n)) return { kind: "leaving", text: "leaving" };
+  if (!r && S.status.settling) return { kind: "deploying", text: "not heard from yet" }; // the control plane just (re)started
   if (!r) return replacedSlot(n) ? { kind: "leaving", text: "replaced" } : { kind: "gone", text: "down" };
   if (r.handover || r.replacing) return { kind: "deploying", text: "replacing itself" };
   if (r.draining) return { kind: "leaving", text: "going down soon" };
@@ -739,11 +740,14 @@ function problems() {
       out.push({ kind: "deploying", href, text: `${p.name}: ${plural(p.replicas - p.staying, "replica")} waiting for a machine${p.blocked ? `: ${p.blocked}` : ""}` });
     }
   }
-  for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n) && !leavingSlot(n) && !replacedSlot(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
+  // Just after the control plane (re)started, or became reachable again, machines it hasn't heard from yet aren't down.
+  const waiting = st.settling ? st.slots.filter((n) => !runs.has(n) && !(st.starting ?? []).includes(n)).length : 0;
+  if (waiting) out.push({ kind: "deploying", href: "#/machines", text: `The control plane just (re)started: ${plural(waiting, "machine")} not heard from yet` });
+  else for (const n of st.slots) if (!runs.has(n) && !(st.starting ?? []).includes(n) && !leavingSlot(n) && !replacedSlot(n)) out.push({ kind: "gone", href: machineHref(n), text: `Machine ${n} is down` });
   for (const n of st.rebalance.hot) out.push({ kind: "failed", href: machineHref(n), text: `Machine ${n} is hot (CPU or memory high for 5 minutes)` });
   const short = st.pools.reduce((n, x) => n + Math.max(0, x.size - x.live), 0); // the machines the fleet should have that aren't up
   const starting = (st.starting ?? []).length;
-  if (short) out.push({ kind: "deploying", href: "#/machines", text: `${plural(short, "machine")} missing${starting ? `; ${plural(starting, "replacement")} starting` : ""}` });
+  if (short && !waiting) out.push({ kind: "deploying", href: "#/machines", text: `${plural(short, "machine")} missing${starting ? `; ${plural(starting, "replacement")} starting` : ""}` });
   return out;
 }
 const problemList = (list) => list.length

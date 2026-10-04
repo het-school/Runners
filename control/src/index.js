@@ -1985,6 +1985,7 @@ export class Control {
       rebalance: { on: this.rebalanceOn(), log: this.rebalanceLog.slice(0, 10), hot: [...this.liveMachines(now).keys()].filter((m) => this.isHot(m, now)) },
       // Slots to show: ones with a recent run, plus ones a machine is starting for.
       starting: [...this.starts].filter(([n, at]) => now - at < START_WAIT_MS && !this.liveRuns(now).some((r) => r.machine === n)).map(([n]) => n),
+      settling: this.settling(now), // just (re)started, or reachable again after a gap: machines not heard from yet aren't down
       slots: [...new Set([
         ...[...this.runs.values()].filter((r) => now - r.seen < 3600_000).map((r) => r.machine),
         ...[...this.starts].filter(([, at]) => now - at < START_WAIT_MS).map(([n]) => n),
