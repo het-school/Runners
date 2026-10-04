@@ -20,7 +20,7 @@ jobs:
   agent:
     name: machine ${{ inputs.machine }}
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to a new release now and then, and a machine shouldn't change under the fleet
-    timeout-minutes: 360 # GitHub's limit; the agent leaves at about 355 minutes
+    timeout-minutes: 360 # GitHub's limit; the agent leaves at 355 minutes at the latest (see the drain timer below)
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,10 +46,12 @@ jobs:
             || gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
         run: |
           [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
-          # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down
-          # (4h15m-5h15m in, at random, so machines don't all hand over together). The agent isn't involved. The ping
-          # keeps trying for up to 15 minutes: losing it would mean a cold restart of this machine's replicas elsewhere.
-          ( sleep $(( 255*60 + RANDOM % 3600 )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
+          # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down.
+          # Each machine lives a random 3 h to 5 h 50 min before it asks to be replaced, so machines started together (a
+          # new pool, a rolling restart, a control plane outage) spread out instead of all leaving together 6 hours later.
+          # The agent isn't involved. The ping keeps trying for up to 15 minutes: losing it would mean a cold restart of
+          # this machine's replicas elsewhere.
+          ( sleep $(( 180*60 + RANDOM % (170*60) )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
               -X POST -H "Authorization: Bearer $JOIN_TOKEN" -H 'Content-Type: application/json' \
               -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
           # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
