@@ -20,7 +20,7 @@ jobs:
   agent:
     name: machine ${{ inputs.machine }}
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to a new release now and then, and a machine shouldn't change under the fleet
-    timeout-minutes: 360 # GitHub's limit; the agent leaves at 355 minutes at the latest (see the drain timer below)
+    timeout-minutes: 360 # GitHub's limit; the agent leaves at 355 minutes at the latest (LIFETIME_MIN below)
     steps:
       - uses: actions/checkout@v7
         with:
@@ -39,6 +39,9 @@ jobs:
           POOL: ${{ vars.POOL || 'github' }} # this repo's pool on the control plane (set the POOL variable in a second account's copy)
           POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
           MACHINE: ${{ inputs.machine }}
+          # This job's lifetime: the agent reports its deadline, and the control plane schedules its departure from it
+          # (a successor takes over between 4 h and 5 h 10 min in, spread across the pool). Matches the timeout below.
+          LIFETIME_MIN: 355
           # How a machine of this pool starts another: a run of this workflow for slot $SLOT, unless one is already queued for it
           # (a run that can't start yet would otherwise be asked for again and again).
           START_CMD: >-
@@ -46,12 +49,9 @@ jobs:
             || gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
         run: |
           [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
-          # The control plane doesn't know this is a 6-hour job; this timer tells it when the machine is going down.
-          # Each machine lives a random 3 h to 5 h 50 min before it asks to be replaced, so machines started together (a
-          # new pool, a rolling restart, a control plane outage) spread out instead of all leaving together 6 hours later.
-          # The agent isn't involved. The ping keeps trying for up to 15 minutes: losing it would mean a cold restart of
-          # this machine's replicas elsewhere.
-          ( sleep $(( 180*60 + RANDOM % (170*60) )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
+          # A backstop for the control plane's own scheduling (for one release): at 330 minutes, if this machine is still
+          # here, it asks to leave, which the control plane treats as urgent. The ping keeps trying for up to 15 minutes.
+          ( sleep $(( 330*60 )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
               -X POST -H "Authorization: Bearer $JOIN_TOKEN" -H 'Content-Type: application/json' \
               -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
           # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
