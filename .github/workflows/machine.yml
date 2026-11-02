@@ -1,16 +1,17 @@
 name: machine
 run-name: machine ${{ inputs.machine }}
 
-# One machine of the fleet. Its agent joins the control plane (https://runners.billybishop4-workers.xyz), which
+# One machine of the fleet. Its agent joins the control plane configured in vars.CONTROL_URL, which
 # gives it slot n and the token for tunnel runner-n, and keeps the projects in line. Everything about GitHub is
 # here, not in the agent: this job's lifetime and how a machine is started (START_CMD).
-# Machines are started by the other machines and by the watchdog workflow; start one here to add it right away.
+# Supply machines through this workflow; an agent may start its own handover replacement.
 on:
   workflow_dispatch:
     inputs:
       machine:
-        description: Slot to take (the control plane gives slot n the tunnel runner-n)
-        required: true
+        description: Existing slot for a handover, or 0 to join as a new machine
+        required: false
+        default: "0"
 
 permissions:
   actions: write # the agent starts replacement machines
@@ -18,6 +19,7 @@ permissions:
 
 jobs:
   agent:
+    if: ${{ vars.CONTROL_URL != '' }}
     name: machine ${{ inputs.machine }}
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to a new release now and then, and a machine shouldn't change under the fleet
     timeout-minutes: 360 # GitHub's limit; the agent leaves at 355 minutes at the latest (LIFETIME_MIN below)
@@ -31,14 +33,14 @@ jobs:
         id: agent
         shell: bash
         env:
-          CONTROL_URL: https://runners.billybishop4-workers.xyz
+          CONTROL_URL: ${{ vars.CONTROL_URL }}
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-          # How the agent sees this machine: a member of pool POOL, in slot MACHINE. It names itself (its hostname) and makes up its own ID.
+          # Required origin metadata; it never declares how many servers should exist.
           RUNNER_DATA: ${{ runner.temp }}
-          POOL: ${{ vars.POOL || 'github' }} # this repo's pool on the control plane (set the POOL variable in a second account's copy)
-          POOL_SIZE: ${{ vars.POOL_SIZE }} # how many machines this pool keeps running (empty: the control plane's default)
+          SERVER_TAG: ${{ vars.SERVER_TAG || vars.POOL || 'github' }}
           MACHINE: ${{ inputs.machine }}
+          REGION: ${{ vars.REGION }} # optional custom placement label; otherwise use automatic US grouping when available
           # This job's lifetime: the agent reports its deadline, and the control plane schedules its departure from it
           # (a successor takes over between 4 h and 5 h 10 min in, spread across the pool). Matches the timeout below.
           LIFETIME_MIN: 355
@@ -54,52 +56,27 @@ jobs:
           ( sleep $(( 330*60 )) && curl -sS --max-time 20 --retry 20 --retry-all-errors --retry-max-time 900 \
               -X POST -H "Authorization: Bearer $JOIN_TOKEN" -H 'Content-Type: application/json' \
               -d "{\"agent\": \"$(cat "$RUNNER_DATA/agent-id")\"}" "$CONTROL_URL/api/drain" ) &
-          # Stop the agent (SIGTERM, so it says it's leaving) before GitHub kills the job at 6 hours.
+          # Stop before GitHub kills the job at 6 hours; the deadline and backstop drain announce departure.
           # exec: the agent is the step's own process, so a cancelled run's signal reaches it too (timeout passes it on and keeps its exit status).
           exec timeout -k 2m --preserve-status 355m node agent/agent.mjs
-
-      # A run that ended on its own (its time was up, or it was told to leave): ask the control plane what the pool is
-      # missing and start it. Running machines start each other within a couple of minutes, but when every machine
-      # of the pool ends at about the same time there's nobody left to do it, and the watchdog's schedule isn't
-      # reliable. Only what the control plane names is started: a slot that's live refuses a second machine, and
-      # the control plane being unreachable is left to the watchdog. Not after a cancel: cancelling the runs is how a
-      # pool is stopped by hand.
-      - name: Keep the pool whole
-        if: ${{ !cancelled() && steps.agent.outcome == 'success' }}
-        shell: bash
-        env:
-          CONTROL_URL: https://runners.billybishop4-workers.xyz
-          JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
-          GH_TOKEN: ${{ github.token }}
-          POOL: ${{ vars.POOL || 'github' }}
-          POOL_SIZE: ${{ vars.POOL_SIZE }}
-        run: |
-          if ! answer=$(curl -fsS --max-time 20 --retry 3 -X POST -H "Authorization: Bearer $JOIN_TOKEN" "$CONTROL_URL/api/claim?pool=$POOL&size=$POOL_SIZE"); then
-            echo "::warning::the control plane didn't answer; the watchdog starts whatever is missing"
-            exit 0
-          fi
-          start=$(echo "$answer" | jq -r '.start[]?') # nothing when the pool is whole (jq -e would make that an error)
-          [ -n "$start" ] || echo "every machine of the pool is running or starting"
-          rc=0
-          for m in $start; do
-            if gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $m"; then
-              echo "machine $m is already queued"
-            elif gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$m"; then
-              echo "started machine $m"
-            else
-              echo "::error::couldn't start machine $m"; rc=1
-            fi
-          done
-          exit $rc
 
       # The agent's own containers only: what the apps log is theirs, and these run logs are public.
       - name: Router and tunnel logs
         if: always()
+        env:
+          CONTROL_URL: ${{ vars.CONTROL_URL }}
         run: |
-          docker stop -t 10 tunnel > /dev/null 2>&1 || true
-          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-          for c in router tunnel; do
-            echo "::group::$c"
-            docker logs --tail 100 "$c" 2>&1 || true
-            echo "::endgroup::"
+          [ -f agent/runtime.mjs ] || { echo "No ownership-aware agent checkout; skipping infrastructure logs."; exit 0; }
+          owner=$(node --input-type=module -e 'import {namespace} from "./agent/runtime.mjs"; console.log(namespace(process.env.CONTROL_URL))')
+          for component in tunnel router; do
+            docker ps -a --filter "label=io.runners.owner=$owner" --filter "label=io.runners.component=$component" \
+              --format '{{.ID}} {{.Label "io.runners.copy"}}' | while read -r container copy; do
+              [ -n "$container" ] && [ -z "$copy" ] || continue
+              # App-provided component labels must never expose app logs here.
+              if [ "$component" = tunnel ]; then docker stop -t 10 "$container" >/dev/null 2>&1 || true; fi
+              echo "::group::$component ($container)"
+              docker inspect --format '{{.Name}} {{.State.Status}} {{.Config.Image}}' "$container"
+              docker logs --tail 100 "$container" 2>&1 || true
+              echo "::endgroup::"
+            done
           done
