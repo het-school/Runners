@@ -44,4 +44,5 @@ jobs:
           CAPACITY_TRIGGER: ${{ vars.CAPACITY_TRIGGER || 'schedule' }}
           CAPACITY_SLOT: ${{ inputs.refill_slot }}
           CAPACITY_PHASE_MIN: ${{ vars.CAPACITY_PHASE_MIN || '2' }}
+          CAPACITY_INTERVAL_MIN: ${{ vars.CAPACITY_INTERVAL_MIN || '10' }}
         run: node .github/scripts/capacity.mjs
