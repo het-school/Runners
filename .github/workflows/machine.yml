@@ -1,5 +1,5 @@
 name: machine
-run-name: machine scheduled ${{ inputs.schedule_run }}
+run-name: machine capacity ${{ inputs.schedule_run }}
 
 # One machine of the fleet. Its agent joins the control plane configured in vars.CONTROL_URL, which
 # gives it a fresh slot and keeps the projects in line. The account's cron
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       schedule_run:
-        description: Scheduled watchdog run in this repository that requested this host
+        description: Scheduled or provider-triggered capacity run that requested this host
         required: true
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
           repository: ${{ vars.AGENT_REPO || github.repository }} # another account's copy runs this repo's agent (README: Another GitHub account)
           persist-credentials: false # the agent never uses git, so the job's token needn't be left on disk for the apps to find
 
-      - name: Verify scheduled origin
+      - name: Verify capacity origin
         env:
           GH_TOKEN: ${{ github.token }}
           SCHEDULE_RUN: ${{ inputs.schedule_run }}

@@ -1,13 +1,21 @@
 name: Machine schedule
+run-name: ${{ inputs.refill_slot && format('Machine schedule (refill {0})', inputs.refill_slot) || 'Machine schedule' }}
 
-# This account's only automatic supply trigger. Use a different minute offset
+# Schedule mode supplies this account directly. Provider mode accepts wakeups
+# from the replicated provider app instead. Use a different minute offset
 # in each participating repository; keep the ten-minute interval. Explicit
 # minute lists make each account's phase visible when reviewing the workflow.
 on:
   schedule:
     - cron: "5,15,25,35,45,55 * * * *"
-  # A manual run previews the plan and never dispatches machines.
+  # Empty input previews; provider mode requires a fresh UTC refill slot.
   workflow_dispatch:
+    inputs:
+      refill_slot:
+        description: UTC refill slot in milliseconds, supplied by the provider app
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: provider-capacity
@@ -19,7 +27,7 @@ permissions:
 
 jobs:
   watchdog:
-    if: ${{ vars.CONTROL_URL != '' && (vars.MACHINE_COUNT != '' || vars.POOL_SIZE != '') }}
+    if: ${{ vars.CONTROL_URL != '' && (vars.MACHINE_COUNT != '' || vars.POOL_SIZE != '') && (github.event_name != 'schedule' || vars.CAPACITY_TRIGGER != 'provider') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -33,4 +41,7 @@ jobs:
           MACHINE_COUNT: ${{ vars.MACHINE_COUNT || vars.POOL_SIZE }}
           SERVER_TAG: ${{ vars.SERVER_TAG || vars.POOL || 'github' }}
           MACHINE_REF: ${{ github.event.repository.default_branch }}
+          CAPACITY_TRIGGER: ${{ vars.CAPACITY_TRIGGER || 'schedule' }}
+          CAPACITY_SLOT: ${{ inputs.refill_slot }}
+          CAPACITY_PHASE_MIN: ${{ vars.CAPACITY_PHASE_MIN || '2' }}
         run: node .github/scripts/capacity.mjs
