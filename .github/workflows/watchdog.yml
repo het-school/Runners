@@ -1,10 +1,11 @@
-name: watchdog
+name: Machine schedule
 
 # This account's only automatic supply trigger. Use a different minute offset
-# in each participating repository; keep the ten-minute interval.
+# in each participating repository; keep the ten-minute interval. Explicit
+# minute lists make each account's phase visible when reviewing the workflow.
 on:
   schedule:
-    - cron: "4-59/10 * * * *"
+    - cron: "5,15,25,35,45,55 * * * *"
   # A manual run previews the plan and never dispatches machines.
   workflow_dispatch:
 
