@@ -1,19 +1,19 @@
 name: roll
 
-# The agent changed: replace the machines one at a time so they all run the new code.
+# Explicit operator maintenance only. Scheduled hosts pick up agent changes
+# naturally; a source push must not expire a whole provider cohort.
 on:
-  push:
-    branches: [main]
-    paths: ["agent/**", ".github/workflows/machine.yml"]
   workflow_dispatch:
 
 jobs:
   roll:
+    if: ${{ vars.CONTROL_URL != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Ask the control plane for a rolling restart
         env:
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
+          CONTROL_URL: ${{ vars.CONTROL_URL }}
         run: |
-          curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" https://runners.billybishop4-workers.xyz/api/roll
+          curl -sSf -X POST -H "Authorization: Bearer $JOIN_TOKEN" "$CONTROL_URL/api/roll"

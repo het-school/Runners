@@ -1,26 +1,24 @@
 name: machine
-run-name: machine ${{ inputs.machine }}
+run-name: machine scheduled ${{ inputs.schedule_run }}
 
 # One machine of the fleet. Its agent joins the control plane configured in vars.CONTROL_URL, which
-# gives it slot n and the token for tunnel runner-n, and keeps the projects in line. Everything about GitHub is
-# here, not in the agent: this job's lifetime and how a machine is started (START_CMD).
-# Supply machines through this workflow; an agent may start its own handover replacement.
+# gives it a fresh slot and keeps the projects in line. The account's cron
+# supplies hosts; this job only declares its lifetime and runs the generic agent.
 on:
   workflow_dispatch:
     inputs:
-      machine:
-        description: Existing slot for a handover, or 0 to join as a new machine
-        required: false
-        default: "0"
+      schedule_run:
+        description: Scheduled watchdog run in this repository that requested this host
+        required: true
 
 permissions:
-  actions: write # the agent starts replacement machines
+  actions: read # verify the scheduled origin; machine jobs cannot dispatch hosts
   contents: read
 
 jobs:
   agent:
     if: ${{ vars.CONTROL_URL != '' }}
-    name: machine ${{ inputs.machine }}
+    name: machine
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to a new release now and then, and a machine shouldn't change under the fleet
     timeout-minutes: 360 # GitHub's limit; the agent leaves at 355 minutes at the latest (LIFETIME_MIN below)
     steps:
@@ -29,26 +27,26 @@ jobs:
           repository: ${{ vars.AGENT_REPO || github.repository }} # another account's copy runs this repo's agent (README: Another GitHub account)
           persist-credentials: false # the agent never uses git, so the job's token needn't be left on disk for the apps to find
 
+      - name: Verify scheduled origin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SCHEDULE_RUN: ${{ inputs.schedule_run }}
+        run: node .github/scripts/verify-schedule.mjs
+
       - name: Agent
         id: agent
         shell: bash
         env:
           CONTROL_URL: ${{ vars.CONTROL_URL }}
           JOIN_TOKEN: ${{ secrets.JOIN_TOKEN }}
-          GH_TOKEN: ${{ github.token }}
           # Required origin metadata; it never declares how many servers should exist.
           RUNNER_DATA: ${{ runner.temp }}
           SERVER_TAG: ${{ vars.SERVER_TAG || vars.POOL || 'github' }}
-          MACHINE: ${{ inputs.machine }}
+          MACHINE: "0"
           REGION: ${{ vars.REGION }} # optional custom placement label; otherwise use automatic US grouping when available
           # This job's lifetime: the agent reports its deadline, and the control plane schedules its departure from it
-          # (a successor takes over between 4 h and 5 h 10 min in, spread across the pool). Matches the timeout below.
+          # (apps move off between 4 h and 5 h 10 min in, spread across the pool). Matches the timeout below.
           LIFETIME_MIN: 355
-          # How a machine of this pool starts another: a run of this workflow for slot $SLOT, unless one is already queued for it
-          # (a run that can't start yet would otherwise be asked for again and again).
-          START_CMD: >-
-            gh run list -R "$GITHUB_REPOSITORY" -w machine.yml -s queued --json displayTitle -q '.[].displayTitle' | grep -qx "machine $SLOT"
-            || gh workflow run machine.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f machine="$SLOT"
         run: |
           [ -n "$JOIN_TOKEN" ] || { echo "::error::the JOIN_TOKEN secret isn't set"; exit 1; }
           # A backstop for the control plane's own scheduling (for one release): at 330 minutes, if this machine is still

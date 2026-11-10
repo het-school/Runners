@@ -1,13 +1,12 @@
 name: watchdog
 
-# Keep this repository's provider capacity supplied. The CP has no size targets.
+# This account's only automatic supply trigger. Use a different minute offset
+# in each participating repository; keep the ten-minute interval.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "4-59/10 * * * *"
+  # A manual run previews the plan and never dispatches machines.
   workflow_dispatch:
-  workflow_run:
-    workflows: [machine]
-    types: [completed]
 
 concurrency:
   group: provider-capacity
@@ -27,10 +26,9 @@ jobs:
         with:
           repository: ${{ vars.AGENT_REPO || github.repository }}
           persist-credentials: false
-      - name: Supply missing machines
+      - name: Reconcile scheduled machine supply
         env:
           GH_TOKEN: ${{ github.token }}
-          CONTROL_URL: ${{ vars.CONTROL_URL }}
           MACHINE_COUNT: ${{ vars.MACHINE_COUNT || vars.POOL_SIZE }}
           SERVER_TAG: ${{ vars.SERVER_TAG || vars.POOL || 'github' }}
           MACHINE_REF: ${{ github.event.repository.default_branch }}
